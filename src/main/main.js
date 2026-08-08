@@ -1,0 +1,370 @@
+/*
+ * syncto — Folder comparison and synchronization
+ * Copyright (C) 2026 Just Edit (Arnaud Augst)
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, powerSaveBlocker } = require('electron');
+const path  = require('path');
+const fs    = require('fs');
+const https = require('https');
+
+// ── Update check — reads a small shared JSON hosted on GitHub ──────────────
+// Same mechanism as ingesto: version.json at the repo root is the single
+// source of truth. Never blocks startup, fails silently on any network issue.
+const UPDATE_URL = 'https://raw.githubusercontent.com/noar-justedit/syncto/main/version.json';
+function semverGt(a, b) {
+  const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
+  const pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0, y = pb[i] || 0;
+    if (x > y) return true;
+    if (x < y) return false;
+  }
+  return false;
+}
+// GET a URL following up to 3 redirects (https.get does NOT follow them itself).
+function fetchFollow(url, hops, cb) {
+  if (hops > 3) return cb(null);
+  try {
+    const req = https.get(url, { timeout: 4000 }, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        res.resume();
+        let next; try { next = new URL(res.headers.location, url).toString(); } catch (e) { return cb(null); }
+        return fetchFollow(next, hops + 1, cb);
+      }
+      if (res.statusCode !== 200) { res.resume(); return cb(null); }
+      let body = '';
+      res.on('data', c => body += c);
+      res.on('end', () => cb(body));
+    });
+    req.on('timeout', () => req.destroy());
+    req.on('error', () => cb(null));
+  } catch (e) { cb(null); }
+}
+function checkForUpdate() {
+  fetchFollow(UPDATE_URL, 0, (body) => {
+    if (!body) return;
+    let data; try { data = JSON.parse(body); } catch (e) { return; }
+    if (!data || !data.version) return;
+    if (semverGt(data.version, appVersion()) && win && !win.isDestroyed()) {
+      win.webContents.send('update-available', {
+        version: data.version,
+        url: data.url || 'https://github.com/noar-justedit/syncto/releases/latest',
+      });
+    }
+  });
+}
+
+const { MultiSession, verifyFolder } = require('./core/session');
+const { FsPool } = require('./fs/afs');
+const { Prefs, defaultJob, loadJob, saveJob, jobNameFromPath, JOB_EXT } = require('./config');
+
+const IS_MAC = process.platform === 'darwin';
+const DEV    = process.argv.includes('--dev');
+
+let win = null;
+let prefs = null;
+let session = null;
+let currentJobPath = '';
+let powerBlockId = null;
+
+const tokens = {
+  compare: { cancelled: false },
+  sync   : { cancelled: false, paused: false },
+  verify : { cancelled: false },
+};
+
+function appVersion() {
+  try { return require('../../package.json').version; } catch (_) { return '0.0.0'; }
+}
+
+// ── Window ─────────────────────────────────────────────────────────────────
+function createWindow() {
+  const w = (prefs.data.window && prefs.data.window.width)  || 1280;
+  const h = (prefs.data.window && prefs.data.window.height) || 820;
+
+  win = new BrowserWindow({
+    width: w, height: h, minWidth: 1040, minHeight: 640,
+    backgroundColor: '#0e0f13',
+    show: false,
+    titleBarStyle: IS_MAC ? 'hiddenInset' : 'hidden',
+    trafficLightPosition: IS_MAC ? { x: 18, y: 18 } : undefined,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+
+  win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+  win.once('ready-to-show', () => { win.show(); if (DEV) win.webContents.openDevTools({ mode: 'detach' }); });
+  win.webContents.once('did-finish-load', () => { setTimeout(checkForUpdate, 1500); });
+
+  win.on('resize', () => {
+    if (!win) return;
+    const [ww, hh] = win.getSize();
+    prefs.save({ window: { width: ww, height: hh } });
+  });
+  win.on('maximize',   () => win.webContents.send('menu', { action: 'maximized',   value: true  }));
+  win.on('unmaximize', () => win.webContents.send('menu', { action: 'maximized',   value: false }));
+  win.on('closed', () => { win = null; });
+}
+
+function buildMenu() {
+  const send = action => () => { if (win) win.webContents.send('menu', { action }); };
+  const template = [
+    ...(IS_MAC ? [{ role: 'appMenu' }] : []),
+    {
+      label: 'File',
+      submenu: [
+        { label: 'New job',      accelerator: 'CmdOrCtrl+N', click: send('job-new') },
+        { label: 'Open job…',    accelerator: 'CmdOrCtrl+O', click: send('job-open') },
+        { label: 'Save job',     accelerator: 'CmdOrCtrl+S', click: send('job-save') },
+        { label: 'Save job as…', accelerator: 'CmdOrCtrl+Shift+S', click: send('job-save-as') },
+        { type: 'separator' },
+        IS_MAC ? { role: 'close' } : { role: 'quit' },
+      ],
+    },
+    {
+      label: 'Actions',
+      submenu: [
+        { label: 'Compare',     accelerator: 'F5', click: send('compare') },
+        { label: 'Synchronize', accelerator: 'F9', click: send('sync') },
+        { type: 'separator' },
+        { label: 'Swap sides',  accelerator: 'CmdOrCtrl+T', click: send('swap') },
+        { label: 'Invert all directions', click: send('invert') },
+        { type: 'separator' },
+        { label: 'Verify a folder…', click: send('verify') },
+      ],
+    },
+    { role: 'viewMenu' },
+    { role: 'windowMenu' },
+    {
+      role: 'help',
+      submenu: [
+        { label: 'syncto on GitHub', click: () => shell.openExternal('https://github.com/noar-justedit/syncto') },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+// ── Lifecycle ──────────────────────────────────────────────────────────────
+app.whenReady().then(() => {
+  prefs = new Prefs(app.getPath('userData'));
+  prefs.load();
+  session = new MultiSession();
+  buildMenu();
+  createWindow();
+  app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+});
+
+app.on('window-all-closed', async () => {
+  if (session) { try { await session.close(); } catch (_) {} }
+  if (!IS_MAC) app.quit();
+});
+
+// ── Small helpers ──────────────────────────────────────────────────────────
+function send(channel, payload) { if (win && !win.isDestroyed()) win.webContents.send(channel, payload); }
+
+function holdSleep(on) {
+  if (on && powerBlockId == null) powerBlockId = powerSaveBlocker.start('prevent-app-suspension');
+  if (!on && powerBlockId != null) { try { powerSaveBlocker.stop(powerBlockId); } catch (_) {} powerBlockId = null; }
+}
+
+async function trashItem(fsx, absPath) {
+  if (fsx.kind !== 'native') return false;
+  try { await shell.trashItem(absPath); return true; }
+  catch (_) { return false; }
+}
+
+// ── IPC: basics ────────────────────────────────────────────────────────────
+ipcMain.handle('get-version', () => appVersion());
+ipcMain.handle('load-prefs',  () => prefs.data);
+ipcMain.handle('save-prefs',  (_, p) => prefs.save(p));
+
+ipcMain.handle('browse-folder', async (_, title) => {
+  const res = await dialog.showOpenDialog(win, {
+    title: title || 'Choose a folder',
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  return (res.canceled || !res.filePaths.length) ? null : res.filePaths[0];
+});
+
+ipcMain.handle('reveal-path',  (_, p) => { try { shell.showItemInFolder(p); } catch (_) {} });
+ipcMain.handle('open-path',    (_, p) => shell.openPath(p));
+ipcMain.handle('open-external',(_, u) => shell.openExternal(u));
+
+ipcMain.handle('folder-exists', async (_, p) => {
+  try { return fs.statSync(p).isDirectory(); } catch (_) { return false; }
+});
+
+ipcMain.handle('disk-free', async (_, p) => {
+  try { const s = fs.statfsSync(p); return { free: s.bavail * s.bsize, total: s.blocks * s.bsize }; }
+  catch (_) { return null; }
+});
+
+// ── IPC: jobs ──────────────────────────────────────────────────────────────
+// The recent list drives Zone 1: most recent first, unique by path, capped.
+function pushRecent(name, p) {
+  const list = (prefs.data.recent || []).filter(r => r && r.path !== p);
+  list.unshift({ name: name || path.basename(p), path: p });
+  prefs.data.recent = list.slice(0, 10);
+  prefs.save();
+  return prefs.data.recent;
+}
+
+function openJobFile(p) {
+  const job = loadJob(p);
+  // The job's name is the file's name — whatever was stored inside is ignored.
+  job.name = jobNameFromPath(p);
+  // Auto-sync NEVER arms itself: whatever the file says, it always starts
+  // disarmed and only runs after the user confirms it in this session.
+  if (job.autoSync) job.autoSync.enabled = false;
+  currentJobPath = p;
+  prefs.save({ lastJobPath: p });
+  const recent = pushRecent(job.name, p);
+  return { job, path: p, recent };
+}
+
+ipcMain.handle('job-new', () => { currentJobPath = ''; return defaultJob(); });
+
+ipcMain.handle('job-open', async () => {
+  const res = await dialog.showOpenDialog(win, {
+    title: 'Open a syncto job',
+    filters: [{ name: 'syncto job', extensions: ['syncto', 'json'] }],
+    properties: ['openFile'],
+  });
+  if (res.canceled || !res.filePaths.length) return null;
+  try { return openJobFile(res.filePaths[0]); }
+  catch (err) {
+    dialog.showErrorBox('syncto', `Could not open that job:\n${err.message}`);
+    return null;
+  }
+});
+
+// A click in the recent list (Zone 1) opens without a dialog. A file that
+// vanished is dropped from the list instead of erroring.
+ipcMain.handle('job-open-path', async (_, p) => {
+  try { return openJobFile(p); }
+  catch (_) {
+    prefs.data.recent = (prefs.data.recent || []).filter(r => r && r.path !== p);
+    prefs.save();
+    return { error: 'gone', recent: prefs.data.recent };
+  }
+});
+
+ipcMain.handle('job-save', async (_, job, saveAs) => {
+  let target = currentJobPath;
+  if (saveAs || !target) {
+    const res = await dialog.showSaveDialog(win, {
+      title: 'Save the syncto job',
+      defaultPath: `${(job.name && job.name !== 'Untitled' ? job.name : 'job').replace(/[^\w.-]+/g, '_')}${JOB_EXT}`,
+      filters: [{ name: 'syncto job', extensions: ['syncto'] }],
+    });
+    if (res.canceled || !res.filePath) return null;
+    target = res.filePath;
+    if (!/\.syncto$/i.test(target) && !/\.syncto\.json$/i.test(target)) target += JOB_EXT;
+  }
+  try {
+    // The file name IS the job name, so saving under a new name renames the job.
+    job.name = jobNameFromPath(target);
+    saveJob(target, job);
+    currentJobPath = target;
+    prefs.save({ lastJobPath: target });
+    const recent = pushRecent(job.name, target);
+    return { path: target, recent, name: job.name };
+  } catch (err) {
+    dialog.showErrorBox('syncto', `Could not save:\n${err.message}`);
+    return null;
+  }
+});
+
+// ── IPC: comparison ────────────────────────────────────────────────────────
+ipcMain.handle('compare', async (_, job) => {
+  tokens.compare.cancelled = false;
+  try {
+    const res = await session.compare(job, {
+      token: tokens.compare,
+      credentials: prefs.data.sftp,
+      onProgress: p => send('compare-progress', p),
+    });
+    return { ok: true, ...res };
+  } catch (err) {
+    return { ok: false, error: err.message || String(err) };
+  }
+});
+
+ipcMain.handle('compare-cancel', () => { tokens.compare.cancelled = true; return true; });
+
+ipcMain.handle('get-rows', (_, offset, limit, view) => session.rows(offset, limit, view));
+ipcMain.handle('get-overview', () => session.overview());
+ipcMain.handle('visible-indices', (_, view) => session.visibleIndices(view));
+ipcMain.handle('set-direction', (_, indices, dir) => session.setDirection(indices, dir));
+ipcMain.handle('set-active',    (_, indices, act) => session.setActive(indices, act));
+ipcMain.handle('toggle-active', (_, indices) => session.toggleActive(indices));
+ipcMain.handle('invert-all',    () => session.invertAll());
+
+// ── IPC: synchronization ───────────────────────────────────────────────────
+ipcMain.handle('sync', async (_, job) => {
+  tokens.sync.cancelled = false;
+  tokens.sync.paused = false;
+  holdSleep(true);
+  try {
+    const res = await session.sync(job, {
+      token: tokens.sync,
+      trashItem,
+      appVersion: appVersion(),
+      defaultReportFolder: path.join(app.getPath('documents'), 'syncto reports'),
+      onProgress: p => send('sync-progress', p),
+    });
+    return { ok: true, ...res };
+  } catch (err) {
+    return { ok: false, error: err.message || String(err) };
+  } finally {
+    holdSleep(false);
+  }
+});
+
+ipcMain.handle('sync-cancel', () => { tokens.sync.cancelled = true; tokens.sync.paused = false; return true; });
+ipcMain.handle('sync-pause',  () => { tokens.sync.paused = true;  return true; });
+ipcMain.handle('sync-resume', () => { tokens.sync.paused = false; return true; });
+
+// ── IPC: verification ──────────────────────────────────────────────────────
+ipcMain.handle('verify-folder', async (_, folder) => {
+  tokens.verify.cancelled = false;
+  const pool = new FsPool();
+  try {
+    const res = await verifyFolder(pool, folder, {
+      token: tokens.verify,
+      credentials: prefs.data.sftp,
+      onProgress: p => send('verify-progress', p),
+    });
+    return { ok: true, ...res };
+  } catch (err) {
+    return { ok: false, error: err.message || String(err) };
+  } finally {
+    await pool.closeAll();
+  }
+});
+
+ipcMain.handle('verify-cancel', () => { tokens.verify.cancelled = true; return true; });
+
+// ── IPC: window chrome ─────────────────────────────────────────────────────
+ipcMain.on('win-minimize', () => win && win.minimize());
+ipcMain.on('win-maximize', () => { if (!win) return; win.isMaximized() ? win.unmaximize() : win.maximize(); });
+ipcMain.on('win-close',    () => win && win.close());

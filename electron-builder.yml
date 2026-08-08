@@ -1,0 +1,83 @@
+appId: fr.just-edit.syncto
+productName: syncto
+copyright: "Copyright © 2026 Just Edit"
+compression: maximum
+asar: true
+directories:
+  buildResources: build-resources
+files:
+  - src/**/*
+  - package.json
+  - version.json
+  - build-resources/*.ico
+  - build-resources/*.icns
+  - build-resources/*.plist
+  - "LICENSE"
+
+mac:
+  category: public.app-category.utilities
+  icon: build-resources/icon.icns
+  darkModeSupport: true
+  minimumSystemVersion: "11.0"
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build-resources/entitlements.mac.plist
+  entitlementsInherit: build-resources/entitlements.mac.plist
+  target:
+    - target: dmg
+      arch:
+        - arm64
+
+dmg:
+  title: "syncto ${version}"
+  writeUpdateInfo: false
+  icon: null
+  window:
+    width: 540
+    height: 400
+  contents:
+    - x: 150
+      y: 160
+      type: file
+    - x: 390
+      y: 160
+      type: link
+      path: /Applications
+    - x: 270
+      y: 320
+      type: file
+      path: "LICENSE"
+  artifactName: "syncto-${version}-mac-${arch}.dmg"
+
+win:
+  icon: build-resources/icon.ico
+  requestedExecutionLevel: asInvoker
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: zip
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: syncto
+  artifactName: "syncto-Setup-${version}.exe"
+
+linux:
+  icon: build-resources/icons
+  category: Utility;
+  maintainer: "Just Edit <contact@just-edit.fr>"
+  vendor: "Just Edit"
+  synopsis: "Folder comparison and synchronization"
+  description: "Compare and synchronize folders with checksum-verified copies, versioning and detailed reports."
+  target:
+    - target: AppImage
+      arch:
+        - x64
