@@ -14,11 +14,11 @@ Licensed under the **GNU General Public License v3.0** (see [`LICENSE`](./LICENS
 
 | Main window | Auto-sync armed |
 |---|---|
-| ![syncto main window](docs/screenshots/syncto-main.png) | ![auto-sync armed](docs/screenshots/syncto-autosync.png) |
+| ![syncto main window](docs/screenshots/syncto-main_V2.png) | ![auto-sync armed](docs/screenshots/syncto-autosync_V2.png) |
 
 | Filter by right-click | Another machine is running |
 |---|---|
-| ![filter](docs/screenshots/syncto-filter.png) | ![waiting on a lock](docs/screenshots/syncto-lock.png) |
+| ![filter](docs/screenshots/syncto-filter_V2.png) | ![waiting on a lock](docs/screenshots/syncto-lock_V2.png) |
 
 ---
 
