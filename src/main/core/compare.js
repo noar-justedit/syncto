@@ -78,7 +78,10 @@ const ALWAYS_SKIP = new Set([
 ]);
 
 function isSyncToInternal(name) {
-  return name === DB_NAME || name === LOCK_NAME || name.startsWith('.syncto.');
+  if (name === DB_NAME || name === LOCK_NAME || name.startsWith('.syncto.')) return true;
+  // A lock being taken over is renamed "Delete.N.<name>" for an instant; if a
+  // comparison runs at that exact moment it must not see it as a user file.
+  return /^Delete\.\d+\./.test(name) && name.includes('.syncto.');
 }
 
 // ── Time helpers ───────────────────────────────────────────────────────────
@@ -164,7 +167,7 @@ class Comparer {
     this.nodes  = [];
     this.errors = [];
     this.stats  = { scanned: 0, comparedBytes: 0 };
-    this.symlinks = this.cfg.symlinks || 'exclude';   // exclude | asLink | follow
+    this.symlinks = this.cfg.symlinks || 'exclude';   // exclude | asLink
   }
 
   _emit(current) {
@@ -187,6 +190,9 @@ class Comparer {
     return { nodes: this.nodes, errors: this.errors, stats: this.stats };
   }
 
+  // Returns a Map, or null when the directory could not be read. Null is NOT
+  // an empty folder: treating an unreadable side as empty would make every
+  // file on the healthy side look one-sided — and a mirror would delete them.
   async _list(side, relDir, exists) {
     if (!exists) return new Map();
     const base = side === 'left' ? this.left : this.right;
@@ -201,12 +207,22 @@ class Comparer {
         if (e.type === 'other') continue;
         // Case-insensitive key so a Mac and a Windows share agree on identity,
         // while the original spelling is preserved for display and for I/O.
-        map.set(e.name.normalize('NFC').toLowerCase(), e);
+        const key = e.name.normalize('NFC').toLowerCase();
+        if (map.has(key)) {
+          // Two items differing only by case cannot both exist on the other
+          // side of a case-insensitive filesystem; keep the first, flag it.
+          this.errors.push({
+            path: base.fs.join(dir, e.name),
+            message: `"${e.name}" and "${map.get(key).name}" differ only by upper/lower case — only the first is synchronized.`,
+          });
+          continue;
+        }
+        map.set(key, e);
       }
       return map;
     } catch (err) {
-      this.errors.push({ path: dir, message: err.message || String(err) });
-      return new Map();
+      this.errors.push({ path: dir, message: err.message || String(err), fatal: true });
+      return null;
     }
   }
 
@@ -216,6 +232,10 @@ class Comparer {
       this._list('left',  relDir, lExists),
       this._list('right', relDir, rExists),
     ]);
+    // One side unreadable: comparing would fabricate one-sided items and turn
+    // an I/O error into deletions. The whole directory is left out instead;
+    // the fatal error recorded by _list blocks the synchronization.
+    if (!L || !R) return;
 
     const keys = new Set([...L.keys(), ...R.keys()]);
     const sorted = [...keys].sort();

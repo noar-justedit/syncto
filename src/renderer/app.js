@@ -98,8 +98,13 @@ function fmtDate(ms) {
   const p = n => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
+// Escapes for BOTH text content and attribute values — esc() output lands in
+// value="…" and data-path="…" attributes, so an unescaped quote in a file or
+// folder name would break out of the attribute and corrupt the path it carries.
 function esc(s) {
-  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // ── Action column: Lucide arrows, colour-coded ─────────────────────────────
@@ -157,7 +162,6 @@ function jobToUi() {
   setSeg('seg-cmp', j.compare.compareVariant);
   setVariantBtn(j.sync.variant);
   setCopyModeBtn(j.sync.copyLevel);
-  setProAlgoBtn(j.sync.proAlgo);
 
   $('st-moves').checked  = j.compare.detectMoves !== false;
   $('st-include').value  = j.compare.includeFilter;
@@ -251,13 +255,6 @@ function setVariantBtn(v) {
 function setCopyModeBtn(v) {
   for (const b of document.querySelectorAll('#bottom-controls .modes-row .mbtn')) {
     b.classList.toggle('on', b.dataset.v === v);
-  }
-  $('pro-algo').style.display = v === 'pro' ? '' : 'none';
-}
-
-function setProAlgoBtn(algo) {
-  for (const b of document.querySelectorAll('#pro-algo .pa-opt')) {
-    b.classList.toggle('on', b.dataset.algo === algo);
   }
 }
 
@@ -541,6 +538,7 @@ async function doCompare() {
   uiToJob();
   if (!completePairs().length) { alert('Set both folders of at least one pair first.'); return; }
 
+  state.selIdx = null;      // the old selection indexes a tree about to vanish
   state.busy = 'compare';
   state.speeds = [];
   setBusyUi(true, 'Comparing…');
@@ -577,7 +575,7 @@ function askConfirm() {
   const j = state.job;
   const VAR_LBL = { twoWay: 'Two way', mirror: 'Mirror →', update: 'Update →', custom: 'Custom' };
   const CMP_LBL = { timeSize: 'time & size', content: 'content', size: 'size' };
-  const LVL_LBL = { fast: 'Fast', verified: 'Verified', secure: 'Secure (xxHash64)', pro: 'Pro (' + j.sync.proAlgo + ')' };
+  const LVL_LBL = { fast: 'Fast', verified: 'Verified', secure: 'Secure (xxHash64)' };
   const np = completePairs().length;
   $('cf-sub').textContent =
     `${np} pair${np > 1 ? 's' : ''} · ${VAR_LBL[j.sync.variant] || j.sync.variant} · compared by ${CMP_LBL[j.compare.compareVariant]} · ${LVL_LBL[j.sync.copyLevel]} copy`;
@@ -632,8 +630,12 @@ async function doSync() {
 }
 
 // Re-compare after a run so the grid reflects reality without a full re-render
-// of the user's intent. Silent: no dialogs.
+// of the user's intent. Silent: no dialogs. Guarded: it must never race a run
+// the user just started, and the previous selection indexes a tree that no
+// longer exists.
 async function doCompareQuiet() {
+  if (state.busy) return;
+  state.selIdx = null;
   const res = await API.compare(state.job);
   if (!res.ok) return;
   state.stats = res.stats;
@@ -661,6 +663,11 @@ function setBusyUi(on, title) {
     $('pb-file').textContent = '—';
     if (title) $('pb-title').textContent = title;
     state.paused = false;
+    const bar = $('bottombar');
+    bar.style.setProperty('--pb-color', 'var(--green)');
+    bar.style.setProperty('--pb-color2', '#00ffaa');
+    bar.style.setProperty('--pb-glow', 'var(--green-g)');
+    $('pb-title').style.color = '';
     const lbl = $('btn-pause-lbl'), ico = $('btn-pause-ico');
     if (lbl) lbl.textContent = 'PAUSE';
     if (ico) ico.innerHTML = '<rect x="14" y="3" width="5" height="18" rx="1"/><rect x="5" y="3" width="5" height="18" rx="1"/>';
@@ -694,13 +701,31 @@ API.onSyncProgress(p => {
   $('pb-ring').setAttribute('stroke-dashoffset', RING_LEN * (1 - pct / 100));
   $('pb-fill').style.width = pct + '%';
   $('pb-file').textContent = (p.pairs > 1 ? `[${p.pair}/${p.pairs}] ` : '') + (p.current || '—');
+
+  // The verification pass gets its own identity, like ingesto: blue everywhere
+  // — title, ring and top bar — so a read-back is never mistaken for a stall.
+  // The colour variables live on #bottombar because the top fill bar is a
+  // sibling of .pb-inner and would not inherit them otherwise.
+  const verifying = p.pass === 'verify';
+  const bar = $('bottombar');
+  bar.style.setProperty('--pb-color',  verifying ? 'var(--blue)' : 'var(--green)');
+  bar.style.setProperty('--pb-color2', verifying ? '#7bc8ff' : '#00ffaa');
+  bar.style.setProperty('--pb-glow',   verifying ? 'rgba(77,144,240,.45)' : 'var(--green-g)');
   $('s-files').innerHTML   = `${p.filesDone}<span class="stot"> / ${p.filesTotal}</span>`;
   $('s-size').textContent  = fmtBytes(Math.max(0, p.bytesTotal - p.bytesDone));
   $('s-spd').textContent   = fmtSpeed(p.bytesPerSec);
   $('s-eta').textContent   = fmtEta(p.etaSec);
   $('s-del').textContent   = String(p.deleted || 0);
   $('s-err').textContent   = String(p.errors || 0);
-  $('pb-title').textContent = p.paused ? 'Paused' : 'Synchronizing…';
+  const lvlName = { fast: 'FAST', verified: 'VERIFIED', secure: 'SECURE' }[state.job.sync.copyLevel] || '';
+  const title = $('pb-title');
+  // After the verification pass only folder deletions and pruning remain —
+  // nothing is being copied, so the title must not claim it is.
+  title.textContent = p.paused ? 'Paused'
+                    : verifying ? `VERIFYING · ${lvlName}`
+                    : p.pass === 'cleanup' ? 'FINISHING…'
+                    : `COPYING · ${lvlName}`;
+  title.style.color = p.paused ? '' : (verifying ? 'var(--blue)' : 'var(--green)');
 
   state.speeds.push(p.bytesPerSec || 0);
   if (state.speeds.length > 70) state.speeds.shift();
@@ -745,6 +770,7 @@ function showSummary(res) {
     ['Average speed', res.durationMs > 0 ? fmtSpeed(res.counters.bytes / (res.durationMs / 1000)) : '—'],
   ];
   if (res.counters.moved) cells.splice(2, 0, ['Files moved', res.counters.moved]);
+  if (res.verified) cells.splice(2, 0, ['Files verified', res.verified]);
   $('sum-grid').innerHTML = cells
     .map(([l, v]) => `<div class="srow"><div class="sr-lbl">${l}</div><div class="sr-val">${v}</div></div>`).join('');
 
@@ -956,13 +982,6 @@ function bind() {
     persist();
   });
 
-  $('pro-algo').addEventListener('click', e => {
-    const b = e.target.closest('.pa-opt');
-    if (!b) return;
-    state.job.sync.proAlgo = b.dataset.algo;
-    setProAlgoBtn(b.dataset.algo);
-    persist();
-  });
 
   $('chk-equal').addEventListener('change', async e => { state.view.showEqual = e.target.checked; await refreshGrid(true); });
   $('chk-excluded').addEventListener('change', async e => { state.view.showExcluded = e.target.checked; await refreshGrid(true); });
@@ -1040,7 +1059,19 @@ function bind() {
 
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
-      for (const ov of document.querySelectorAll('.ov.open')) ov.classList.remove('open');
+      // Escape goes through each modal's own close button: several of them do
+      // real work on close (settings persist, the filter modal re-compares,
+      // the verify modal cancels the run) — just hiding them would skip that.
+      const ESC_CLOSE = {
+        'ov-settings': 'set-close',   'ov-filter' : 'filter-close',
+        'ov-confirm' : 'cf-cancel',   'ov-summary': 'sum-close',
+        'ov-verify'  : 'vf-close',    'ov-auto'   : 'auto-cf-cancel',
+        'update-ov'  : 'upd-later',
+      };
+      for (const ov of document.querySelectorAll('.ov.open')) {
+        const btn = ESC_CLOSE[ov.id] && document.getElementById(ESC_CLOSE[ov.id]);
+        if (btn) btn.click(); else ov.classList.remove('open');
+      }
     }
   });
 
@@ -1248,6 +1279,7 @@ function autoStop() {
 async function autoRun() {
   uiToJob();
   if (!completePairs().length) return;
+  state.selIdx = null;
   const stamp = () => {
     const d = new Date();
     return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
@@ -1265,6 +1297,16 @@ async function autoRun() {
   }
   state.stats = cmp.stats;
   renderStats(); await refreshGrid(true); await refreshOverview();
+
+  // Unattended run + unreadable folder = the one combination that must never
+  // proceed: an unreadable side looks empty, and nobody is watching. The
+  // engine refuses too (fatal errors block sync); this spares the attempt.
+  if (cmp.errors && cmp.errors.length) {
+    state.busy = null; setBusyUi(false);
+    $('footer-auto').textContent =
+      `auto-sync ${stamp()}: ${cmp.errors.length} folder error(s) during comparison — synchronization skipped`;
+    return;
+  }
 
   if (cmp.stats.filesToProcess === 0) {
     state.busy = null; setBusyUi(false);

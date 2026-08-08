@@ -49,7 +49,7 @@ function defaultJob() {
       compareVariant: 'timeSize',       // timeSize | content | size
       timeTolerance : 2,                // seconds
       timeShifts    : [],               // whole-hour shifts, e.g. [60] for DST
-      symlinks      : 'exclude',        // exclude | asLink | follow
+      symlinks      : 'exclude',        // exclude | asLink
       detectMoves   : true,             // rename instead of copy+delete (needs 1 prior run)
       includeFilter : '*',
       excludeFilter : '',
@@ -66,8 +66,7 @@ function defaultJob() {
         left : { create: 'right', update: 'right', delete: 'right' },
         right: { create: 'left',  update: 'left',  delete: 'left'  },
       },
-      copyLevel        : 'verified',    // fast | verified | secure | pro
-      proAlgo          : 'xxh128',
+      copyLevel        : 'verified',    // fast | verified | secure
       writeChecksumList: false,
       deletion         : 'recycler',    // permanent | recycler | versioning
       permanentFallback: false,
@@ -100,7 +99,7 @@ function defaultPrefs() {
     window: { width: 1280, height: 820 },
     lastJobPath: '',
     recent: [],
-    ui: { showEqual: false, gridView: 'action' },
+    ui: { showEqual: false },
     job: defaultJob(),
     sftp: {},                            // host key -> { username, privateKeyPath }
   };
@@ -153,6 +152,18 @@ function migrateJob(raw) {
       .filter(p => p && (typeof p.left === 'string' || typeof p.right === 'string'))
       .map(p => ({ left: p.left || '', right: p.right || '' }));
     if (!raw.pairs.length) raw.pairs = [{ left: '', right: '' }];
+  }
+  if (raw && raw.sync) {
+    // The Pro level was removed: without this coercion algoFor('pro') returns
+    // null and an old "pro" job silently degrades to a FAST copy — the exact
+    // opposite of what its author chose.
+    if (raw.sync.copyLevel === 'pro') raw.sync.copyLevel = 'secure';
+    // Versioning has no interface. A job asking for it with no revision folder
+    // configured could only ever fail; the trash is the honest equivalent.
+    if (raw.sync.deletion === 'versioning') {
+      const v = raw.sync.versioning || {};
+      if (!v.leftFolder && !v.rightFolder) raw.sync.deletion = 'recycler';
+    }
   }
   return raw;
 }

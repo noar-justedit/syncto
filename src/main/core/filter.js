@@ -183,11 +183,17 @@ class PathFilter {
     return res;
   }
 
-  // True when some include mask has more path segments than this folder and its
-  // leading segments match — i.e. a descendant might still be included.
+  // True when a descendant of this folder might still be included:
+  //  - a name-only include mask ("*.jpg", "CACHE") matches at ANY depth, so no
+  //    folder may ever be pruned because of it — the match could be anywhere
+  //    below. Without this rule, include "*.jpg" would silently sync nothing
+  //    outside the root folder.
+  //  - an anchored include mask with more path segments than this folder whose
+  //    leading segments match (include "/a/b/c.txt" must not prune "/a").
   _couldContain(rel) {
     const depth = rel.split(SEP).length;
     for (const m of this.include) {
+      if (m.nameOnly) return true;
       const src = m.re.source.slice(1, -1);          // strip ^ and $
       const segs = src.split('\\/');
       if (segs.length <= depth) continue;

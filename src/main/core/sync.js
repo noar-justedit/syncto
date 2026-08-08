@@ -26,12 +26,15 @@
 //   4. delete folders     children before parents, and only if now empty
 //
 // Every copy is fail-safe: data goes to "<target>.syncto_tmp" and is renamed
-// over the target only once the whole file is written (and verified, at the
-// secure and pro levels). A power cut therefore leaves a stray .syncto_tmp
-// file — which the next comparison skips and the next sync cleans up — never a
-// half-written file wearing the name of a good one.
+// over the target only once the whole file is written and its size checked. A
+// power cut therefore leaves a stray .syncto_tmp file, never a half-written
+// file wearing the name of a good one.
+//
+// At the secure level the fingerprints gathered while writing are checked in a
+// SECOND PASS, once every file has been copied — same order as ingesto: copy
+// everything, then read everything back.
 
-const { OP, TEMP_EXT }   = require('./compare');
+const { OP, TEMP_EXT, ALWAYS_SKIP, isSyncToInternal } = require('./compare');
 const { createHasher, hashStream, algoFor } = require('./hash');
 const { Versioner, runTimestamp, streamCopy } = require('./versioning');
 
@@ -105,8 +108,7 @@ class SyncRunner {
    *   right: { fs, path },
    *   nodes,                        // categorized, with .op resolved
    *   config: {
-   *     copyLevel: 'fast'|'verified'|'secure'|'pro',
-   *     proAlgo: 'xxh64'|'xxh128'|'md5'|'sha256',
+   *     copyLevel: 'fast'|'verified'|'secure',
    *     writeChecksumList: bool,
    *     deletion: 'permanent'|'recycler'|'versioning',
    *     versioning: { leftFolder, rightFolder, style, maxAgeDays, countMin, countMax },
@@ -129,6 +131,7 @@ class SyncRunner {
 
     this.results   = [];
     this.applied   = new Map();
+    this.toVerify  = [];     // filled by the copy pass, drained by the verify pass
     this.errors    = [];
     this.notes     = [];
     this.checksums = { left: [], right: [] };
@@ -136,6 +139,15 @@ class SyncRunner {
     this.meter = new RateMeter();
     this.done  = { files: 0, bytes: 0, deleted: 0, folders: 0, moved: 0, errors: 0 };
     this.plan  = { files: 0, bytes: 0, deletions: 0, folders: 0, moves: 0 };
+
+    // At the secure level every byte written is also read back, so the real
+    // work is twice the data. Counting only the writes made the ring freeze
+    // during verification — the pass was invisible.
+    const lvl = (this.cfg.copyLevel || 'verified');
+    this.verifyFactor = lvl === 'secure' ? 2 : 1;
+    this.done.workBytes = 0;      // written + read back
+    this.plan.workBytes = 0;
+    this.phase = 'copy';          // 'copy' | 'verify' | 'cleanup' — drives the colours
     this._lastEmit = 0;
   }
 
@@ -151,13 +163,15 @@ class SyncRunner {
     const t = now();
     if (!force && t - this._lastEmit < 120) return;
     this._lastEmit = t;
-    const remainingBytes = Math.max(0, this.plan.bytes - this.done.bytes);
+    const remainingBytes = Math.max(0, this.plan.workBytes - this.done.workBytes);
     const bps = this.meter.bytesPerSec;
     this.onProgress({
       phase: 'sync',
+      pass : this.phase,                       // 'copy' | 'verify' | 'cleanup'
       current: current || this.current || '',
       filesDone: this.done.files, filesTotal: this.plan.files,
-      bytesDone: this.done.bytes, bytesTotal: this.plan.bytes,
+      bytesDone: this.done.workBytes, bytesTotal: this.plan.workBytes,
+      copiedBytes: this.done.bytes,
       deleted: this.done.deleted, deletionsTotal: this.plan.deletions,
       foldersDone: this.done.folders, foldersTotal: this.plan.folders,
       moved: this.done.moved, movesTotal: this.plan.moves,
@@ -241,6 +255,7 @@ class SyncRunner {
     this.plan.folders   = mkdir.length;
     this.plan.moves     = moves.length;
     this.plan.bytes     = copy.reduce((s, c) => s + (c.n[c.from].size || 0), 0);
+    this.plan.workBytes = this.plan.bytes * this.verifyFactor;
     return { del, mkdir, copy, rmdir, moves };
   }
 
@@ -269,7 +284,7 @@ class SyncRunner {
     if (mode === 'versioning') {
       const v = this.versionerFor(side);
       if (v) {
-        if (isFolder) { await fsx.rmdir(path); return 'removed'; }
+        if (isFolder) { await this.rmdirClean(fsx, path); return 'removed'; }
         await v.archive(fsx, path, rel);
         return 'versioned';
       }
@@ -288,9 +303,26 @@ class SyncRunner {
       }
     }
 
-    if (isFolder) await fsx.rmdir(path);
+    if (isFolder) await this.rmdirClean(fsx, path);
     else          await fsx.unlink(path);
     return 'deleted';
+  }
+
+  // rmdir refuses a non-empty folder — correct, except that the comparison
+  // deliberately ignored OS litter (.DS_Store, Thumbs.db…) and syncto's own
+  // leftovers, so a folder that LOOKED empty can still contain them. Sweep
+  // exactly those before removing; anything else still makes rmdir fail loudly.
+  async rmdirClean(fsx, path) {
+    try {
+      const entries = await fsx.readdir(path);
+      for (const e of entries) {
+        if (e.type === 'file' &&
+            (ALWAYS_SKIP.has(e.name) || isSyncToInternal(e.name) || e.name.endsWith(TEMP_EXT))) {
+          try { await fsx.unlink(fsx.join(path, e.name)); } catch (_) {}
+        }
+      }
+    } catch (_) { /* let rmdir report the real problem */ }
+    await fsx.rmdir(path);
   }
 
   // ── Copy one file ────────────────────────────────────────────────────────
@@ -300,7 +332,7 @@ class SyncRunner {
     const src   = this.abs(from, n.rel);
     const dst   = this.abs(to,   n.rel);
     const level = this.cfg.copyLevel || 'verified';
-    const algo  = algoFor(level, this.cfg.proAlgo);
+    const algo  = algoFor(level);
     const failSafe = this.cfg.failSafe !== false;
     const tmp = failSafe ? dst + TEMP_EXT : dst;
 
@@ -313,7 +345,12 @@ class SyncRunner {
     // Symlinks are recreated, not followed.
     if (n.type === 'symlink') {
       const target = await srcFs.readlink(src);
-      if (await dstFs.exists(dst)) await this.archiveExisting(to, n.rel);
+      if (await dstFs.exists(dst)) {
+        await this.archiveExisting(to, n.rel);
+        // Permanent mode archives nothing, and a full trash can fail silently:
+        // the old link may still be there, and symlink() refuses to replace.
+        if (await dstFs.exists(dst)) await dstFs.unlink(dst);
+      }
       await dstFs.symlink(target, dst);
       return { bytes: 0, hash: null, mtime: srcStat.mtime, size: 0 };
     }
@@ -327,33 +364,24 @@ class SyncRunner {
     const hasher = algo ? await createHasher(algo) : null;
     let copied;
     try {
+      this.phase = 'copy';
       copied = await copyStream(srcFs, src, dstFs, tmp, hasher,
-        b => { this.done.bytes += b; this.meter.add(b); this.emit(false); }, this.token);
+        b => {
+          this.done.bytes += b; this.done.workBytes += b;
+          this.meter.add(b); this.emit(false);
+        }, this.token);
     } catch (err) {
       try { if (failSafe) await dstFs.unlink(tmp); } catch (_) {}
       throw err;
     }
 
-    // Level 'verified': the cheap check — did everything land?
-    if (level === 'verified' || level === 'fast') {
+    // Cheap guard, before the rename: did everything land? A truncated copy
+    // therefore never takes the target's name, whatever the level.
+    if (level !== 'fast') {
       const st = await dstFs.stat(tmp);
-      if (level === 'verified' && (!st || st.size !== srcStat.size)) {
+      if (!st || st.size !== srcStat.size) {
         try { if (failSafe) await dstFs.unlink(tmp); } catch (_) {}
         throw new Error(`Size mismatch after copy (${st ? st.size : 0} vs ${srcStat.size}).`);
-      }
-    }
-
-    // Levels 'secure' and 'pro': read the target back and compare fingerprints.
-    if (algo) {
-      await dstFs.flush(tmp);
-      this.current = 'Verifying ' + n.rel;
-      this.emit(true);
-      const verifier = await createHasher(algo);
-      const back = await hashStream(dstFs, tmp, verifier,
-        b => { this.verifyBytes = (this.verifyBytes || 0) + b; this.emit(false); }, this.token);
-      if (back !== copied.digest) {
-        try { if (failSafe) await dstFs.unlink(tmp); } catch (_) {}
-        throw new Error(`Checksum mismatch after copy (${algo}).`);
       }
     }
 
@@ -362,27 +390,40 @@ class SyncRunner {
       await dstFs.rename(tmp, dst);
     }
 
+    let mtimeKept = false;
     if (this.cfg.preserveTimes !== false) {
-      try { await dstFs.setMTime(dst, srcStat.mtime); } catch (_) {}
+      try { await dstFs.setMTime(dst, srcStat.mtime); mtimeKept = true; }
+      catch (err) {
+        this.notes.push(`Could not preserve the date of ${n.rel}: ${err.message}`);
+      }
     }
     if (this.cfg.copyPermissions && srcStat.mode != null) {
       try { await dstFs.chmod(dst, srcStat.mode & 0o7777); } catch (_) {}
     }
 
-    // PRO always collects fingerprints for its sidecar — that is what the mode
-    // is for. At the secure level the sidecar is opt-in via the settings.
-    if (algo && (this.cfg.writeChecksumList || level === 'pro')) {
-      this.checksums[to].push({ rel: n.rel, hash: copied.digest, size: srcStat.size });
+    // At the secure level the fingerprint computed while writing is kept for the
+    // verification pass, which happens once every file has been copied.
+    if (algo) {
+      this.toVerify.push({
+        rel: n.rel, side: to, path: dst,
+        digest: copied.digest, size: srcStat.size, algo,
+      });
     }
 
     // The new copy's file id feeds the database, so a later rename of this
-    // very file can be recognized as a move instead of re-copied.
-    let dstId = null;
-    try { const st = await dstFs.stat(dst); if (st) dstId = st.id; } catch (_) {}
+    // very file can be recognized as a move instead of re-copied. The same
+    // stat also yields the target's REAL mtime: if preserving the date failed,
+    // the database must record what is actually on disk — recording the wish
+    // instead would make the next run see a spurious change and copy again.
+    let dstId = null, dstMtime = srcStat.mtime;
+    try {
+      const st = await dstFs.stat(dst);
+      if (st) { dstId = st.id; if (!mtimeKept && this.cfg.preserveTimes !== false) dstMtime = st.mtime; }
+    } catch (_) {}
 
     return {
       bytes: copied.bytes, hash: copied.digest, algo,
-      mtime: srcStat.mtime, size: srcStat.size,
+      mtime: srcStat.mtime, size: srcStat.size, dstMtime,
       srcId: srcStat.id || null, dstId,
     };
   }
@@ -408,7 +449,17 @@ class SyncRunner {
     try {
       await fsx.rename(from, to);
     } catch (_) {
-      await streamCopy(fsx, from, fsx, to);
+      // Same fail-safe rule as any copy: never write the final name directly.
+      // A power cut mid-copy must leave a stray .syncto_tmp, not a truncated
+      // file wearing a good file's name.
+      const tmp = to + TEMP_EXT;
+      try {
+        await streamCopy(fsx, from, fsx, tmp);
+        await fsx.rename(tmp, to);
+      } catch (err) {
+        try { await fsx.unlink(tmp); } catch (_) {}
+        throw err;
+      }
       try { await fsx.setMTime(to, st.mtime); } catch (_) {}
       await fsx.unlink(from);
     }
@@ -436,7 +487,32 @@ class SyncRunner {
   }
 
   // ── Main loop ────────────────────────────────────────────────────────────
+  // Cancellation must not reject: everything already done is real — files were
+  // copied, files were deleted — and the caller still has to write the
+  // database and the report from `applied`, or the NEXT run mistakes every
+  // completed two-way copy for a fresh change. So run() always resolves; the
+  // `cancelled` flag says why it stopped early.
   async run() {
+    try { await this._run(); }
+    catch (err) {
+      if (!/cancelled/i.test(err.message || '')) throw err;
+    }
+    this.emit(true, this.token.cancelled ? 'Cancelled' : 'Done');
+    return {
+      results  : this.results,
+      applied  : this.applied,
+      errors   : this.errors,
+      notes    : this.notes,
+      checksums: this.checksums,
+      verified : this.toVerify.filter(v => v.ok).length,
+      counters : this.done,
+      plan     : this.plan,
+      cancelled: !!this.token.cancelled,
+      stamp    : this.stamp,
+    };
+  }
+
+  async _run() {
     const plan = this.buildPlan();
     this.emit(true, 'Preparing…');
 
@@ -474,7 +550,9 @@ class SyncRunner {
         this.applied.set(n.rel, { ok: true, deleted: true });
       } catch (err) {
         this.record(n, false, { side, error: err.message || String(err) });
-        if (!this.cfg.ignoreErrors && /cancelled/i.test(err.message || '')) break;
+        // Cancellation stops the loop unconditionally — "ignore errors" means
+        // "keep going past failures", never "keep deleting after a cancel".
+        if (/cancelled/i.test(err.message || '')) break;
       }
       this.emit(false);
     }
@@ -510,6 +588,8 @@ class SyncRunner {
         });
         this.applied.set(item.n.rel, {
           ok: true, mtime: res.mtime, size: res.size,
+          mtimeL: item.to === 'left'  ? res.dstMtime : res.mtime,
+          mtimeR: item.to === 'right' ? res.dstMtime : res.mtime,
           idL: item.to === 'left'  ? res.dstId : res.srcId,
           idR: item.to === 'right' ? res.dstId : res.srcId,
         });
@@ -521,7 +601,48 @@ class SyncRunner {
       this.emit(false);
     }
 
-    // 4. delete folders, deepest first
+    // 4. verify — one pass over everything that was copied, exactly like
+    //    ingesto: copy first, then read the whole lot back. The fingerprint of
+    //    each source was captured while writing; here we re-read the file from
+    //    its final location and compare.
+    if (this.toVerify.length && !this.token.cancelled) {
+      this.phase = 'verify';
+      this.current = '';
+      this.emit(true, 'Verifying…');
+      for (const item of this.toVerify) {
+        await this.gate();
+        this.current = item.rel;
+        this.emit(true);
+        const fsx = this.side(item.side).fs;
+        try {
+          await fsx.flush(item.path);
+          const verifier = await createHasher(item.algo);
+          const back = await hashStream(fsx, item.path, verifier,
+            b => { this.done.workBytes += b; this.meter.add(b); this.emit(false); }, this.token);
+          if (back !== item.digest) throw new Error(`Checksum mismatch (${item.algo}).`);
+          item.ok = true;
+          if (this.cfg.writeChecksumList) {
+            this.checksums[item.side].push({ rel: item.rel, hash: item.digest, size: item.size });
+          }
+        } catch (err) {
+          if (/cancelled/i.test(err.message || '')) break;
+          item.ok = false;
+          this.done.errors++;
+          this.errors.push({ rel: item.rel, message: err.message || String(err) });
+          // The file already carries its final name, so the database must NOT
+          // record it as synchronized — the next run has to look at it again.
+          this.applied.delete(item.rel);
+          const res = this.results.find(r => r.rel === item.rel && r.ok);
+          if (res) { res.ok = false; res.error = err.message || String(err); }
+        }
+        this.emit(false);
+      }
+      // Not back to 'copy': what follows writes nothing, and the interface
+      // must not flash green again as if a new file were being transferred.
+      this.phase = 'cleanup';
+    }
+
+    // 5. delete folders, deepest first
     for (const { n, side } of plan.rmdir) {
       if (this.token.cancelled) break;
       this.current = n.rel;
@@ -541,19 +662,6 @@ class SyncRunner {
       const v = this.versionerFor(side);
       if (v) { try { await v.prune(m => this.notes.push(m)); } catch (_) {} }
     }
-
-    this.emit(true, 'Done');
-    return {
-      results  : this.results,
-      applied  : this.applied,
-      errors   : this.errors,
-      notes    : this.notes,
-      checksums: this.checksums,
-      counters : this.done,
-      plan     : this.plan,
-      cancelled: !!this.token.cancelled,
-      stamp    : this.stamp,
-    };
   }
 }
 

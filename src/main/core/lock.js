@@ -131,11 +131,15 @@ class DirLock {
   }
 
   _startHeartbeat() {
-    const beat = async () => {
+    const beat = () => {
       if (this.released) return;
       // A single space. Growing the file IS the life sign — nothing else needs
-      // to be readable or parsed by the other side.
-      try { await this.fs.appendByte(this.path, ' '); } catch (_) { /* transient network hiccup */ }
+      // to be readable or parsed by the other side. The in-flight append is
+      // kept so release() can wait for it — an append landing AFTER the unlink
+      // would recreate the file and block other machines for 12 seconds.
+      this._beating = this.fs.appendByte(this.path, ' ')
+        .catch(() => { /* transient network hiccup */ })
+        .finally(() => { this._beating = null; });
     };
     this.timer = setInterval(beat, EMIT_LIFE_SIGN_MS);
     if (this.timer.unref) this.timer.unref();
@@ -145,6 +149,7 @@ class DirLock {
     if (this.released) return;
     this.released = true;
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    if (this._beating) { try { await this._beating; } catch (_) {} }
     try { await this.fs.unlink(this.path); } catch (_) {}
   }
 }
@@ -162,11 +167,13 @@ async function acquireOne(fsx, folderPath, opts) {
   const lockPath = fsx.join(folderPath, LOCK_NAME);
   const local = localLockInfo();
   const payload = Buffer.from(JSON.stringify(local) + '\n', 'utf8');
+  let ghostTries = 0;   // create fails "exists" but no lock file is there
 
   for (;;) {
     if (token && token.cancelled) throw new Error('Cancelled');
 
     // Fast path: create it exclusively. Whoever wins this call owns the folder.
+    let createErr;
     try {
       await fsx.writeExclusive(lockPath, payload);
       const lock = new DirLock(fsx, lockPath, local);
@@ -174,10 +181,26 @@ async function acquireOne(fsx, folderPath, opts) {
       return lock;
     } catch (err) {
       if (!/exist/i.test(err.code || err.message || '')) throw err;
+      createErr = err;
     }
 
     // Someone holds it. Find out who, and whether they are still breathing.
     const info = await readLockInfo(fsx, lockPath);
+
+    // SFTPv3 has no specific "already exists" status: an exclusive create that
+    // clashes AND a genuine failure both come back as "Failure". If the file
+    // is not actually there, this was a real error, not a taken lock — retry a
+    // few times with a pause (never a hot loop), then give up honestly.
+    if (!info) {
+      let st = null;
+      try { st = await fsx.stat(lockPath); } catch (_) {}
+      if (!st) {
+        if (++ghostTries >= 5) throw createErr;
+        await sleep(POLL_LIFE_SIGN_MS);
+        continue;
+      }
+    }
+    ghostTries = 0;
     const status = info ? processStatus(info, local) : 'unknown';
 
     if (status === 'notRunning' || status === 'itsUs') {
@@ -233,7 +256,9 @@ async function takeOver(fsx, lockPath, onStatus, info) {
   if (onStatus) onStatus({ waiting: true, holder: describe(info), takingOver: true });
 
   try {
-    await fsx.rename(lockPath, doomed);
+    // renameStrict: no delete-and-retry fallback. Renaming is the whole point —
+    // of two machines waiting on the same abandoned lock, exactly one may win.
+    await (fsx.renameStrict ? fsx.renameStrict(lockPath, doomed) : fsx.rename(lockPath, doomed));
   } catch (_) {
     // Another waiter won the rename, or the owner just released it. Either way
     // we simply retry the exclusive create.
@@ -257,6 +282,12 @@ async function acquireAll(entries, opts) {
   const held = [];
   try {
     for (const e of list) {
+      // A folder that does not exist yet cannot be locked (the create would
+      // fail with ENOENT) and holds nothing to protect — the run itself will
+      // create it. Skip it rather than failing the first sync into it.
+      let st = null;
+      try { st = await e.fs.stat(e.path); } catch (_) {}
+      if (!st) continue;
       const lock = await acquireOne(e.fs, e.path, opts);
       held.push(lock);
     }

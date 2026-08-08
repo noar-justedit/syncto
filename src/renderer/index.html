@@ -32,7 +32,7 @@
 --red:#f2555a;    --red-d:rgba(242,85,90,.15);     --red-g:rgba(242,85,90,.3);
 --blue:#4d90f0;   --blue-d:rgba(77,144,240,.14);
 --orange:#f2a03d; --orange-d:rgba(242,160,61,.14);
---pro:#a880ff;    --pro-d:rgba(168,128,255,.14);
+--violet:#a880ff; --violet-d:rgba(168,128,255,.14);
 --r:12px; --r-sm:8px; --r-lg:16px; --rs:8px;
 --font:-apple-system,BlinkMacSystemFont,'Inter','Segoe UI',system-ui,sans-serif;
 --mono:ui-monospace,'SF Mono','JetBrains Mono',Menlo,monospace;
@@ -45,7 +45,6 @@ font-weight:700;font-style:normal;font-display:swap;}
 html,body{height:100%;width:100%;background:var(--bg);color:var(--text);
 font-family:var(--font);font-size:14px;overflow:hidden;user-select:none;-webkit-user-select:none;}
 #app{display:flex;flex-direction:column;height:100vh;}
-.sec-title{font-family:var(--font-display);font-weight:700;}
 
 /* ── Titlebar ─────────────────────────────────── */
 #titlebar{height:52px;-webkit-app-region:drag;flex-shrink:0;display:flex;align-items:center;
@@ -74,8 +73,6 @@ font-size:12.5px;font-weight:700;letter-spacing:.03em;cursor:pointer;transition:
 .tbtn:hover:not(:disabled){color:var(--text);border-color:var(--text3);}
 .tbtn:disabled{opacity:.4;cursor:not-allowed;}
 .tbtn svg{width:15px;height:15px;}
-.tbtn.primary{background:var(--accent-d);border-color:var(--accent-g);color:#c9b8ff;}
-.tbtn.primary:hover:not(:disabled){border-color:var(--accent);color:#e0d4ff;}
 .tbtn.go{background:#0f2c1d;border-color:rgba(53,201,139,.45);color:var(--green);}
 .tbtn.go:hover:not(:disabled){animation:glowGreen 1.9s ease-in-out infinite;}
 .tbtn.stop{background:#341819;border-color:rgba(242,85,90,.5);color:var(--red);animation:glowRed 1.9s ease-in-out infinite;}
@@ -165,7 +162,6 @@ font-family:var(--font-display);display:flex;align-items:center;gap:8px;}
 .fld-in input{flex:1;min-width:0;background:var(--bg);border:1px solid var(--border);border-radius:var(--rs);
 padding:9px 11px;font-size:13px;color:var(--text);font-family:var(--mono);outline:none;transition:border-color .15s;}
 .fld-in input:focus{border-color:var(--accent-g);}
-.fld-in input.drop{border-color:var(--accent);background:var(--accent-d);}
 .fld-free{font-size:11px;color:var(--text3);font-family:var(--mono);height:13px;}
 .br-btn{flex-shrink:0;padding:0 12px;border-radius:var(--rs);border:1px solid var(--border);
 background:var(--bg3);color:var(--text3);font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font);}
@@ -196,8 +192,7 @@ text-transform:uppercase;color:var(--text3);}
 .bf{background:var(--blue-d);color:var(--blue);}     /* FAST = blue */
 .bn{background:var(--green-d);color:var(--green);}   /* VERIFIED = green */
 .bs{background:var(--orange-d);color:var(--orange);} /* SECURE = orange */
-.bp{background:var(--pro-d);color:var(--pro);}        /* PRO = violet */
-.bw{background:var(--pro-d);color:var(--pro);}        /* TWO WAY = violet */
+.bw{background:var(--violet-d);color:var(--violet);}        /* TWO WAY = violet */
 .bm{background:var(--green-d);color:var(--green);}   /* MIRROR = green */
 .bu{background:var(--blue-d);color:var(--blue);}     /* UPDATE = blue */
 .bc{background:var(--orange-d);color:var(--orange);} /* CUSTOM = orange */
@@ -205,23 +200,21 @@ text-transform:uppercase;color:var(--text3);}
 .mico{align-self:center;flex-shrink:0;display:flex;align-items:center;justify-content:center;
 width:34px;height:34px;border-radius:8px;}
 .mico svg{width:26px;height:26px;}
-#var-twoWay .mico{color:var(--pro);background:var(--pro-d);}
+#var-twoWay .mico{color:var(--violet);background:var(--violet-d);}
 #var-mirror .mico{color:var(--green);background:var(--green-d);}
 #var-update .mico{color:var(--blue);background:var(--blue-d);}
 #var-custom .mico{color:var(--orange);background:var(--orange-d);}
 #mode-fast.on  {border-color:var(--blue);  background:var(--blue-d);  box-shadow:0 0 0 1px var(--blue) inset;}
 #mode-verified.on{border-color:var(--green);background:var(--green-d);box-shadow:0 0 0 1px var(--green) inset;}
 #mode-secure.on{border-color:var(--orange);background:var(--orange-d);box-shadow:0 0 0 1px var(--orange) inset,0 6px 20px -10px rgba(242,160,61,.5);}
-#mode-pro.on   {border-color:var(--pro);   background:var(--pro-d);   box-shadow:0 0 0 1px var(--pro) inset,0 6px 20px -10px rgba(168,128,255,.4);}
 #mode-fast.on .msel{color:var(--blue);}
 #mode-verified.on .msel{color:var(--green);}
 #mode-secure.on .msel{color:var(--orange);}
-#mode-pro.on .msel{color:var(--pro);}
-#var-twoWay.on {border-color:var(--pro);   background:var(--pro-d);   box-shadow:0 0 0 1px var(--pro) inset;}
+#var-twoWay.on {border-color:var(--violet);   background:var(--violet-d);   box-shadow:0 0 0 1px var(--violet) inset;}
 #var-mirror.on {border-color:var(--green); background:var(--green-d); box-shadow:0 0 0 1px var(--green) inset;}
 #var-update.on {border-color:var(--blue);  background:var(--blue-d);  box-shadow:0 0 0 1px var(--blue) inset;}
 #var-custom.on {border-color:var(--orange);background:var(--orange-d);box-shadow:0 0 0 1px var(--orange) inset;}
-#var-twoWay.on .msel{color:var(--pro);}
+#var-twoWay.on .msel{color:var(--violet);}
 #var-mirror.on .msel{color:var(--green);}
 #var-update.on .msel{color:var(--blue);}
 #var-custom.on .msel{color:var(--orange);}
@@ -232,14 +225,6 @@ width:34px;height:34px;border-radius:8px;}
 /* Bottom strip — copy modes + big action buttons, like ingesto's control strip */
 #bottom-controls{flex-shrink:0;border-top:1px solid var(--border);padding:12px 16px 14px;
 display:flex;flex-direction:column;gap:12px;background:var(--bg2);}
-.pa-label{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px;}
-.pro-algo{margin-top:2px;max-width:430px;}
-.pa-seg{display:flex;gap:6px;}
-.pa-opt{flex:1;min-width:0;padding:7px 4px;border-radius:7px;border:1px solid var(--border2);
-background:transparent;color:var(--text3);font-family:var(--font);font-size:11.5px;font-weight:600;
-cursor:pointer;transition:all .13s;}
-.pa-opt:hover{color:var(--text);border-color:var(--pro);}
-.pa-opt.on{background:var(--pro-d);border-color:var(--pro);color:var(--pro);font-weight:700;}
 /* Big action buttons — ingesto's START INGEST design */
 #actionrow{display:flex;gap:10px;}
 .bigbtn{flex:1;padding:15px;border-radius:var(--r);border:1px solid transparent;
@@ -308,8 +293,6 @@ color:var(--text3);font-family:var(--font);font-size:11.5px;font-weight:700;curs
 transition:all .15s;white-space:nowrap;letter-spacing:.02em;}
 .seg button:hover{color:var(--text);border-color:var(--border2);}
 .seg button.on{background:var(--accent-d);border-color:var(--accent-g);color:#c9b8ff;}
-.seg.lvl button.on{background:var(--pro-d);border-color:var(--pro);color:var(--pro);}
-.seg.dir button.on{background:var(--green-d);border-color:var(--green-g);color:var(--green);}
 #btn-filter.on{background:var(--red-d);border-color:rgba(242,85,90,.5);color:var(--red);}
 .autorow{display:flex;align-items:center;gap:8px;padding-top:3px;}
 .autorow input[type=number]{width:50px;background:var(--bg);border:1px solid var(--border);
@@ -388,11 +371,11 @@ border-radius:4px;padding:0 6px;height:100%;}
 .grow .c-path .nm-upd,.grow .c-path .nm-upd .dim{color:var(--orange);}
 .grow .c-path .nm-del,.grow .c-path .nm-del .dim{color:var(--red);}
 .grow .c-path .nm-del{text-decoration:line-through;text-decoration-color:rgba(242,85,90,.8);}
-.grow .c-path .nm-mov,.grow .c-path .nm-mov .dim{color:var(--pro);}
+.grow .c-path .nm-mov,.grow .c-path .nm-mov .dim{color:var(--violet);}
 .arr-add{color:var(--green);}
 .arr-upd{color:var(--orange);}
 .arr-del{color:var(--red);}
-.arr-mov{color:var(--pro);}
+.arr-mov{color:var(--violet);}
 .arr-mov.dimmed{opacity:.55;}
 .arr-cfl{color:var(--red);}
 #gridempty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;
@@ -411,7 +394,7 @@ cursor:pointer;transition:all .13s;white-space:nowrap;}
 .stat b{font-family:var(--mono);font-weight:800;}
 .stat.g{color:var(--green);} .stat.b{color:var(--blue);}
 .stat.o{color:var(--orange);} .stat.r{color:var(--red);}
-.stat.v{color:var(--pro);}
+.stat.v{color:var(--violet);}
 .status-spacer{flex:1;}
 .status-note{font-size:11.5px;color:var(--text3);font-family:var(--mono);}
 
@@ -422,8 +405,8 @@ background:rgba(14,15,19,.72);backdrop-filter:blur(28px) saturate(150%);
 display:flex;flex-direction:column;flex-shrink:0;}
 #bottombar.open{height:196px;}
 .pb-track-top{height:4px;background:var(--bg3);overflow:hidden;flex-shrink:0;}
-.pb-fill{height:100%;background:linear-gradient(90deg,var(--pb-color,var(--green)),#00ffaa);
-transition:width .4s ease;box-shadow:0 0 8px var(--green-g);}
+.pb-fill{height:100%;background:linear-gradient(90deg,var(--pb-color,var(--green)),var(--pb-color2,#00ffaa));
+transition:width .4s ease,background .3s ease;box-shadow:0 0 8px var(--pb-glow,var(--green-g));}
 .pb-inner{flex:1;padding:11px 18px;display:flex;flex-direction:column;gap:8px;min-height:0;overflow:hidden;}
 .pb-hd{display:flex;align-items:center;gap:16px;}
 .pb-hd-text{flex:1;min-width:0;}
@@ -798,21 +781,6 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
           <div class="mdesc">Detects any data corruption (xxHash)</div>
         </div>
       </button>
-      <button class="mbtn" id="mode-pro" data-v="pro">
-        <div class="minfo">
-          <div class="mbadge-row"><div class="mbadge bp">PRO</div><span class="msel">Selected</span></div>
-          <div class="mdesc">Secure + checksum lists</div>
-        </div>
-      </button>
-    </div>
-    <div id="pro-algo" class="pro-algo" style="display:none;">
-      <div class="pa-label">Checksum algorithm</div>
-      <div class="pa-seg">
-        <button class="pa-opt" data-algo="xxh64">xxHash64</button>
-        <button class="pa-opt on" data-algo="xxh128">xxHash128</button>
-        <button class="pa-opt" data-algo="md5">MD5</button>
-        <button class="pa-opt" data-algo="sha256">SHA-256</button>
-      </div>
     </div>
   </div>
   <div id="actionrow">
@@ -924,7 +892,7 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
       <div class="set-sec-title">Copying</div>
       <div class="set-row"><label>Write a checksum list</label>
         <label class="switch"><input type="checkbox" id="st-cksum"><span class="slider"></span></label>
-        <span style="font-size:11.5px;color:var(--text3)">syncto-checksums.txt at the root of each target</span></div>
+        <span style="font-size:11.5px;color:var(--text3)">syncto-checksums.txt at the root of each target (SECURE only)</span></div>
       <div class="set-row"><label>Lock folders</label>
         <label class="switch"><input type="checkbox" id="st-lock" checked><span class="slider"></span></label>
         <span style="font-size:11.5px;color:var(--text3)">one machine at a time per folder</span></div>

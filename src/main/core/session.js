@@ -21,6 +21,7 @@
 // sends back edits by index. That keeps a 200 000-file comparison responsive.
 
 const { Comparer, CAT, OP, CHECKSUM_FILE } = require('./compare');
+const { PathFilter } = require('./filter');
 const { applyDirections, computeStats, operationFor, applyFolderRules,
         detectMoves, dissolveMove, usesDatabase } = require('./direction');
 const { loadPairDb, savePairDb, buildSession, pairIdFor } = require('./db');
@@ -245,6 +246,15 @@ class Session {
   async sync(job, opts) {
     const { onProgress, token, trashItem, appVersion, defaultReportFolder, skipReport } = opts || {};
     if (!this.nodes.length && !this.comparedAt) throw new Error('Run a comparison first.');
+
+    // A folder that could not be READ during the comparison looks empty, and
+    // an empty side plus a mirror is a mass deletion. FreeFileSync stops here
+    // too: no synchronization on top of a broken comparison, ever.
+    const fatal = this.errors.filter(e => e.fatal);
+    if (fatal.length) {
+      throw new Error(`The comparison could not read ${fatal.length === 1 ? 'a folder' : fatal.length + ' folders'} ` +
+        `(${fatal[0].path}: ${fatal[0].message}) — synchronizing now could delete healthy files. Fix the error and compare again.`);
+    }
     const startedAt = Date.now();
 
     const runner = new SyncRunner({
@@ -256,19 +266,36 @@ class Session {
     const run = await runner.run();
     const endedAt = Date.now();
 
-    // Checksum sidecars, one per side that actually received data.
+    // Checksum sidecars, one per side that actually received data. The list is
+    // MERGED with what is already there: each run only re-hashes what it
+    // copied, and a sidecar reduced to today's three files would silently stop
+    // vouching for the thousand verified last month.
     const sidecars = [];
-    const wantList = job.sync.copyLevel === 'pro' ||
-                     (job.sync.writeChecksumList && job.sync.copyLevel === 'secure');
+    const wantList = job.sync.writeChecksumList && job.sync.copyLevel === 'secure';
     if (wantList) {
       for (const side of ['left', 'right']) {
         const list = run.checksums[side];
         if (!list.length) continue;
-        const algo = job.sync.copyLevel === 'pro' ? (job.sync.proAlgo || 'xxh128') : 'xxh64';
+        const algo = 'xxh64';
         const target = this[side];
         const p = target.fs.join(target.path, CHECKSUM_FILE);
         try {
-          await writeText(target.fs, p, formatChecksumList(algo, list, { pair: job.name, side }));
+          const byRel = new Map();
+          try {
+            const prevText = await readText(target.fs, p);
+            if (prevText != null) {
+              const prev = parseChecksumList(prevText);
+              if (!prev.algo || prev.algo === algo) {
+                for (const e of prev.entries) byRel.set(e.rel, e);
+              }
+            }
+          } catch (_) { /* unreadable previous list: start fresh */ }
+          // Entries deleted or re-copied this run must not survive from the
+          // old list with a stale hash.
+          for (const [rel, res] of run.applied) if (res.deleted) byRel.delete(rel);
+          for (const e of list) byRel.set(e.rel, e);
+          const merged = [...byRel.values()].sort((a, b) => a.rel < b.rel ? -1 : 1);
+          await writeText(target.fs, p, formatChecksumList(algo, merged, { pair: job.name, side }));
           sidecars.push(p);
         } catch (err) {
           run.notes.push(`Could not write the checksum list on the ${side} side: ${err.message}`);
@@ -283,10 +310,13 @@ class Session {
     if (usesDatabase(job.sync.variant) || this.wantMoves) {
       try {
         const pairId = this.pairId || pairIdFor(job.pairId, this.left.path, this.right.path);
+        // Entries hidden by the current hard filter keep their history.
+        const pf = new PathFilter(job.compare.includeFilter, job.compare.excludeFilter);
+        const keepRel = (rel, e) => (e.t === 'd' ? !pf.passFolder(rel) : !pf.passFile(rel));
         const session = buildSession(
           this.nodes, run.applied, this.db,
           job.compare.compareVariant || 'timeSize',
-          this.left.path, this.right.path);
+          this.left.path, this.right.path, keepRel);
         dbStamp = await savePairDb(this.left, this.right, pairId, session);
       } catch (err) {
         run.notes.push(`Could not write the synchronization database: ${err.message}`);
@@ -298,7 +328,7 @@ class Session {
       appVersion,
       pairName: job.name, leftPath: this.left.path, rightPath: this.right.path,
       variant: job.sync.variant, compareVariant: job.compare.compareVariant,
-      copyLevel: job.sync.copyLevel, proAlgo: job.sync.copyLevel === 'pro' ? job.sync.proAlgo : '',
+      copyLevel: job.sync.copyLevel,
       deletion: job.sync.deletion, versioningStyle: job.sync.versioning.style,
       filter: { include: job.compare.includeFilter, exclude: job.compare.excludeFilter },
       startedAt, endedAt, run, stats: this.stats, comparisonErrors: this.errors,
@@ -338,6 +368,7 @@ class Session {
     this.lastResults = run.results;   // MultiSession reads these for its merged report
     return {
       counters : run.counters,
+      verified : run.verified || 0,
       plan     : run.plan,
       errors   : run.errors,
       notes    : run.notes,
@@ -418,9 +449,14 @@ class MultiSession {
   async compare(job, opts) {
     const { onProgress, token, credentials } = opts || {};
     await this.close();
+    // A failed or cancelled comparison must not leave yesterday's comparedAt
+    // standing — sync() would happily run against half-compared sessions.
+    this.comparedAt = 0;
+    this.stats = null;
     this.pairs = this._pairsOf(job);
     if (!this.pairs.length) throw new Error('Set at least one folder pair.');
     this.sessions = this.pairs.map(() => new Session());
+    const multi = this.pairs.length > 1;
 
     const perPair = [];
     const errors = [];
@@ -429,6 +465,10 @@ class MultiSession {
       if (token && token.cancelled) break;
       const pairJob = Object.assign({}, job, {
         left: this.pairs[i].left, right: this.pairs[i].right,
+        // A job-level pairId predates multi-pair: shared by every pair, it
+        // would make them overwrite each other's session in a shared base
+        // folder. Path-derived ids are unambiguous — use them.
+        pairId: multi ? null : job.pairId,
       });
       const res = await this.sessions[i].compare(pairJob, {
         token, credentials,
@@ -512,6 +552,16 @@ class MultiSession {
     return this.stats;
   }
 
+  // Global indices, in the same order as rows() (headers excluded — these are
+  // selectable data rows only).
+  visibleIndices(view) {
+    const out = [];
+    for (let p = 0; p < this.sessions.length; p++) {
+      for (const i of this.sessions[p]._visibleIndices(view)) out.push(p * PAIR_BASE + i);
+    }
+    return out;
+  }
+
   overview() {
     const rows = [];
     let total = 0;
@@ -555,38 +605,60 @@ class MultiSession {
     try {
 
     // Grand totals first, so the progress ring covers the whole job.
+    const lvl = job.sync.copyLevel || 'verified';
+    const verifyFactor = lvl === 'secure' ? 2 : 1;
     let bytesTotal = 0, filesTotal = 0;
     for (const s of this.sessions) {
       const st = s.stats || {};
-      bytesTotal += st.bytesTotal || 0;
+      bytesTotal += (st.bytesTotal || 0) * verifyFactor;   // written + read back
       filesTotal += st.filesToProcess || 0;
     }
 
     const perPair = [];
     let doneBytes = 0, doneFiles = 0, cancelled = false;
     const counters = { files: 0, bytes: 0, deleted: 0, folders: 0, moved: 0, errors: 0 };
+    let verified = 0;
     const allErrors = [], allNotes = [], reportFiles = [], checksumFiles = [];
 
     for (let p = 0; p < this.sessions.length; p++) {
       if (token && token.cancelled) { cancelled = true; break; }
       const pr = this.pairs[p];
-      const pairJob = Object.assign({}, job, { left: pr.left, right: pr.right });
-      const res = await this.sessions[p].sync(pairJob, {
-        token, trashItem, appVersion, defaultReportFolder,
-        skipReport: multi,             // one merged report at the end instead
-        onProgress: prog => onProgress && onProgress(Object.assign({}, prog, {
-          pair: p + 1, pairs: this.pairs.length, pairLabel: pairLabel(pr),
-          bytesDone: doneBytes + (prog.bytesDone || 0),
-          bytesTotal,
-          filesDone: doneFiles + (prog.filesDone || 0),
-          filesTotal,
-        })),
+      const pairJob = Object.assign({}, job, {
+        left: pr.left, right: pr.right,
+        pairId: multi ? null : job.pairId,   // same rule as compare()
       });
+      let res;
+      try {
+        res = await this.sessions[p].sync(pairJob, {
+          token, trashItem, appVersion, defaultReportFolder,
+          skipReport: multi,             // one merged report at the end instead
+          onProgress: prog => onProgress && onProgress(Object.assign({}, prog, {
+            pair: p + 1, pairs: this.pairs.length, pairLabel: pairLabel(pr),
+            bytesDone: doneBytes + (prog.bytesDone || 0),
+            bytesTotal,
+            filesDone: doneFiles + (prog.filesDone || 0),
+            filesTotal,
+          })),
+        });
+      } catch (err) {
+        // One pair failing must not throw away what the pairs BEFORE it just
+        // did — their copies are on disk and belong in the report. Record the
+        // failure and move on to the next pair, like FreeFileSync.
+        if (/cancelled/i.test(err.message || '')) { cancelled = true; break; }
+        counters.errors++;
+        allErrors.push({ rel: multi ? `[${pairLabel(pr)}]` : '', message: err.message || String(err) });
+        continue;
+      }
       perPair.push(res);
-      doneBytes += res.counters.bytes || 0;
+      // The progress offset counts WORK bytes (a secure copy reads everything
+      // back: 2× the data), same unit as bytesTotal above — mixing in plain
+      // copied bytes made the ring jump backwards between pairs.
+      doneBytes += res.counters.workBytes != null ? res.counters.workBytes : (res.counters.bytes || 0);
       doneFiles += (res.counters.files || 0) + (res.counters.moved || 0) + (res.counters.deleted || 0);
+      // res.counters.errors already counts this pair's errors — adding
+      // res.errors.length again would double every one of them.
       for (const k of Object.keys(counters)) counters[k] += res.counters[k] || 0;
-      counters.errors += res.errors.length;
+      verified += res.verified || 0;
       allErrors.push(...res.errors.map(e => Object.assign({}, e, {
         rel: multi ? `[${pairLabel(pr)}] ${e.rel}` : e.rel,
       })));
@@ -617,7 +689,6 @@ class MultiSession {
         rightPath: this.pairs.map(x => x.right).join('  ·  '),
         variant: job.sync.variant, compareVariant: job.compare.compareVariant,
         copyLevel: job.sync.copyLevel,
-        proAlgo: job.sync.copyLevel === 'pro' ? job.sync.proAlgo : '',
         deletion: job.sync.deletion, versioningStyle: '',
         filter: { include: job.compare.includeFilter, exclude: job.compare.excludeFilter },
         startedAt, endedAt, run: mergedRun,
@@ -646,6 +717,7 @@ class MultiSession {
 
     return {
       counters,
+      verified,
       errors: allErrors,
       notes : allNotes,
       cancelled,

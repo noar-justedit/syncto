@@ -116,15 +116,16 @@ class SftpFs {
     };
   }
 
+  // Null means "does not exist" — and only that. SSH_FX_NO_SUCH_FILE is 2;
+  // a permission error must surface, not masquerade as an absent file (the
+  // comparison would take "absent" at its word and schedule deletions).
   async stat(p) {
-    return this._q(() => new Promise(resolve => {
-      this.sftp.lstat(normalize(p), (err, st) => resolve(err ? null : this._mapStat(st)));
-    }));
-  }
-
-  async statFollow(p) {
-    return this._q(() => new Promise(resolve => {
-      this.sftp.stat(normalize(p), (err, st) => resolve(err ? null : this._mapStat(st)));
+    return this._q(() => new Promise((resolve, reject) => {
+      this.sftp.lstat(normalize(p), (err, st) => {
+        if (!err) return resolve(this._mapStat(st));
+        if (err.code === 2 || /no such file/i.test(err.message || '')) return resolve(null);
+        reject(err);
+      });
     }));
   }
 
@@ -218,17 +219,33 @@ class SftpFs {
     }));
   }
 
+  _rawRename(src, dst) {
+    return this._q(() => new Promise((resolve, reject) => {
+      this.sftp.rename(src, dst, err => err ? reject(err) : resolve());
+    }));
+  }
+
   async rename(from, to) {
     const src = normalize(from), dst = normalize(to);
     try {
-      await this._q(() => new Promise((resolve, reject) => {
-        this.sftp.rename(src, dst, err => err ? reject(err) : resolve());
-      }));
+      await this._rawRename(src, dst);
     } catch (e) {
-      // Most servers refuse to rename onto an existing target.
-      if (await this.exists(dst)) { await this.unlink(dst); await this.rename(src, dst); }
-      else throw e;
+      // Most servers refuse to rename onto an existing target. The engine's
+      // "tmp file → final name" rename legitimately needs to replace one, so
+      // clear the target and retry — but only when the SOURCE is still there,
+      // otherwise a failed rename would delete the target and nothing else.
+      if ((await this.exists(src)) && (await this.exists(dst))) {
+        await this.unlink(dst);
+        await this._rawRename(src, dst);
+      } else throw e;
     }
+  }
+
+  // Rename with NO delete-and-retry fallback. This is what makes the lock
+  // takeover atomic: of two machines renaming the same abandoned lock, exactly
+  // one may succeed — a fallback that deletes the target would let both win.
+  async renameStrict(from, to) {
+    return this._rawRename(normalize(from), normalize(to));
   }
 
   async setMTime(p, mtimeMs) {
@@ -247,7 +264,6 @@ class SftpFs {
   }
 
   async flush() { /* the server owns its cache */ }
-  async freeSpace() { return null; }
   supportsTrash() { return false; }
 }
 

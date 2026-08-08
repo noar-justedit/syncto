@@ -67,30 +67,28 @@ class NativeFs {
     return path.resolve(s);
   }
 
+  // lstat, not access: access() follows symlinks, so a dangling link would
+  // read as "absent" — and then replacing it fails with EEXIST.
   async exists(p) {
-    try { await fs.promises.access(p); return true; } catch (_) { return false; }
+    try { await fs.promises.lstat(p); return true; } catch (_) { return false; }
   }
 
-  // Returns null when the item does not exist. Never follows symlinks.
+  // Returns null when the item does not exist — and ONLY then. A permission
+  // error must throw: "unreadable" reported as "absent" is how a sync engine
+  // ends up deleting the healthy side. Never follows symlinks.
   async stat(p) {
     let st;
-    try { st = await fs.promises.lstat(p); } catch (_) { return null; }
+    try { st = await fs.promises.lstat(p); }
+    catch (err) {
+      if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return null;
+      throw err;
+    }
     return {
       type   : st.isSymbolicLink() ? 'symlink' : st.isDirectory() ? 'folder' : st.isFile() ? 'file' : 'other',
       size   : st.size,
       mtime  : st.mtimeMs,
       mode   : st.mode,
       id     : (st.dev != null && st.ino != null) ? `${st.dev}:${st.ino}` : null,
-    };
-  }
-
-  async statFollow(p) {
-    let st;
-    try { st = await fs.promises.stat(p); } catch (_) { return null; }
-    return {
-      type : st.isDirectory() ? 'folder' : st.isFile() ? 'file' : 'other',
-      size : st.size, mtime: st.mtimeMs, mode: st.mode,
-      id   : (st.dev != null && st.ino != null) ? `${st.dev}:${st.ino}` : null,
     };
   }
 
@@ -140,6 +138,10 @@ class NativeFs {
 
   async rename(from, to) { await fs.promises.rename(from, to); }
 
+  // Same as rename on this backend — POSIX rename is already atomic. Exists so
+  // the directory lock can demand "no delete-and-retry tricks" on any backend.
+  async renameStrict(from, to) { await fs.promises.rename(from, to); }
+
   async setMTime(p, mtimeMs) {
     const t = new Date(mtimeMs);
     await fs.promises.utimes(p, t, t);
@@ -154,11 +156,6 @@ class NativeFs {
     try { fh = await fs.promises.open(p, 'r+'); await fh.sync(); }
     catch (_) {}
     finally { if (fh) { try { await fh.close(); } catch (_) {} } }
-  }
-
-  async freeSpace(p) {
-    try { const s = await fs.promises.statfs(p); return s.bavail * s.bsize; }
-    catch (_) { return null; }
   }
 
   supportsTrash() { return true; }

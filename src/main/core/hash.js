@@ -28,18 +28,15 @@
 //   secure    xxHash64 computed on the source while writing, then recomputed by
 //             reading the target back. Catches silent corruption. Roughly halves
 //             throughput on a fast drive because everything is read twice.
-//   pro       same as secure with xxHash128 (or MD5 for interchange), plus a
-//             checksum sidecar written next to the copied data and a full
-//             report. This is the level to use when someone else will have to
-//             trust the copy.
+//
+// The checksum list written at the secure level (optional, see the settings) is
+// what lets anyone re-verify the copy months later without the source.
 //
 // xxHash is not cryptographic: it detects accidental corruption, not tampering.
 // That is the right trade-off here — it runs several GB/s where MD5 crawls.
 
 let _hw = null;
 function hw() { if (!_hw) _hw = require('hash-wasm'); return _hw; }
-
-const ALGOS = ['xxh64', 'xxh128', 'md5', 'sha256'];
 
 async function createHasher(algo) {
   const h = hw();
@@ -52,10 +49,8 @@ async function createHasher(algo) {
   }
 }
 
-function algoFor(level, proAlgo) {
-  if (level === 'pro')    return proAlgo || 'xxh128';
-  if (level === 'secure') return 'xxh64';
-  return null;
+function algoFor(level) {
+  return level === 'secure' ? 'xxh64' : null;
 }
 
 // Streams a file through a hasher. Returns the lowercase hex digest.
@@ -102,4 +97,4 @@ function parseChecksumList(text) {
   return { algo, entries: out };
 }
 
-module.exports = { createHasher, hashStream, algoFor, ALGOS, formatChecksumList, parseChecksumList };
+module.exports = { createHasher, hashStream, algoFor, formatChecksumList, parseChecksumList };

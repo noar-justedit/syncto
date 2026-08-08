@@ -61,7 +61,7 @@ function fmtDuration(ms) {
 // Everything the three writers need, built once.
 function buildReport(input) {
   const {
-    pairName, leftPath, rightPath, variant, compareVariant, copyLevel, proAlgo,
+    pairName, leftPath, rightPath, variant, compareVariant, copyLevel,
     deletion, versioningStyle, filter, startedAt, endedAt, run, stats, comparisonErrors,
   } = input;
 
@@ -91,7 +91,7 @@ function buildReport(input) {
       syncVariant: variant,
       compareVariant,
       copyLevel,
-      checksumAlgorithm: proAlgo || (copyLevel === 'secure' ? 'xxh64' : ''),
+      checksumAlgorithm: copyLevel === 'secure' ? 'xxh64' : '',
       deletion, versioningStyle,
       includeFilter: filter ? filter.include : '*',
       excludeFilter: filter ? filter.exclude : '',

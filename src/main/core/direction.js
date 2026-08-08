@@ -31,8 +31,6 @@
 
 const { CAT, OP, sameTime } = require('./compare');
 
-const VARIANTS = ['twoWay', 'mirror', 'update', 'custom'];
-
 function diffDefaults(variant) {
   switch (variant) {
     case 'mirror': return { leftOnly: 'right', rightOnly: 'right', leftNewer: 'right', rightNewer: 'right' };
@@ -94,9 +92,12 @@ function sideChange(sideState, dbSide, type, tol, shifts) {
 
 // Is the recorded state still a valid "in sync" reference under the current
 // comparison variant? A database written with time+size cannot vouch for a
-// content comparison, and vice versa.
+// content comparison, and vice versa. Folders always pass: their recorded
+// mtimes are incidental (creating a file inside touches them) and carry no
+// synchronization meaning.
 function stillInSync(dbEntry, variant, tol, shifts) {
   if (!dbEntry) return true;
+  if (dbEntry.type === 'folder') return true;
   if (variant === 'size') return true;
   if (variant === 'content') return dbEntry.cmpVar === 'content';
   if (dbEntry.cmpVar === 'content') return true;
@@ -107,6 +108,14 @@ function directionByChange(node, dirs, dbEntry, cfg) {
   const tol = cfg.timeTolerance, shifts = cfg.timeShifts || [];
 
   if (node.cat === CAT.CONFLICT) return { dir: 'conflict', msg: node.catMsg || 'Conflict.' };
+
+  // Both sides are identical RIGHT NOW: they are in sync, whatever the
+  // database believes. Without this, a file created identically on both sides
+  // (or one synchronized by another tool) would be flagged "both sides have
+  // changed" forever — a conflict no run could ever clear, since conflicts are
+  // skipped and skipping preserves the stale database entry.
+  if (node.cat === CAT.EQUAL) return { dir: 'none' };
+
   if (!stillInSync(dbEntry, cfg.compareVariant || 'timeSize', tol, shifts)) {
     return { dir: 'conflict', msg: 'The database entry is not in sync with the current comparison settings.' };
   }
@@ -367,5 +376,5 @@ function sizeOf(n, side) {
 module.exports = {
   applyDirections, computeStats, operationFor, applyFolderRules,
   detectMoves, dissolveMove,
-  diffDefaults, changeDefaults, usesDatabase, VARIANTS, stillInSync, sideChange,
+  diffDefaults, changeDefaults, usesDatabase, stillInSync, sideChange,
 };

@@ -30,7 +30,7 @@ Licensed under the **GNU General Public License v3.0** (see [`LICENSE`](./LICENS
 | **Synchronize** | 2 Ways, Mirror, Update, or a Custom rule per category |
 | **Multi-pair** | one job synchronizes any number of folder pairs, FreeFileSync-style |
 | **Moved files** | a rename is detected and replayed as a rename — no re-copy |
-| **Verified copy** | four levels, from raw speed to xxHash128 with a checksum sidecar |
+| **Verified copy** | three levels, up to xxHash64 read-back with a checksum sidecar |
 | **Deletion** | trash or permanent — always announced, never silent |
 | **Filter** | per-job include/exclude patterns, name- or path-anchored |
 | **Report** | HTML, CSV and JSON, with every checksum |
@@ -131,17 +131,26 @@ safe. Switchable off in the settings.
 | **Fast** | nothing | nothing — it trusts the filesystem |
 | **Verified** | nothing | truncated or interrupted copies (size check) |
 | **Secure** | reads everything twice | silent corruption (xxHash64 read-back) |
-| **Pro** | same as Secure | same, with xxHash128, a checksum sidecar and a full report |
 
-Use **Pro** whenever someone else will have to trust the copy. The sidecar
-(`syncto-checksums.txt`, written at the root of each target) can be re-checked at
-any time with the shield button in the title bar, months later, without the
-original source.
+**Secure works in two passes, like ingesto**: everything is copied first, then
+everything is read back from the target and compared to the fingerprint taken
+while writing. The interface turns blue and reads `VERIFYING · SECURE` during
+the second pass, and the progress accounts for it — a secure run moves twice the
+data, and says so.
+
+Because verification happens after the copy, a file that fails it has already
+replaced the previous version. syncto reports the error, keeps the file out of
+the checksum list, and does not record it in the database, so the next run
+re-examines it. The size check still happens before the rename, so a truncated
+copy never takes a good file's name.
+
+Switch on **Write a checksum list** in the settings to get
+`syncto-checksums.txt` at the root of each target: the shield button in the
+title bar re-checks a folder against it months later, without the original
+source.
 
 xxHash is not cryptographic — it detects accidental corruption, not tampering.
-That is the right trade-off here: it runs at several GB/s where MD5 crawls. MD5
-and SHA-256 are available under the PRO mode when you need interchange or a
-cryptographic guarantee.
+That is the right trade-off here: it runs at several GB/s where MD5 crawls.
 
 ### Deletion
 
@@ -194,9 +203,9 @@ sftp://user@host:22/srv/backup
 ```
 
 Everything works the same, including checksum verification — it just reads the
-data back over the network, so **Secure** and **Pro** are considerably slower
-than on a local drive. SFTP has no trash and no inode information, so use
-permanent deletion there.
+data back over the network, so **Secure** is considerably slower than on a
+local drive. SFTP has no trash and no inode information, so use permanent
+deletion there.
 
 ### Jobs
 
@@ -223,7 +232,7 @@ settings, compared and synchronized in one go.
 |---|---|---|
 | `.syncto.db` | root of both folders | the last synchronized state, for two-way sync and move detection. Hidden, gzipped. Delete it and two-way sync restarts from scratch. |
 | `.syncto.lock` | root of each folder, while running | who is synchronizing right now. Removed at the end; reclaimed automatically after a crash. |
-| `syncto-checksums.txt` | root of each target | the checksum list, at the Secure and Pro levels |
+| `syncto-checksums.txt` | root of each target | the checksum list, at the Secure level (merged run after run) |
 | `*.syncto_tmp` | next to a file being written | fail-safe copy. A leftover means a run was interrupted; the next run ignores it and cleans it up. |
 | `syncto_<job>_<date>.html` | `Documents/syncto reports` | the report. Written outside the synchronized folders on purpose. |
 

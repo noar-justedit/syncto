@@ -25,9 +25,10 @@
 // engine only ever sees resolved absolute paths.
 //
 // Every backend exposes the same contract:
-//   connect() close() stat(p) statFollow(p) readdir(p) readlink(p) symlink(t,p)
+//   connect() close() stat(p) readdir(p) readlink(p) symlink(t,p)
 //   createReadStream(p) createWriteStream(p) mkdir(p) unlink(p) rmdir(p)
-//   rename(a,b) setMTime(p,ms) chmod(p,mode) flush(p) freeSpace(p) exists(p)
+//   rename(a,b) renameStrict(a,b) writeExclusive(p,buf) appendByte(p,b)
+//   setMTime(p,ms) chmod(p,mode) flush(p) exists(p)
 //   join() dirname() basename() resolve() deviceKey(p) displayName(p)
 //   supportsTrash()
 

@@ -322,20 +322,39 @@ async function testSecure() {
   write(L, 'sub/small.txt', 'tiny', t0);
 
   const job = makeJob(L, R, {
-    sync: { variant: 'mirror', copyLevel: 'pro', proAlgo: 'xxh128', writeChecksumList: true,
+    sync: { variant: 'mirror', copyLevel: 'secure', writeChecksumList: true,
             report: { enabled: true, html: true, csv: true, json: true, folder: path.join(ROOT, 'reports') } },
   });
   const { run } = await runPair(job);
 
-  eq(run.errors.length, 0, 'the pro copy completes without errors');
+  eq(run.errors.length, 0, 'the secure copy completes without errors');
   ok(fs.existsSync(path.join(R, 'syncto-checksums.txt')), 'a checksum list is written next to the data');
   ok(run.reportFiles.length === 3, 'HTML, CSV and JSON reports are written');
   ok(fs.readFileSync(run.reportFiles.find(f => f.endsWith('.html')), 'utf8').includes('syncto'),
      'the HTML report is not empty');
 
   const list = fs.readFileSync(path.join(R, 'syncto-checksums.txt'), 'utf8');
-  ok(/xxh128/.test(list), 'the list records which algorithm was used');
+  ok(/xxh64/.test(list), 'the list records which algorithm was used');
   ok(list.split('\n').filter(l => l && !l.startsWith('#')).length === 2, 'every copied file is listed');
+
+  // ORDER OF PHASES — the whole point of the ingesto model: every file is
+  // copied first, and only then is everything read back. No copy may start
+  // after the first verification has begun.
+  const o = scratch();
+  for (let i = 1; i <= 4; i++) write(o.L, `clip_${i}.bin`, Buffer.alloc(300 * 1024, i), t0);
+  const seq = [];
+  const so = new Session();
+  const jo = makeJob(o.L, o.R, { sync: { variant: 'mirror', copyLevel: 'secure' } });
+  await so.compare(jo, { token: {} });
+  const ro = await so.sync(jo, {
+    token: {}, appVersion: 'test',
+    onProgress: p => { if (p.pass && seq[seq.length - 1] !== p.pass) seq.push(p.pass); },
+  });
+  await so.close();
+  eq(seq, ['copy', 'verify', 'cleanup'], 'copy runs to completion, then verification, then cleanup — never back to copying');
+  ok(seq.indexOf('copy') < seq.indexOf('verify'), 'not a single file is copied after verification starts');
+  eq(ro.verified, 4, 'every copied file was read back and checked');
+  eq(ro.errors.length, 0, 'and all of them matched');
 
   // The checksum list lives at the root of the target. A second mirror run must
   // treat it as syncto's own file, not as a stray to be deleted.
@@ -698,6 +717,259 @@ async function testLocking() {
   await set.release();
 }
 
+// ══ 15. Review regressions ═════════════════════════════════════════════════
+// One test per bug found by the full-code review — each of these used to fail.
+async function testReviewRegressions() {
+  console.log('\n15. Review regressions');
+  const { Comparer, isSyncToInternal } = require('../src/main/core/compare');
+  const { migrateJob } = require('../src/main/config');
+  const { readDb, pairIdFor } = require('../src/main/core/db');
+
+  // (a) A name-only include mask must not prune folders — include "*.jpg" has
+  // to reach files in subfolders, at any depth.
+  {
+    const f = new PathFilter('*.jpg', '');
+    ok(f.passFolder('photos'), 'include *.jpg keeps folders walkable');
+    ok(f.passFolder('photos/2026/deep'), 'at any depth');
+    ok(f.passFile('photos/2026/deep/a.jpg'), 'so nested matches are reached');
+    ok(!f.passFile('photos/2026/deep/a.txt'), 'while other files stay excluded');
+
+    const { L, R } = scratch();
+    write(L, 'shoot/day1/a.jpg', 'jpg', Date.now() - 100000);
+    write(L, 'shoot/day1/notes.txt', 'txt', Date.now() - 100000);
+    await runPair(makeJob(L, R, { compare: { includeFilter: '*.jpg' } }));
+    ok(exists(R, 'shoot/day1/a.jpg'), 'e2e: the nested .jpg is synchronized');
+    ok(!exists(R, 'shoot/day1/notes.txt'), 'e2e: the .txt is not');
+  }
+
+  // (b) An unreadable directory is a FATAL comparison error, and the healthy
+  // side's items must not be fabricated into one-sided rows (=> deletions).
+  {
+    const { L, R } = scratch();
+    write(L, 'boom/precious.mov', 'data');
+    write(R, 'boom/precious.mov', 'data');
+    const fsx = new NativeFs();
+    const bad = Object.create(fsx);
+    bad.readdir = p => p.endsWith('boom')
+      ? Promise.reject(new Error('EACCES: permission denied'))
+      : NativeFs.prototype.readdir.call(fsx, p);
+    const c = new Comparer({ left: { fs: bad, path: L }, right: { fs: fsx, path: R }, config: {} });
+    const res = await c.run();
+    ok(res.errors.some(e => e.fatal), 'an unreadable folder is a fatal error');
+    ok(!res.nodes.some(n => n.rel === 'boom/precious.mov'),
+       'and nothing under it is reported one-sided');
+  }
+
+  // (c) Synchronizing on top of a fatal comparison error is refused.
+  {
+    const { L, R } = scratch();
+    write(L, 'a.txt', 'a');
+    const s = new Session();
+    const job = makeJob(L, R, {});
+    await s.compare(job, { token: {} });
+    s.errors.push({ path: L, message: 'permission denied', fatal: true });
+    let threw = null;
+    try { await s.sync(job, { token: {}, appVersion: 'test' }); } catch (e) { threw = e; }
+    ok(threw && /could not read/i.test(threw.message), 'sync refuses a broken comparison');
+    await s.close();
+  }
+
+  // (d) stat() reports "absent" only for a genuinely absent item.
+  {
+    const fsx = new NativeFs();
+    eq(await fsx.stat(path.join(ROOT, 'definitely-not-there')), null, 'missing item -> null');
+  }
+
+  // (e) Two way: a file identical on both sides but unknown to (or stale in)
+  // the database is IN SYNC — never an unresolvable "both sides changed".
+  {
+    const { L, R } = scratch();
+    const t0 = Date.now() - 300000;
+    write(L, 'a.txt', 'a', t0);
+    await runPair(makeJob(L, R, { sync: { variant: 'twoWay' } }));
+    // Same file appears identically on both sides, outside syncto's back.
+    write(L, 'both.txt', 'same', t0);
+    write(R, 'both.txt', 'same', t0);
+    const s = new Session();
+    await s.compare(makeJob(L, R, { sync: { variant: 'twoWay' } }), { token: {} });
+    const n = s.nodes.find(x => x.rel === 'both.txt');
+    eq(n.op, OP.NONE, 'identical both sides + no db entry = in sync');
+    eq(s.stats.conflicts, 0, 'no conflict is raised');
+    await s.close();
+  }
+
+  // (f) Folder mtimes drift (creating files touches them) — a two-way rerun
+  // must not flag folders as out of sync.
+  {
+    const { L, R } = scratch();
+    const t0 = Date.now() - 300000;
+    write(L, 'sub/a.txt', 'a', t0);
+    await runPair(makeJob(L, R, { sync: { variant: 'twoWay' } }));
+    fs.utimesSync(path.join(L, 'sub'), new Date(t0 - 5000000), new Date(t0 - 5000000));
+    fs.utimesSync(path.join(R, 'sub'), new Date(t0 + 5000000), new Date(t0 + 5000000));
+    const s = new Session();
+    await s.compare(makeJob(L, R, { sync: { variant: 'twoWay' } }), { token: {} });
+    eq(s.stats.conflicts, 0, 'folder mtime drift is not a conflict');
+    await s.close();
+  }
+
+  // (g) Cancellation resolves cleanly: what was done is returned and the
+  // database is still written — the next run must not re-discover it all.
+  {
+    const { L, R } = scratch();
+    write(L, 'a.txt', 'a', Date.now() - 100000);
+    const s = new Session();
+    const job = makeJob(L, R, { sync: { variant: 'twoWay' } });
+    const token = { cancelled: false, paused: false };
+    await s.compare(job, { token });
+    token.cancelled = true;
+    const res = await s.sync(job, { token, appVersion: 'test' });
+    ok(res.cancelled === true, 'a cancelled run resolves instead of rejecting');
+    ok(!!res.dbStamp, 'and the database is still written');
+    await s.close();
+  }
+
+  // (h) Legacy jobs: the removed Pro level maps to Secure (its closest kin),
+  // never silently down to Fast; UI-less versioning falls back to the trash.
+  {
+    const j1 = migrateJob({ sync: { copyLevel: 'pro' } });
+    eq(j1.sync.copyLevel, 'secure', "legacy copyLevel 'pro' becomes 'secure'");
+    const j2 = migrateJob({ sync: { deletion: 'versioning' } });
+    eq(j2.sync.deletion, 'recycler', 'versioning with no revision folder falls back to the trash');
+    const j3 = migrateJob({ sync: { deletion: 'versioning', versioning: { leftFolder: '/rev' } } });
+    eq(j3.sync.deletion, 'versioning', 'but a configured revision folder is honoured');
+  }
+
+  // (i) OS litter must not keep a "visually empty" folder alive.
+  {
+    const { L, R } = scratch();
+    write(R, 'old/x.txt', 'x');
+    write(R, 'old/.DS_Store', 'junk');
+    fs.unlinkSync(path.join(R, 'old/x.txt'));       // only litter remains
+    await runPair(makeJob(L, R, {}));               // mirror: 'old' must go
+    ok(!exists(R, 'old'), 'a folder holding only .DS_Store is deleted');
+  }
+
+  // (j) Overwriting a symlink works even with permanent deletion (nothing is
+  // archived, so the old link must be explicitly replaced). Skipped where the
+  // OS forbids creating symlinks (Windows without developer mode).
+  {
+    const { L, R } = scratch();
+    const t0 = Date.now();
+    let canLink = true;
+    try {
+      fs.symlinkSync('/tmp/new-target', path.join(L, 'link'));
+      fs.symlinkSync('/tmp/old-target', path.join(R, 'link'));
+    } catch (_) { canLink = false; }
+    if (canLink) {
+      fs.lutimesSync(path.join(L, 'link'), new Date(t0), new Date(t0));
+      fs.lutimesSync(path.join(R, 'link'), new Date(t0 - 600000), new Date(t0 - 600000));
+      const { run } = await runPair(makeJob(L, R, { compare: { symlinks: 'asLink' } }));
+      eq(run.errors.length, 0, 'symlink overwrite reports no error');
+      eq(fs.readlinkSync(path.join(R, 'link')), '/tmp/new-target', 'and the link now points to the new target');
+    } else {
+      ok(true, 'symlink overwrite skipped (symlinks not permitted here)');
+      ok(true, 'symlink overwrite skipped (symlinks not permitted here)');
+    }
+  }
+
+  // (k) Two names differing only by case: flagged, first one wins, no crash.
+  // Only meaningful on a case-SENSITIVE filesystem — on APFS or NTFS the two
+  // writes land in the same file and there is nothing to collide.
+  {
+    const { L, R } = scratch();
+    write(L, 'File.txt', 'A');
+    const caseInsensitive = fs.existsSync(path.join(L, 'FILE.TXT'));
+    if (caseInsensitive) {
+      ok(true, 'case collision skipped (case-insensitive filesystem)');
+      ok(true, 'case collision skipped (case-insensitive filesystem)');
+    } else {
+      write(L, 'file.txt', 'B');
+      const s = new Session();
+      const cmp = await s.compare(makeJob(L, R, {}), { token: {} });
+      ok(cmp.errors.some(e => /upper\/lower case/i.test(e.message)), 'case collision is reported');
+      eq(s.nodes.filter(n => n.rel.toLowerCase() === 'file.txt').length, 1, 'and only one row is kept');
+      await s.close();
+    }
+  }
+
+  // (l) The checksum sidecar accumulates across runs instead of being reduced
+  // to whatever the latest run copied.
+  {
+    const { L, R } = scratch();
+    const t0 = Date.now() - 100000;
+    write(L, 'a.txt', 'aaa', t0);
+    const jobOpts = { sync: { copyLevel: 'secure', writeChecksumList: true } };
+    await runPair(makeJob(L, R, jobOpts));
+    write(L, 'b.txt', 'bbb', t0);
+    await runPair(makeJob(L, R, jobOpts));
+    const list = read(R, 'syncto-checksums.txt') || '';
+    ok(list.includes('a.txt') && list.includes('b.txt'),
+       'the sidecar keeps earlier entries when later runs add more');
+  }
+
+  // (m) Errors are not counted twice by the multi-pair aggregation.
+  {
+    const { dir } = scratch();
+    const mk = name => {
+      const l = path.join(dir, name + 'L'), r = path.join(dir, name + 'R');
+      fs.mkdirSync(l, { recursive: true }); fs.mkdirSync(r, { recursive: true });
+      write(r, 'stray.txt', 'x');          // mirror wants to delete it…
+      return { left: l, right: r };
+    };
+    const job = makeJob('', '', { sync: { deletion: 'recycler' } });   // …but no trash is available
+    job.pairs = [mk('p1'), mk('p2')];
+    const ms = new MultiSession();
+    await ms.compare(job, { token: {} });
+    const res = await ms.sync(job, { token: {}, appVersion: 'test' });   // no trashItem provided
+    eq(res.counters.errors, res.errors.length, 'counters.errors equals the error list length');
+    eq(res.errors.length, 2, 'one error per pair, not two');
+    await ms.close();
+  }
+
+  // (n) MultiSession exposes visibleIndices with globalized indices.
+  {
+    const { dir } = scratch();
+    const l1 = path.join(dir, 'aL'), r1 = path.join(dir, 'aR');
+    const l2 = path.join(dir, 'bL'), r2 = path.join(dir, 'bR');
+    for (const d of [l1, r1, l2, r2]) fs.mkdirSync(d, { recursive: true });
+    write(l1, 'one.txt', '1'); write(l2, 'two.txt', '2');
+    const job = makeJob('', '', {});
+    job.pairs = [{ left: l1, right: r1 }, { left: l2, right: r2 }];
+    const ms = new MultiSession();
+    await ms.compare(job, { token: {} });
+    const vis = ms.visibleIndices({ showEqual: true, showExcluded: true });
+    eq(vis.length, 2, 'one visible row per pair');
+    ok(vis.some(i => i >= 1000000), 'indices of the second pair are globalized');
+    await ms.close();
+  }
+
+  // (o) A database entry hidden by the current filter keeps its history.
+  {
+    const { L, R } = scratch();
+    const t0 = Date.now() - 300000;
+    write(L, 'keep.txt', 'k', t0);
+    write(L, 'hide.txt', 'h', t0);
+    await runPair(makeJob(L, R, { sync: { variant: 'twoWay' } }));
+    await runPair(makeJob(L, R, { sync: { variant: 'twoWay' }, compare: { excludeFilter: 'hide.txt' } }));
+    const fsx = new NativeFs();
+    const doc = await readDb(fsx, L);
+    const sess = doc.sessions[pairIdFor(null, L, R)];
+    ok(sess && sess.items['hide.txt'], 'the filtered-out entry survives in the database');
+  }
+
+  // (p) The lock layer ignores folders that do not exist yet, and syncto's
+  // transient "Delete.N." takeover names are invisible to the comparison.
+  {
+    const fsx = new NativeFs();
+    const set = await acquireAll([{ fs: fsx, path: path.join(ROOT, 'not-yet-created') }], {});
+    eq(set.count, 0, 'a missing folder is not locked (the run will create it)');
+    await set.release();
+    ok(isSyncToInternal('Delete.0..syncto.lock'), 'a lock being taken over is internal litter');
+    ok(!isSyncToInternal('Delete.0.notes'), 'but a user file named Delete.0.notes is not');
+  }
+}
+
 // ══ Run ════════════════════════════════════════════════════════════════════
 (async function main() {
   console.log('syncto engine tests');
@@ -717,6 +989,7 @@ async function testLocking() {
     await testMovesTwoWayAndOff();
     await testMultiPair();
     await testLocking();
+    await testReviewRegressions();
   } catch (err) {
     failed++;
     failures.push('UNCAUGHT: ' + (err.stack || err.message));
