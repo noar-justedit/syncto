@@ -21,12 +21,20 @@ SVG="icon.svg"
 [ -f "$SVG" ] || { echo "icon.svg not found"; exit 1; }
 
 echo "Rendering PNGs from $SVG…"
-# qlmanage renders SVG without any extra dependency on macOS.
 rm -rf .iconwork && mkdir -p .iconwork icons
-qlmanage -t -s 1024 -o .iconwork "$SVG" >/dev/null 2>&1
-MASTER=".iconwork/$(ls .iconwork | head -1)"
-[ -f "$MASTER" ] || { echo "Could not render the SVG. Install librsvg (brew install librsvg) and retry."; exit 1; }
-cp "$MASTER" icon.png
+
+# rsvg-convert first: it keeps the transparent background, which the icon needs.
+# qlmanage is the no-dependency fallback but can flatten the alpha channel.
+if command -v rsvg-convert &>/dev/null; then
+  rsvg-convert -w 2048 -h 2048 -o icon.png "$SVG"
+  sips -z 1024 1024 icon.png --out icon.png >/dev/null
+else
+  echo "rsvg-convert not found (brew install librsvg) — falling back to qlmanage."
+  qlmanage -t -s 1024 -o .iconwork "$SVG" >/dev/null 2>&1
+  MASTER=".iconwork/$(ls .iconwork | head -1)"
+  [ -f "$MASTER" ] || { echo "Could not render the SVG. Install librsvg (brew install librsvg) and retry."; exit 1; }
+  cp "$MASTER" icon.png
+fi
 
 for S in 16 32 48 64 128 256 512 1024; do
   sips -z $S $S icon.png --out "icons/${S}x${S}.png" >/dev/null

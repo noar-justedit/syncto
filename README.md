@@ -12,13 +12,21 @@ Licensed under the **GNU General Public License v3.0** (see [`LICENSE`](./LICENS
 
 ## Screenshots
 
-| Main window | Auto-sync armed |
+| Main window | Copying — Secure |
 |---|---|
-| ![syncto main window](docs/screenshots/syncto-main_V2.png) | ![auto-sync armed](docs/screenshots/syncto-autosync_V2.png) |
+| ![syncto main window](docs/screenshots/syncto-main.png) | ![copy phase](docs/screenshots/syncto-sync.png) |
 
-| Filter by right-click | Another machine is running |
+| Verification pass | Run summary |
 |---|---|
-| ![filter](docs/screenshots/syncto-filter_V2.png) | ![waiting on a lock](docs/screenshots/syncto-lock_V2.png) |
+| ![verification pass](docs/screenshots/syncto-verify.png) | ![summary](docs/screenshots/syncto-summary.png) |
+
+| Filter — per job | Settings |
+|---|---|
+| ![filter](docs/screenshots/syncto-filter.png) | ![settings](docs/screenshots/syncto-settings.png) |
+
+| Auto-sync confirmation | Another machine is running |
+|---|---|
+| ![auto-sync](docs/screenshots/syncto-autosync.png) | ![waiting on a lock](docs/screenshots/syncto-lock.png) |
 
 ---
 
@@ -296,5 +304,9 @@ also GPLv3 — the comparison categories, the four variants and the versioning
 schemes follow it closely so that habits transfer. No FreeFileSync code is used;
 syncto is written from scratch in JavaScript on Electron.
 
-App icon based on the `folder-sync` glyph from [Lucide](https://lucide.dev) (ISC).
-Interface font: Poppins (SIL Open Font License).
+App icon by Just Edit. Interface font: Poppins (SIL Open Font License).
+
+The icon is generated from `build-resources/icon.svg`. After editing that file,
+run `./scripts/make-icon.sh` on macOS, or `python3 scripts/gen-icons.py`
+(`pip install cairosvg pillow`) on any platform, to rebuild the `.icns`, `.ico`
+and PNG sets that the installers embed.

@@ -1,34 +1,29 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   syncto — app icon
-  Based on the "folder-sync" glyph from Lucide (ISC License).
-  Drawn on the ingesto/renamo dark background with the violet accent.
+  Artwork supplied by Just Edit (syncto.svg, 24x24 grid).
+  Scaled x38.169 and centred on the 1024 canvas so the shape sits inside the
+  macOS safe area (840px wide). Styles are inlined rather than in a <style>
+  block: qlmanage / rsvg / electron-builder handle attributes reliably, CSS
+  classes not always.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%"   stop-color="#1b1d24"/>
-      <stop offset="100%" stop-color="#0e0f13"/>
-    </linearGradient>
-    <linearGradient id="stroke" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%"   stop-color="#a880ff"/>
-      <stop offset="55%"  stop-color="#8b6ff0"/>
-      <stop offset="100%" stop-color="#35c98b"/>
+    <linearGradient id="folder" x1="1" y1="12" x2="23" y2="12" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5936d8"/>
+      <stop offset="1" stop-color="#3b2491"/>
     </linearGradient>
   </defs>
 
-  <rect x="0" y="0" width="1024" height="1024" rx="228" fill="url(#bg)"/>
-  <rect x="8" y="8" width="1008" height="1008" rx="222" fill="none"
-        stroke="rgba(255,255,255,.08)" stroke-width="16"/>
-
-  <!-- Lucide folder-sync, 24x24 viewport scaled x30 and centred -->
-  <g transform="translate(152,152) scale(30)"
-     fill="none" stroke="url(#stroke)" stroke-width="2"
-     stroke-linecap="round" stroke-linejoin="round">
-    <path d="M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v.5"/>
-    <path d="M12 10v4h4"/>
-    <path d="m12 14 1.535-1.605a5 5 0 0 1 8 1.5"/>
-    <path d="M22 22v-4h-4"/>
-    <path d="m22 18-1.535 1.605a5 5 0 0 1-8-1.5"/>
+  <g transform="translate(53.98,51.97) scale(38.169)">
+    <path fill="url(#folder)"
+          d="M20.8,21.4c1.2,0,2.2-1,2.2-2.2v-11c0-1.2-1-2.2-2.2-2.2h-8.7c-.8,0-1.5-.4-1.9-1l-.9-1.3c-.4-.6-1.1-1-1.8-1H3.2c-1.2,0-2.2,1-2.2,2.2v14.3c0,1.2,1,2.2,2.2,2.2h17.7Z"/>
+    <g fill="none" stroke="#ff0062" stroke-width="1.5"
+       stroke-linecap="round" stroke-linejoin="round">
+      <path d="M6.3,13.6c0-3.2,2.6-5.7,5.7-5.7,1.6,0,3.1.6,4.3,1.7l1.4,1.4"/>
+      <path d="M17.7,7.8v3.2h-3.2"/>
+      <path d="M17.7,13.6c0,3.2-2.6,5.7-5.7,5.7h0c-1.6,0-3.1-.6-4.3-1.7l-1.4-1.4"/>
+      <path d="M9.5,16.1h-3.2v3.2"/>
+    </g>
   </g>
 </svg>

@@ -4,6 +4,43 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.2.3] — 2026-08-09
+
+### Changed
+- **New application icon.** The Lucide-derived glyph on a dark rounded square is
+  replaced by the Just Edit artwork: a violet folder with the sync arrows, drawn
+  as a shape on a transparent background. Every embedded asset is regenerated
+  from `build-resources/icon.svg` — `icon.icns` (10 representations up to
+  1024 px), `icon.ico` (16 → 256 px), the 1024 px master and the Linux set.
+  Nothing else in the build configuration changes.
+  **Worth knowing:** macOS caches application icons aggressively. If the old one
+  survives an upgrade, move the `.app` or run `killall Dock`.
+
+### Fixed
+- **Warning text was broken mid-word.** The warning block in the confirmation
+  dialogs (auto-sync, copy errors) used `word-break: break-all`, which is right
+  for file paths and wrong for sentences: the auto-sync warning read
+  `with th / e current settings` and `as a r / eminder`. It now uses
+  `overflow-wrap: anywhere`, which only breaks a word that genuinely does not
+  fit, so paths still wrap and prose reads normally.
+
+### Tooling
+- `scripts/gen-icons.py` regenerates every icon asset from the SVG on any
+  platform (needs `cairosvg` and `pillow`); `scripts/make-icon.sh` stays the
+  macOS path and now prefers `rsvg-convert` over `qlmanage`, which could flatten
+  the transparent background into white.
+- `scripts/shots.js`, `scripts/shot-steps.js` and `scripts/shot-dataset.sh`
+  produce the README screenshots by driving the real application through the
+  DevTools protocol. No screenshot is retouched and nothing in the shipped code
+  is modified to accommodate them.
+
+### Documentation
+- Screenshots retaken at 1440×900 @2×, on a two-pair job with realistic paths
+  and file names. Three new ones: the copy phase, the verification pass and the
+  end-of-run summary.
+
+---
+
 ## [0.2.2] — 2026-08-08
 
 ### Changed
