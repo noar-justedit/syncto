@@ -171,6 +171,13 @@ border:1px solid var(--border2);background:var(--bg3);color:var(--text3);cursor:
 display:flex;align-items:center;justify-content:center;transition:all .18s;}
 #swap-btn:hover{color:var(--accent);border-color:var(--accent-g);transform:rotate(180deg);}
 #swap-btn svg{width:17px;height:17px;}
+/* Same remove affordance as every other pair (.pr-rm below) — pair 1 is not
+   special-cased, it is only drawn bigger because it is always present. */
+#pair0-rm{flex-shrink:0;align-self:flex-end;margin-bottom:17px;width:26px;height:26px;
+border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--text3);
+cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;}
+#pair0-rm:hover{border-color:rgba(242,85,90,.5);color:var(--red);background:var(--red-d);}
+#pair0-rm svg{width:13px;height:13px;}
 
 /* ── Mode buttons — ingesto design (.mbtn) ────── */
 .cc-label{font-size:12px;font-weight:700;letter-spacing:.1em;color:var(--text3);
@@ -657,6 +664,9 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
     </div>
     <div class="fld-free" id="right-free"></div>
   </div>
+  <button id="pair0-rm" data-tip="Remove this pair" style="display:none">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+  </button>
 </div>
 
 <div id="pairrows"></div>

@@ -157,6 +157,9 @@ function jobToUi() {
   renderJobTitle();
   $('left-path').value  = j.pairs[0].left  || '';
   $('right-path').value = j.pairs[0].right || '';
+  // Pair 1 can be removed exactly like any other — hidden only when it's the
+  // job's last remaining pair, same rule that governs every other row.
+  $('pair0-rm').style.display = j.pairs.length > 1 ? '' : 'none';
   renderPairRows();
 
   setSeg('seg-cmp', j.compare.compareVariant);
@@ -923,6 +926,15 @@ function bind() {
     for (const p of state.job.pairs) { const t = p.left; p.left = p.right; p.right = t; }
     jobToUi();               // refreshes the main fields AND the rows
     onPathChanged();
+  });
+
+  // Removing pair 1 promotes pair 2 into the main fields — same splice the
+  // other rows use, just at index 0. Only enabled above 1 pair (see jobToUi).
+  $('pair0-rm').addEventListener('click', () => {
+    uiToJob();
+    state.job.pairs.splice(0, 1);
+    jobToUi();
+    onPathChanged();          // re-reads free space for the promoted pair, persists
   });
 
   // Pair rows: edit in place, browse per field, remove, add.

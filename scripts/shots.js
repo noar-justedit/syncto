@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const WebSocket = require('ws');
 
-const OUT = path.join(__dirname, '..', 'docs', 'screenshots');
+const OUT = process.env.SHOT_OUT || path.join(__dirname, '..', 'docs', 'screenshots');
 const PORT = 9333;
 const W = 1440, H = 900, SCALE = 2;
 

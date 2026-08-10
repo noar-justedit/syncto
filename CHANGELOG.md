@@ -4,6 +4,19 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.2.4] — 2026-08-10
+
+### Fixed
+- **The first folder pair could not be removed.** Pairs 2 and beyond had a ✕
+  button; pair 1 — the big SOURCE/DESTINATION fields — did not, so a
+  multi-pair job could never drop back below its original first pair. Pair 1
+  now shows the same ✕ as every other pair, hidden only when it is the job's
+  last remaining pair (exactly like the others). Removing it promotes pair 2
+  into the main fields, same as removing any other pair shifts the ones below
+  it up.
+
+---
+
 ## [0.2.3] — 2026-08-09
 
 ### Changed
