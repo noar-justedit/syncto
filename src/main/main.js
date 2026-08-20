@@ -35,34 +35,55 @@ function semverGt(a, b) {
   }
   return false;
 }
+const UPDATE_MAX_BYTES = 64 * 1024;   // version.json is ~100 bytes
+const UPDATE_HOST = 'raw.githubusercontent.com';
+const RELEASES_URL = 'https://github.com/noar-justedit/syncto/releases/latest';
+
 // GET a URL following up to 3 redirects (https.get does NOT follow them itself).
+//
+// Three guards that were missing: the callback can only fire once (an 'error'
+// arriving after 'end' used to call it a second time), the body is capped (a
+// server answering 200 and then streaming for ever grew a string in the main
+// process until the app died), and a redirect may not leave the host we asked.
 function fetchFollow(url, hops, cb) {
-  if (hops > 3) return cb(null);
+  let called = false;
+  const done = v => { if (!called) { called = true; cb(v); } };
+  if (hops > 3) return done(null);
   try {
+    if (new URL(url).host !== UPDATE_HOST) return done(null);
     const req = https.get(url, { timeout: 4000 }, (res) => {
       if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
         res.resume();
-        let next; try { next = new URL(res.headers.location, url).toString(); } catch (e) { return cb(null); }
+        let next; try { next = new URL(res.headers.location, url).toString(); } catch (e) { return done(null); }
+        called = true;                     // hand the callback to the next hop
         return fetchFollow(next, hops + 1, cb);
       }
-      if (res.statusCode !== 200) { res.resume(); return cb(null); }
+      if (res.statusCode !== 200) { res.resume(); return done(null); }
       let body = '';
-      res.on('data', c => body += c);
-      res.on('end', () => cb(body));
+      res.on('data', c => {
+        body += c;
+        if (body.length > UPDATE_MAX_BYTES) { req.destroy(); done(null); }
+      });
+      res.on('end', () => done(body));
+      res.on('error', () => done(null));
     });
-    req.on('timeout', () => req.destroy());
-    req.on('error', () => cb(null));
-  } catch (e) { cb(null); }
+    req.on('timeout', () => { req.destroy(); done(null); });
+    req.on('error', () => done(null));
+  } catch (e) { done(null); }
 }
 function checkForUpdate() {
   fetchFollow(UPDATE_URL, 0, (body) => {
     if (!body) return;
     let data; try { data = JSON.parse(body); } catch (e) { return; }
     if (!data || !data.version) return;
+    if (!/^\d+(\.\d+){0,3}$/.test(String(data.version))) return;
     if (semverGt(data.version, appVersion()) && win && !win.isDestroyed()) {
       win.webContents.send('update-available', {
-        version: data.version,
-        url: data.url || 'https://github.com/noar-justedit/syncto/releases/latest',
+        version: String(data.version),
+        // NEVER the url from the JSON. It ends up at shell.openExternal, and a
+        // file:// or UNC value there means "run this for me" on every machine
+        // that checks for updates. The releases page is where the download is.
+        url: RELEASES_URL,
       });
     }
   });
@@ -91,6 +112,18 @@ function appVersion() {
   try { return require('../../package.json').version; } catch (_) { return '0.0.0'; }
 }
 
+// shell.openExternal hands the string to the operating system's "open this"
+// machinery. With no scheme check, a file:// path or a UNC share means "run
+// this program", and the only thing standing between that and a click was
+// whoever could edit the JSON the URL came from. Web links only.
+function openExternalSafely(u) {
+  let parsed;
+  try { parsed = new URL(String(u)); } catch (_) { return false; }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
+  shell.openExternal(parsed.toString());
+  return true;
+}
+
 // ── Window ─────────────────────────────────────────────────────────────────
 function createWindow() {
   const w = (prefs.data.window && prefs.data.window.width)  || 1280;
@@ -110,14 +143,59 @@ function createWindow() {
     },
   });
 
-  win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+  // The renderer holds the whole IPC surface: reading any folder, running a
+  // file with its default application, and the stored SFTP credentials. So it
+  // must never be able to become a page we did not write. Without these three
+  // guards, Electron's default is "allow": dropping an .html file on the
+  // window navigated the main webContents, and the page that loaded kept the
+  // preload bridge.
+  const OWN_PAGE = path.join(__dirname, '..', 'renderer', 'index.html');
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    openExternalSafely(url);
+    return { action: 'deny' };
+  });
+  const blockNavigation = (e, url) => {
+    let isOwn = false;
+    try { isOwn = url.startsWith('file://') && path.normalize(new URL(url).pathname) === path.normalize(OWN_PAGE); }
+    catch (_) {}
+    if (!isOwn) { e.preventDefault(); openExternalSafely(url); }
+  };
+  win.webContents.on('will-navigate', blockNavigation);
+  win.webContents.on('will-redirect', blockNavigation);
+  win.webContents.on('will-attach-webview', e => e.preventDefault());
+
+  // Belt and braces alongside the meta tag in index.html: a CSP delivered as a
+  // header cannot be stripped by anything injected into the document.
+  win.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: Object.assign({}, details.responseHeaders, {
+        'Content-Security-Policy': [
+          "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+          "img-src 'self' data:; font-src 'self'; connect-src 'none'; " +
+          "form-action 'none'; base-uri 'none'; frame-ancestors 'none'",
+        ],
+      }),
+    });
+  });
+
+  win.loadFile(OWN_PAGE);
   win.once('ready-to-show', () => { win.show(); if (DEV) win.webContents.openDevTools({ mode: 'detach' }); });
   win.webContents.once('did-finish-load', () => { setTimeout(checkForUpdate, 1500); });
 
+  // Resizing fired this on EVERY pixel, and Prefs.save serialises the whole
+  // configuration and writes it synchronously — in the same process that runs
+  // the synchronization. Dragging a window corner during a large transfer
+  // stalled the event loop and the throughput with it.
+  let resizeTimer = null;
   win.on('resize', () => {
     if (!win) return;
-    const [ww, hh] = win.getSize();
-    prefs.save({ window: { width: ww, height: hh } });
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      resizeTimer = null;
+      if (!win || win.isDestroyed()) return;
+      const [ww, hh] = win.getSize();
+      prefs.save({ window: { width: ww, height: hh } });
+    }, 400);
   });
   win.on('maximize',   () => win.webContents.send('menu', { action: 'maximized',   value: true  }));
   win.on('unmaximize', () => win.webContents.send('menu', { action: 'maximized',   value: false }));
@@ -167,6 +245,13 @@ function buildMenu() {
 app.whenReady().then(() => {
   prefs = new Prefs(app.getPath('userData'));
   prefs.load();
+  // lastJobPath was written on every open and save and read by nobody, so a
+  // restart detached the settings from their file: the title said "not saved
+  // yet" and Ctrl+S asked for a name again — which is exactly how an existing
+  // job file gets overwritten by accident.
+  const last = prefs.data.lastJobPath;
+  if (last && fs.existsSync(last)) currentJobPath = last;
+  else if (last) prefs.save({ lastJobPath: '' });
   session = new MultiSession();
   buildMenu();
   createWindow();
@@ -207,7 +292,7 @@ ipcMain.handle('browse-folder', async (_, title) => {
 
 ipcMain.handle('reveal-path',  (_, p) => { try { shell.showItemInFolder(p); } catch (_) {} });
 ipcMain.handle('open-path',    (_, p) => shell.openPath(p));
-ipcMain.handle('open-external',(_, u) => shell.openExternal(u));
+ipcMain.handle('open-external',(_, u) => openExternalSafely(u));
 
 ipcMain.handle('folder-exists', async (_, p) => {
   try { return fs.statSync(p).isDirectory(); } catch (_) { return false; }
@@ -258,13 +343,22 @@ ipcMain.handle('job-open', async () => {
 });
 
 // A click in the recent list (Zone 1) opens without a dialog. A file that
-// vanished is dropped from the list instead of erroring.
+// really vanished is dropped from the list; anything else is reported.
+//
+// The old catch-all treated "the network share is not mounted yet" and "the
+// file is damaged" as "gone" and quietly deleted the entry — losing the only
+// record of where that job lived, at the exact moment the user needed it.
 ipcMain.handle('job-open-path', async (_, p) => {
   try { return openJobFile(p); }
-  catch (_) {
-    prefs.data.recent = (prefs.data.recent || []).filter(r => r && r.path !== p);
-    prefs.save();
-    return { error: 'gone', recent: prefs.data.recent };
+  catch (err) {
+    let missing = false;
+    try { fs.statSync(p); } catch (e) { missing = e.code === 'ENOENT'; }
+    if (missing) {
+      prefs.data.recent = (prefs.data.recent || []).filter(r => r && r.path !== p);
+      prefs.save();
+      return { error: 'gone', recent: prefs.data.recent };
+    }
+    return { error: 'failed', message: err.message || String(err), path: p };
   }
 });
 
@@ -278,7 +372,23 @@ ipcMain.handle('job-save', async (_, job, saveAs) => {
     });
     if (res.canceled || !res.filePath) return null;
     target = res.filePath;
-    if (!/\.syncto$/i.test(target) && !/\.syncto\.json$/i.test(target)) target += JOB_EXT;
+    if (!/\.syncto$/i.test(target) && !/\.syncto\.json$/i.test(target)) {
+      target += JOB_EXT;
+      // The system dialog checked the name the user typed. We just added an
+      // extension to it, so its overwrite warning never applied to the file we
+      // are about to write: typing "NAS-backup" silently replaced an existing
+      // NAS-backup.syncto. Ask ourselves, since nobody else will.
+      if (fs.existsSync(target)) {
+        const { response } = await dialog.showMessageBox(win, {
+          type: 'warning',
+          buttons: ['Replace', 'Cancel'],
+          defaultId: 1, cancelId: 1,
+          message: `"${path.basename(target)}" already exists.`,
+          detail: 'Saving will replace the job stored in that file.',
+        });
+        if (response !== 0) return null;
+      }
+    }
   }
   try {
     // The file name IS the job name, so saving under a new name renames the job.

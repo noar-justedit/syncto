@@ -64,19 +64,48 @@ function writeFileBuffer(fsx, p, buf) {
   });
 }
 
-async function readDb(fsx, basePath) {
+// Returns the document, or null when there is no usable database here.
+// `onDamaged` is called when a file IS present but cannot be read — that is a
+// very different situation from "no database yet", and reporting the two the
+// same way hid a corrupted file behind a reassuring message.
+async function readDb(fsx, basePath, onDamaged) {
+  const p = fsx.join(basePath, DB_NAME);
+  let buf;
   try {
-    const buf = await readFileBuffer(fsx, fsx.join(basePath, DB_NAME));
-    if (!buf || !buf.length) return null;
+    buf = await readFileBuffer(fsx, p);
+  } catch (err) {
+    if (onDamaged) onDamaged(`${p} could not be read: ${err.message}`);
+    return null;
+  }
+  if (!buf || !buf.length) return null;
+  try {
     const json = JSON.parse((await gunzip(buf)).toString('utf8'));
-    if (json.format !== FORMAT) return null;
+    if (json.format !== FORMAT) {
+      if (onDamaged) onDamaged(`${p} was written by another version of syncto.`);
+      return null;
+    }
     return json;
-  } catch (_) { return null; }
+  } catch (err) {
+    if (onDamaged) onDamaged(`${p} is damaged (${err.message}) — it will be rebuilt from this run.`);
+    return null;
+  }
 }
 
 async function writeDb(fsx, basePath, doc) {
   const buf = await gzip(Buffer.from(JSON.stringify(doc), 'utf8'));
-  await writeFileBuffer(fsx, fsx.join(basePath, DB_NAME), buf);
+  const target = fsx.join(basePath, DB_NAME);
+  // Write beside it, then rename. createWriteStream truncates the target the
+  // instant it opens, so a power cut mid-write destroyed the database — and
+  // this one file holds the history of EVERY pair based in this folder, so
+  // all of them silently fell back to "no database yet" on the next run.
+  const tmp = target + '.syncto_tmp';
+  try {
+    await writeFileBuffer(fsx, tmp, buf);
+    await fsx.rename(tmp, target);
+  } catch (err) {
+    try { await fsx.unlink(tmp); } catch (_) {}
+    throw err;
+  }
 }
 
 // The in-memory view handed to the direction engine.
@@ -104,10 +133,16 @@ class SyncDb {
 
 // Loads the pair's session from both sides and validates that they agree.
 async function loadPairDb(left, right, pairId) {
+  const damage = [];
+  const note = m => damage.push(m);
   const [dl, dr] = await Promise.all([
-    readDb(left.fs, left.path),
-    readDb(right.fs, right.path),
+    readDb(left.fs, left.path, note),
+    readDb(right.fs, right.path, note),
   ]);
+  // A damaged file is not the same story as a fresh folder, and telling the
+  // user "no database yet" about a file that is sitting right there — with a
+  // gunzip error behind it — sent them looking in the wrong place.
+  if (damage.length) return { db: new SyncDb(null), reason: damage.join(' · ') };
   if (!dl || !dr) return { db: new SyncDb(null), reason: 'no database yet' };
 
   const sl = dl.sessions && dl.sessions[pairId];

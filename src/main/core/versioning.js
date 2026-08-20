@@ -106,8 +106,22 @@ class Versioner {
       try { await this.fs.rename(srcPath, target); return target; }
       catch (_) { /* cross-device, fall through to stream copy */ }
     }
-    await streamCopy(srcFs, srcPath, this.fs, target);
+    // Same fail-safe rule as the sync engine: write beside the revision name,
+    // check the size, then rename. A revision the user cannot trust is worse
+    // than no revision — and the source is only unlinked once it is safe.
     const st = await srcFs.stat(srcPath);
+    const tmp = target + '.syncto_tmp';
+    try {
+      await streamCopy(srcFs, srcPath, this.fs, tmp);
+      const out = await this.fs.stat(tmp);
+      if (!out || (st && out.size !== st.size)) {
+        throw new Error(`Revision of ${rel} is incomplete (${out ? out.size : 0} of ${st ? st.size : '?'} bytes).`);
+      }
+      await this.fs.rename(tmp, target);
+    } catch (err) {
+      try { await this.fs.unlink(tmp); } catch (_) {}
+      throw err;
+    }
     if (st) { try { await this.fs.setMTime(target, st.mtime); } catch (_) {} }
     await srcFs.unlink(srcPath);
     return target;
@@ -152,14 +166,31 @@ class Versioner {
 }
 
 // ── Shared helpers ─────────────────────────────────────────────────────────
+// pipe() does not forward errors: a read that broke halfway left the write
+// stream open and a truncated file sitting at the destination — under a
+// revision name, indistinguishable from a good one when restoring. Settle
+// once, tear both streams down, and report how many bytes really went through
+// so the caller can check the size.
 function streamCopy(srcFs, srcPath, dstFs, dstPath) {
   return new Promise((resolve, reject) => {
     const rs = srcFs.createReadStream(srcPath);
     const ws = dstFs.createWriteStream(dstPath);
-    rs.on('error', reject);
-    ws.on('error', reject);
-    ws.on('finish', resolve);
-    rs.pipe(ws);
+    let bytes = 0, settled = false;
+    const fail = err => {
+      if (settled) return;
+      settled = true;
+      try { rs.destroy(); } catch (_) {}
+      try { ws.destroy(); } catch (_) {}
+      reject(err);
+    };
+    rs.on('error', fail);
+    ws.on('error', fail);
+    rs.on('data', chunk => {
+      bytes += chunk.length;
+      if (!ws.write(chunk)) { rs.pause(); ws.once('drain', () => rs.resume()); }
+    });
+    rs.on('end', () => ws.end());
+    ws.on('finish', () => { if (!settled) { settled = true; resolve({ bytes }); } });
   });
 }
 

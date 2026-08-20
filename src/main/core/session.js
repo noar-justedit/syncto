@@ -70,6 +70,8 @@ class Session {
     const res = await comparer.run();
     this.nodes  = res.nodes;
     this.errors = res.errors;
+    this.leftovers = res.leftovers || [];
+    this.cancelled = !!res.cancelled;
 
     // The database is read for two reasons: Two way and Update decide their
     // directions with it, and move detection needs the file ids it remembers.
@@ -89,12 +91,17 @@ class Session {
     this.byChange = applied.byChange;
     this.movesFound = this.wantMoves ? detectMoves(this.nodes, this.db) : 0;
     this.stats = computeStats(this.nodes);
-    this.comparedAt = Date.now();
+    // A cancelled comparison stopped somewhere in the middle of the tree.
+    // Stamping it as compared let the interface re-enable SYNCHRONIZE on a
+    // partial plan — only the scanned fraction would have been copied, and the
+    // summary would have said "completed successfully".
+    this.comparedAt = this.cancelled ? 0 : Date.now();
 
     return {
       count : this.nodes.length,
       stats : this.stats,
       errors: this.errors,
+      cancelled: this.cancelled,
       byChange: this.byChange,
       dbNote: this.dbNote,
       movesFound: this.movesFound,
@@ -255,11 +262,31 @@ class Session {
       throw new Error(`The comparison could not read ${fatal.length === 1 ? 'a folder' : fatal.length + ' folders'} ` +
         `(${fatal[0].path}: ${fatal[0].message}) — synchronizing now could delete healthy files. Fix the error and compare again.`);
     }
+
+    // A base folder that is GONE reads as an empty side, and an empty side plus
+    // a mirror is a mass deletion of the healthy one. That is what happens when
+    // an external drive is unmounted or a share drops: ENOENT, not EACCES, so
+    // the fatal-error guard above never saw it. Creating a missing TARGET is
+    // legitimate — deleting the other side because of it is not, so the run is
+    // refused only when the plan actually removes something over there.
+    for (const e of this.errors) {
+      if (!e.missingRoot) continue;
+      const otherSide = e.missingRoot === 'left' ? 'right' : 'left';
+      const doomed = this.nodes.filter(n => n.active &&
+        n.op === (otherSide === 'left' ? OP.DELETE_LEFT : OP.DELETE_RIGHT));
+      if (!doomed.length) continue;
+      throw new Error(
+        `The ${e.missingRoot} folder is not there (${e.path}), which makes that side look empty — ` +
+        `and this job would delete ${doomed.length} item${doomed.length > 1 ? 's' : ''} from the ${otherSide} side because of it. ` +
+        `Reconnect the drive or fix the path, then compare again.`);
+    }
+
     const startedAt = Date.now();
 
     const runner = new SyncRunner({
       left: this.left, right: this.right,
       nodes: this.nodes,
+      leftovers: this.leftovers || [],
       config: Object.assign({}, job.sync),
       token, onProgress, trashItem,
     });
@@ -319,7 +346,17 @@ class Session {
           this.left.path, this.right.path, keepRel);
         dbStamp = await savePairDb(this.left, this.right, pairId, session);
       } catch (err) {
-        run.notes.push(`Could not write the synchronization database: ${err.message}`);
+        // This is an ERROR, not a note. A two-way run whose database was not
+        // written looks perfect and lies to the next one: delete a file the
+        // run had just created and the following run, reading yesterday's
+        // database, puts it straight back. The report used to say "Completed
+        // successfully" over exactly that.
+        const msg = `The synchronization database could not be written (${err.message}). ` +
+          `The next run will not know what this one did — two-way jobs may resurrect deleted files. ` +
+          `Check the permissions and the free space on both folders.`;
+        run.notes.push(msg);
+        run.errors.push({ rel: '.syncto.db', message: msg });
+        run.counters.errors++;
       }
     }
 
@@ -373,6 +410,7 @@ class Session {
       errors   : run.errors,
       notes    : run.notes,
       cancelled: run.cancelled,
+      stopped  : run.stopped,
       startedAt, endedAt,
       durationMs: endedAt - startedAt,
       reportFiles: written,
@@ -460,9 +498,9 @@ class MultiSession {
 
     const perPair = [];
     const errors = [];
-    let movesFound = 0, dbNote = null;
+    let movesFound = 0, dbNote = null, cancelled = false;
     for (let i = 0; i < this.pairs.length; i++) {
-      if (token && token.cancelled) break;
+      if (token && token.cancelled) { cancelled = true; break; }
       const pairJob = Object.assign({}, job, {
         left: this.pairs[i].left, right: this.pairs[i].right,
         // A job-level pairId predates multi-pair: shared by every pair, it
@@ -478,15 +516,20 @@ class MultiSession {
       });
       perPair.push(res);
       movesFound += res.movesFound || 0;
+      if (res.cancelled) cancelled = true;
       if (res.dbNote && !dbNote) dbNote = res.dbNote;
       errors.push(...res.errors.map(e => Object.assign({}, e, { pair: i + 1 })));
     }
 
     this.stats = mergeStats(this.sessions.map(s => s.stats));
-    this.comparedAt = Date.now();
+    // Same rule as a single pair: a comparison that was interrupted — in the
+    // middle of a pair or between two of them — is not a comparison. Stamping
+    // it here undid the deliberate reset at the top of this method.
+    this.comparedAt = cancelled ? 0 : Date.now();
     return {
       count: this.sessions.reduce((n, s) => n + s.nodes.length, 0),
       stats: this.stats,
+      cancelled,
       errors,
       movesFound,
       dbNote,
@@ -583,17 +626,38 @@ class MultiSession {
   async sync(job, opts) {
     const { onProgress, token, trashItem, appVersion, defaultReportFolder } = opts || {};
     if (!this.comparedAt) throw new Error('Run a comparison first.');
+
+    // The plan in memory belongs to the folders that were COMPARED. Nothing
+    // used to check that they were still the folders on screen: swapping the
+    // two sides, editing a path or loading another job left the grid and the
+    // confirmation dialog showing the new folders while the engine replayed
+    // the old plan — the classic way to mirror A over B when you meant B over A.
+    const wanted = this._pairsOf(job);
+    const same = wanted.length === this.pairs.length &&
+      wanted.every((p, i) => p.left === this.pairs[i].left && p.right === this.pairs[i].right);
+    if (!same) {
+      throw new Error('The folders changed since the last comparison. Compare again before synchronizing.');
+    }
+
     const startedAt = Date.now();
     const multi = this.sessions.length > 1;
 
     // Lock every folder this run will write to, before touching anything.
     // Another machine synchronizing the same folders waits (or we wait for it).
     let locks = null;
+    let lockLost = null;
     if (job.sync.lockFolders !== false) {
       const folders = [];
       for (const s of this.sessions) { folders.push(s.left, s.right); }
       locks = await acquireAll(folders, {
         token,
+        // Losing a lock mid-run means another machine now owns that folder and
+        // may already be writing to it. Stopping is the only safe answer: two
+        // engines renaming the same .syncto_tmp is how files get shredded.
+        onLost: reason => {
+          lockLost = lockLost || reason;
+          if (token) token.cancelled = true;
+        },
         onStatus: st => onProgress && onProgress({
           phase: 'lock', current: st.takingOver
             ? `Taking over an abandoned lock from ${st.holder}…`
@@ -616,7 +680,7 @@ class MultiSession {
 
     const perPair = [];
     let doneBytes = 0, doneFiles = 0, cancelled = false;
-    const counters = { files: 0, bytes: 0, deleted: 0, folders: 0, moved: 0, errors: 0 };
+    const counters = { files: 0, bytes: 0, deleted: 0, folders: 0, moved: 0, errors: 0, failed: 0 };
     let verified = 0;
     const allErrors = [], allNotes = [], reportFiles = [], checksumFiles = [];
 
@@ -715,12 +779,21 @@ class MultiSession {
       }
     }
 
+    if (lockLost) {
+      const msg = `The folder lock was lost during the run (${lockLost}) — another machine took over, ` +
+        `so syncto stopped to avoid two engines writing the same files. Nothing after that point was done.`;
+      allNotes.push(msg);
+      allErrors.push({ rel: '.syncto.lock', message: msg });
+      counters.errors++;
+    }
+
     return {
       counters,
       verified,
       errors: allErrors,
       notes : allNotes,
       cancelled,
+      lockLost,
       startedAt, endedAt,
       durationMs: endedAt - startedAt,
       reportFiles, checksumFiles,

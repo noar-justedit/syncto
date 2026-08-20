@@ -536,6 +536,33 @@ function completePairs() {
   return state.job.pairs.filter(p => p.left.trim() && p.right.trim());
 }
 
+// Anything that changes WHICH folders are on screen invalidates the plan held
+// in the engine. Without this, swapping the sides or loading another job left
+// SYNCHRONIZE armed on the previous comparison: the dialog showed the new
+// folders, the engine replayed the old plan, and a mirror went the wrong way.
+function invalidateComparison(reason) {
+  state.comparedPairs = null;
+  state.stats = null;
+  state.selIdx = null;
+  const note = $('status-note');
+  if (note) note.textContent = reason || 'Folders changed — compare again.';
+  if (!state.busy) setBusyUi(false);
+  refreshGrid(true).catch(() => {});
+  refreshOverview().catch(() => {});
+}
+
+function pairsKey(pairs) {
+  return (pairs || []).map(p => `${p.left} ${p.right}`).join('');
+}
+
+// Called from onPathChanged, which every path edit, browse, swap, pair add or
+// remove, and job load funnels through.
+function invalidateIfPairsChanged() {
+  if (!state.comparedPairs) return;
+  if (pairsKey(completePairs()) === state.comparedPairs) return;
+  invalidateComparison('The folders changed — compare again before synchronizing.');
+}
+
 async function doCompare() {
   if (state.busy) return;
   uiToJob();
@@ -554,9 +581,23 @@ async function doCompare() {
   setBusyUi(false);
   $('btn-pause').style.display = '';
 
-  if (!res.ok) { showError('Comparison failed', res.error); return; }
+  if (!res.ok) { invalidateComparison('Comparison failed — compare again.'); showError('Comparison failed', res.error); return; }
+
+  // Aborted halfway: the tree covers only the part that was scanned. Showing
+  // it is fine, arming SYNCHRONIZE on it is not — the engine refuses anyway,
+  // and it used to report "completed successfully" over a partial copy.
+  if (res.cancelled) {
+    state.stats = null;
+    await refreshGrid(true);
+    await refreshOverview();
+    renderStats();
+    setBusyUi(false);
+    $('status-note').textContent = 'Comparison stopped before the end — the list below is partial. Compare again to synchronize.';
+    return;
+  }
 
   state.stats = res.stats;
+  state.comparedPairs = pairsKey(completePairs());
   state.view.onlyOperation = '';
   state.view.onlyCategory  = '';
   renderStats();
@@ -638,11 +679,25 @@ async function doSync() {
 // longer exists.
 async function doCompareQuiet() {
   if (state.busy) return;
+  // It never claimed the busy flag, so COMPARE and SYNCHRONIZE were live while
+  // it ran. A second compare would then close the filesystem pool underneath
+  // this one and reassign its sessions — phantom I/O errors, or two trees
+  // mixed into one. The buttons stay disabled until it is done.
+  state.busy = 'compare';
+  $('btn-compare').disabled = true;
+  $('btn-sync').disabled = true;
   state.selIdx = null;
-  const res = await API.compare(state.job);
-  if (!res.ok) return;
+  let res;
+  try {
+    res = await API.compare(state.job);
+  } finally {
+    state.busy = null;
+  }
+  if (!res || !res.ok || res.cancelled) { invalidateComparison('Compare again to synchronize.'); return; }
   state.stats = res.stats;
+  state.comparedPairs = pairsKey(completePairs());
   renderStats();
+  setBusyUi(false);
   await refreshGrid(true);
   await refreshOverview();
   renderAutoUi();
@@ -757,10 +812,13 @@ const ICO_CANCEL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" s
 
 function showSummary(res) {
   const failed = res.errors.length;
-  const kind = res.cancelled ? 'cancel' : failed ? 'err' : 'ok';
+  const stopped = !!(res.stopped || res.lockLost);
+  const kind = res.cancelled ? 'cancel' : (failed || stopped) ? 'err' : 'ok';
   $('sum-ico').className = 'sum-ico ' + kind;
   $('sum-ico').innerHTML = kind === 'ok' ? ICO_OK : kind === 'err' ? ICO_ERR : ICO_CANCEL;
   $('sum-h1').textContent = res.cancelled ? 'Cancelled'
+    : res.lockLost ? 'Stopped — another machine took the folder'
+    : stopped ? 'Stopped at the first error'
     : failed ? `Completed with ${failed} error${failed > 1 ? 's' : ''}` : 'Completed successfully';
   $('sum-h2').textContent = `${state.job.name} · ${fmtEta(res.durationMs / 1000)}`;
 
@@ -772,6 +830,9 @@ function showSummary(res) {
     ['Errors', res.errors.length],
     ['Average speed', res.durationMs > 0 ? fmtSpeed(res.counters.bytes / (res.durationMs / 1000)) : '—'],
   ];
+  // "Files copied" is now the number that really landed, so the ones that
+  // failed need a line of their own instead of hiding inside it.
+  if (res.counters.failed) cells.splice(1, 0, ['Files not copied', res.counters.failed]);
   if (res.counters.moved) cells.splice(2, 0, ['Files moved', res.counters.moved]);
   if (res.verified) cells.splice(2, 0, ['Files verified', res.verified]);
   $('sum-grid').innerHTML = cells
@@ -1092,6 +1153,7 @@ function bind() {
 
 async function onPathChanged() {
   uiToJob();
+  invalidateIfPairsChanged();
   persist();
   for (const [inputId, labelId] of [['left-path', 'left-free'], ['right-path', 'right-free']]) {
     const p = $(inputId).value.trim();
@@ -1110,7 +1172,7 @@ async function newJob() {
   state.jobPath = '';
   jobToUi();
   renderRecent();
-  state.stats = null; state.total = 0;
+  state.stats = null; state.total = 0; state.comparedPairs = null;
   renderStats();
   await refreshGrid(true);
   await refreshOverview();
@@ -1167,7 +1229,14 @@ async function openRecent(p) {
   const res = await API.jobOpenPath(p);
   if (!res) return;
   if (res.recent) state.recent = res.recent;
-  if (res.error) { renderRecent(); return; }   // file vanished — list refreshed
+  if (res.error === 'gone') { renderRecent(); return; }   // really vanished — list refreshed
+  if (res.error) {
+    // Damaged file, unmounted share, no permission: the entry is KEPT, because
+    // dropping it silently is how you lose track of where a job lived.
+    renderRecent();
+    showError('Could not open that job', `${res.path}\n\n${res.message}`);
+    return;
+  }
   state.job = res.job;
   state.jobPath = res.path;
   jobToUi();
@@ -1519,6 +1588,11 @@ function installTooltips() {
   if (state.job.autoSync) state.job.autoSync.enabled = false;
   state.updateDismissedVersion = prefs.updateDismissedVersion || '';
   state.recent = prefs.recent || [];
+  // The settings restored above came from a job FILE. Remembering which one
+  // keeps the title honest and makes Ctrl+S save in place; without it every
+  // restart showed "not saved yet" and the next save asked for a name again —
+  // the short road to overwriting a different job.
+  state.jobPath = prefs.lastJobPath || '';
   API.onUpdateAvailable(showUpdateNotice);
   state.view.showEqual = !!(prefs.ui && prefs.ui.showEqual);
   $('chk-equal').checked = state.view.showEqual;

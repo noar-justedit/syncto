@@ -4,6 +4,224 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.2.5] — 2026-08-20
+
+A full audit of 0.2.4 and the repair of everything it found: 36 issues, six of
+which could lose data. The engine test suite grows from 179 to 228 checks;
+every fix below has a regression test that fails on 0.2.4.
+
+Jobs (`.syncto`), sync databases (`.syncto.db`) and checksum lists carry over
+untouched.
+
+### Fixed — data loss
+
+- **An unmounted source folder made a mirror delete the whole target.** The
+  comparison recorded "Left folder not found — it will be created" without
+  marking it fatal, so an absent base folder (ENOENT — an ejected drive, a
+  dropped share) read as an empty side, every file on the healthy side became
+  one-sided, and mirror removed the lot. A missing base folder now stops the
+  run whenever the plan would delete anything on the other side, and says which
+  side is gone. Creating a missing *target* still works exactly as before.
+- **Overwriting destroyed the replaced version in silence.** `archiveExisting`
+  returned quietly where the delete path throws: with "keep every version"
+  selected and a revision folder set on one side only — which `migrateJob`
+  allows, since it only falls back to the trash when *both* are empty — the
+  file being replaced was simply gone. Same hole when the location has no
+  recycle bin (SFTP, most NAS) or the bin refused the item: the return value
+  was never checked. An overwrite is a deletion with a copy on top, and it now
+  gets the same guarantees — if the previous version cannot be kept, the copy
+  is refused and the target keeps its content.
+- **Swapping the two sides did not invalidate the comparison.** The engine
+  looped over the folder pairs memorised at the last comparison and never
+  looked at the ones on screen, while the confirmation dialog read the new
+  ones. Swapping the sides to restore B onto A therefore mirrored A onto B.
+  Same for editing a path or loading another job — which also brought that
+  job's `deletion` setting, turning planned trash removals into permanent ones.
+  The engine refuses a plan whose folders have changed, and the window clears
+  the plan as soon as they do.
+- **A machine was identified by hostname and user name.** Two Windows PCs
+  deployed from one image, or two Macs on their factory name, matched — so each
+  read the other's *live* lock, checked that process id against its own process
+  table, found nothing and took the folder. Both then wrote the same files.
+  Every installation now carries an id of its own (`~/.syncto/install-id`); a
+  lock that cannot be proved ours takes the slow, always-correct path of
+  watching for twelve seconds of silence.
+- **A dropped SFTP connection froze the run for ever.** ssh2 discards requests
+  issued on a closed channel without ever calling back, so the first operation
+  after a sleeping laptop or a lost Wi-Fi blocked the request queue — and with
+  it the whole run — with no error, no progress, and an Abort button that could
+  not fire. The channel is now watched, every request carries a deadline,
+  transfers in flight are torn down with a real error, and a connection that
+  never became usable is closed instead of being left running.
+- **The heartbeat never re-checked ownership, and release deleted whatever was
+  there.** If the share went away for longer than the abandonment window,
+  another machine legitimately took over — and the old owner carried on
+  writing, its blind append feeding the *new* owner's lock file, then deleted
+  that lock at the end of its run and let a third machine in. The heartbeat now
+  verifies the lock is still ours and stops the run when it is not; release
+  only removes a lock it still owns.
+
+### Fixed — silent failures
+
+- **`preserveTimes: false` made two-way jobs copy the same file for ever.** The
+  database recorded the source's date as the target's, so both sides looked
+  changed at every run and the file bounced back and forth — and became a
+  permanent conflict if it was edited in between.
+- **A cancelled comparison was presented as a complete one.** The byte-for-byte
+  comparison returned "different" for files it had not finished reading, the
+  walker left the tree truncated, and the timestamp was set anyway, so
+  SYNCHRONIZE came back enabled on a partial plan and the summary said
+  "Completed successfully". An interrupted comparison is now marked as such,
+  the grid says the list is partial, and synchronizing is refused.
+- **"Ignore errors" was never read.** The checkbox was saved, loaded and passed
+  to the engine, which referenced it nowhere: the run always carried on.
+  **Behaviour change worth knowing:** the setting is off by default, so a run
+  now stops at the first error instead of pushing through. Stopping is
+  graceful — the database and the report are still written from what really
+  happened. Tick "ignore errors" for the old behaviour.
+- **A database that could not be written was a footnote.** It was recorded as a
+  note, not an error, so the report showed "Completed successfully" — and the
+  next two-way run, reading yesterday's state, put back the file you had just
+  deleted. It is now an error, counted and reported.
+- **`.syncto.db` was rewritten in place.** The stream truncated it on open, and
+  a single file holds the history of every pair based in that folder, so an
+  interrupted write silently reset all of them to "no database yet". It is
+  written beside and renamed, like everything else the engine writes. A
+  database that exists but cannot be read is now reported as damaged rather
+  than as missing.
+- **Deleting a folder through the recycle bin took the filtered files with
+  it.** The trash path bypassed the sweep that removes only OS litter and lets
+  `rmdir` fail loudly on anything else, so files hidden by an exclude filter —
+  excluded precisely so syncto would not touch them — went to the bin inside
+  their parent folder.
+- **A truncated file could replace a good one at the fast copy level.** ssh2
+  reports a write as finished before the server has acknowledged the close, and
+  a quota or disk-full error arrives in that acknowledgement. The size check
+  before the rename now runs at every level; one stat against a whole file copy
+  costs nothing.
+- **Verification could not report that it had not verified anything.** The
+  cache flush swallowed its own failure, including the EACCES it hit whenever
+  `copyPermissions` had just made the file read-only. It reports now, and the
+  run says so once. Worth knowing, and deliberately not overstated in the
+  interface: fsync guarantees the data left the write cache; it does not
+  invalidate the read cache, and Node offers no portable way to do that. The
+  secure level catches a truncated or mis-written file. It is not a media test.
+- **Replacing a file over SFTP deleted the target before renaming.** Between
+  the two there is a full network round trip; a connection that dropped in that
+  window left nothing at the destination — old version deleted, new one still
+  under its temporary name. The old file is moved aside instead, and put back
+  if the rename does not go through.
+- **A stray takeover file blocked every lock, for ever.** The takeover always
+  renamed to the same name and deleted it best-effort; one interruption left
+  the file behind, and since SFTPv3's rename refuses an existing target, every
+  later takeover failed silently and the window sat on "Waiting for…" until
+  someone deleted the file by hand on the server. Several slots are tried now,
+  a stale one is cleared, and a takeover that genuinely cannot proceed says so
+  with the path to fix.
+- **`renameStrict` was a plain rename**, which overwrites the target silently on
+  both POSIX and Windows — so the "exactly one machine wins" guarantee the lock
+  is built on was not true. It uses a hard link and fails with EEXIST, falling
+  back to check-then-rename only where links do not exist.
+- **A folder that could not be listed was synchronized without a lock.** A
+  catch-all treated a permission error or a network hiccup as "does not exist
+  yet" and skipped the lock in silence. Real errors surface, and a folder that
+  genuinely is not there yet is created and locked — two machines starting
+  their first backup into the same new share were both unprotected until the
+  second run.
+- **Accented file names were duplicated on Linux servers and Windows shares.**
+  macOS hands back decomposed names (NFD); the destination path was built from
+  the source spelling, so a file already there in composed form (NFC) got a
+  twin — and the run after that reported the pair as differing only by case and
+  stopped synchronizing one of them. Each side now keeps the spelling it really
+  has on disk, and the key shared by the two sides is the composed form.
+- **A failed SFTP connection stayed alive.** Ten attempts against a
+  misconfigured server left ten sockets and their keepalive timers running
+  until the app quit, and the server started refusing everyone. The failure is
+  no longer cached either, so a retry after the network comes back is a real
+  retry.
+- **Symlinks were re-copied at every run.** The recreated link carried today's
+  date and there was no `lutimes` to fix it, so it looked newer for ever — and
+  under versioning, a revision was archived every night. The date is set on the
+  link itself now, and where that is impossible (SFTP) the comparison asks what
+  the two links point at before calling one newer.
+
+### Fixed — the application itself
+
+- **No content security policy, no navigation guard.** The window holds the
+  whole IPC bridge — reading any folder, running a file with its default
+  application, the stored SFTP credentials — and Electron's default for a
+  window-open handler is "allow", so a child window would have inherited the
+  preload. Dropping an `.html` file on the window during the moment before the
+  drop zones are installed navigated the main view, and the page that loaded
+  kept the bridge. A policy is now applied as both a meta tag and a response
+  header, navigation is confined to syncto's own page, external links go to the
+  browser, and `<webview>` is refused outright.
+- **`shell.openExternal` accepted any scheme, from a remote JSON.** The update
+  notice passed the URL out of `version.json` straight to the operating
+  system's "open this" machinery; a `file://` or UNC value there means "run
+  this program". Only http and https are opened, the notice always points at
+  the releases page, the response body is capped, redirects may not leave the
+  host, and the callback can no longer fire twice.
+- **`preferences.json` and `.syncto` files were written in place.** An
+  interruption left a truncated file: a blank application on the next launch —
+  recent jobs, window size and SFTP credentials gone with no message — or the
+  user's own job file destroyed. Both are written beside and renamed.
+- **Resizing the window wrote the whole configuration to disk on every pixel.**
+  No debounce, a deep merge and a *synchronous* write, in the process that runs
+  the synchronization: dragging a corner during a large transfer stalled the
+  event loop, the progress updates and the throughput. Debounced to 400 ms.
+- **Saving could replace an existing job without asking.** The dialog checked
+  the name typed, then the code appended `.syncto` to it — so the system's
+  overwrite warning never applied to the file actually written. syncto asks.
+- **The re-comparison after a run left the buttons live.** It never claimed the
+  busy flag, so a second comparison could start and close the filesystem pool
+  underneath the first one.
+- **Any failure to open a recent job deleted it from the list.** An unmounted
+  share or a damaged file was read as "the file is gone" and the entry vanished
+  without a word. Only a genuine ENOENT drops an entry; anything else is
+  reported and the entry kept.
+- **A hand-edited job file could freeze the window.** A `null` section replaced
+  a whole default and the redraw threw halfway through, with the path fields
+  already updated and the rest still showing the previous job. Sections are
+  validated on load.
+- **`lastJobPath` was written and never read**, so a restart detached the
+  settings from their file: the title said "not saved yet" and Ctrl+S asked for
+  a name again — the short road to overwriting a different job.
+- **Failed copies were counted as copies.** Reports read "Files copied: 10 ·
+  Errors: 3" with the number that actually landed appearing nowhere. The
+  summary shows "Files not copied" separately.
+- **Leftover `.syncto_tmp` files were never removed.** Invisible to the
+  comparison by design, swept by nothing: an interrupted 180 GB copy sat on a
+  NAS for ever and the space disappeared with no explanation in the app. They
+  are removed at the end of the next run, and the run says how much it
+  reclaimed.
+- **The size filter judged a two-sided file on the left copy alone**, so a file
+  edited yesterday on the right was dropped because the left copy was a year
+  old. Either side passing is enough.
+- **An interrupted revision kept a good version's name.** `pipe` does not
+  forward errors, so a broken read left a truncated file in the revision store,
+  indistinguishable from a valid one when restoring. Revisions are written
+  beside, size-checked, then renamed.
+- **Windows long paths.** `.syncto_tmp` adds twelve characters, enough to push
+  a legal name past 260 and fail the copy with ENOENT on a path plainly visible
+  in Explorer. Long paths get the `\\?\` prefix.
+- **A file named `a\b.txt` on a Linux server was treated as a path.** The SFTP
+  backend translated every backslash into a separator. It no longer does —
+  these are POSIX paths.
+
+### Files
+
+Two new names to know: `~/.syncto/install-id`, the per-installation identifier
+the lock uses, and `*.syncto_old`, a target parked for a moment while its
+replacement is renamed over it on SFTP. A stray one is swept like any leftover.
+
+### Documentation
+
+`docs/AUDIT-0.2.4.md` records the audit itself: every issue with its file, its
+line and the situation that triggers it.
+
+---
+
 ## [0.2.4] — 2026-08-10
 
 ### Fixed

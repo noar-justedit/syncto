@@ -115,11 +115,24 @@ class FsPool {
     }
     const key = `${loc.username}@${loc.host}:${loc.port}`;
     let backend = this.sftp.get(key);
-    if (!backend) {
-      backend = new SftpFs(loc);
-      this.sftp.set(key, backend);
+    // A backend whose connection died is not reusable — every call on it would
+    // fail with the error that killed it. And a backend must not be cached
+    // BEFORE it connects: a first failed attempt used to be handed to every
+    // later location on the same host, long after the network came back.
+    if (backend && backend.dead) {
+      try { await backend.close(); } catch (_) {}
+      this.sftp.delete(key);
+      backend = null;
     }
-    await backend.connect();
+    if (!backend) backend = new SftpFs(loc);
+    try {
+      await backend.connect();
+    } catch (err) {
+      try { await backend.close(); } catch (_) {}
+      this.sftp.delete(key);
+      throw err;
+    }
+    this.sftp.set(key, backend);
     return { fs: backend, path: backend.resolve(loc.path) };
   }
 

@@ -44,6 +44,8 @@
 // that process is still alive.
 
 const os = require('os');
+const fsNode = require('fs');
+const nodePath = require('path');
 const { LOCK_NAME } = require('./compare');
 
 const EMIT_LIFE_SIGN_MS   = 5000;                        // heartbeat period
@@ -71,11 +73,41 @@ function abandonedLockName(name) {
   return `Delete.${level}.${base}`;
 }
 
+// A hostname is not an identity. Two Windows machines deployed from the same
+// image are both "WIN-DIT01\admin"; so are two Macs left on their factory
+// name. That was enough for one to read the other's live lock, find no such
+// process id locally, call it dead and take the folder — two machines writing
+// the same files at the same time.
+//
+// This id is generated once per installation and kept next to the preferences.
+// If it cannot be stored, a per-process id is used instead: the fast path for
+// our own stale locks is lost, but the slow path — watch for 12 s of silence —
+// is always correct, which is the direction to fail in.
+let INSTALL_ID = null;
+function installId() {
+  if (INSTALL_ID) return INSTALL_ID;
+  try {
+    const dir = nodePath.join(os.homedir(), '.syncto');
+    const file = nodePath.join(dir, 'install-id');
+    try {
+      const v = fsNode.readFileSync(file, 'utf8').trim();
+      if (/^[0-9a-f]{32}$/.test(v)) return (INSTALL_ID = v);
+    } catch (_) { /* not created yet */ }
+    fsNode.mkdirSync(dir, { recursive: true });
+    const v = guid();
+    fsNode.writeFileSync(file, v + '\n', { mode: 0o600 });
+    return (INSTALL_ID = v);
+  } catch (_) {
+    return (INSTALL_ID = guid());
+  }
+}
+
 function localLockInfo() {
   return {
     format : FORMAT,
     version: VERSION,
     lockId : guid(),
+    installId: installId(),
     computerName: os.hostname(),
     userId : (() => { try { return os.userInfo().username; } catch (_) { return 'unknown'; } })(),
     sessionId: process.ppid || 0,
@@ -86,6 +118,9 @@ function localLockInfo() {
 
 // 'running' | 'notRunning' | 'itsUs' | 'unknown'
 function processStatus(info, local) {
+  // No install id (a lock written by 0.2.4 or earlier) means we cannot prove
+  // the lock is ours, so we must not shortcut: 'unknown' waits for silence.
+  if (!info.installId || !local.installId || info.installId !== local.installId) return 'unknown';
   if (info.computerName !== local.computerName || info.userId !== local.userId) {
     return 'unknown';                       // another machine, or another user on this one
   }
@@ -121,24 +156,61 @@ async function readLockInfo(fsx, lockPath) {
 }
 
 // One held lock, with its heartbeat.
+//
+// The heartbeat is not just a keep-alive, it is a re-check. If the share goes
+// away for longer than the abandonment window, another machine legitimately
+// takes the folder — and the old owner has to find out. It used to swallow
+// every append failure and keep going: the ousted owner carried on writing
+// (its blind `appendByte` in "a" mode even fed the NEW owner's lock file), and
+// its release() then deleted a lock it no longer held, freeing the folder for
+// a third machine while the second was still running.
 class DirLock {
-  constructor(fsx, lockPath, info) {
+  // onLost(reason) fires when this lock is no longer ours. The run must stop.
+  constructor(fsx, lockPath, info, onLost) {
     this.fs = fsx;
     this.path = lockPath;
     this.info = info;
+    this.onLost = onLost || null;
     this.timer = null;
     this.released = false;
+    this.lost = null;
+    this._misses = 0;
+  }
+
+  _fail(reason) {
+    if (this.lost || this.released) return;
+    this.lost = reason;
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    if (this.onLost) { try { this.onLost(reason); } catch (_) {} }
   }
 
   _startHeartbeat() {
     const beat = () => {
-      if (this.released) return;
-      // A single space. Growing the file IS the life sign — nothing else needs
-      // to be readable or parsed by the other side. The in-flight append is
-      // kept so release() can wait for it — an append landing AFTER the unlink
-      // would recreate the file and block other machines for 12 seconds.
-      this._beating = this.fs.appendByte(this.path, ' ')
-        .catch(() => { /* transient network hiccup */ })
+      if (this.released || this.lost || this._beating) return;
+      this._beating = (async () => {
+        // Still ours? A stat is not enough — the file may have been taken over
+        // and recreated by someone else, at a similar size.
+        const cur = await readLockInfo(this.fs, this.path);
+        if (!cur || cur.lockId !== this.info.lockId) {
+          throw new Error(cur
+            ? `the folder was taken over by ${describe(cur)}`
+            : 'the lock file disappeared');
+        }
+        // A single space. Growing the file IS the life sign — nothing else
+        // needs to be readable or parsed by the other side.
+        await this.fs.appendByte(this.path, ' ');
+        this._misses = 0;
+      })()
+        .catch(err => {
+          // A hiccup is normal; silence for longer than the abandonment window
+          // is not, because by then another machine is entitled to the folder.
+          if (/taken over|disappeared/.test(err.message || '')) return this._fail(err.message);
+          this._misses++;
+          if (this._misses * EMIT_LIFE_SIGN_MS >= DETECT_ABANDONED_MS) {
+            this._fail(`the lock file could not be refreshed for ${
+              Math.round(this._misses * EMIT_LIFE_SIGN_MS / 1000)} s (${err.message})`);
+          }
+        })
         .finally(() => { this._beating = null; });
     };
     this.timer = setInterval(beat, EMIT_LIFE_SIGN_MS);
@@ -149,8 +221,15 @@ class DirLock {
     if (this.released) return;
     this.released = true;
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    // The in-flight append has to finish first: one landing AFTER the unlink
+    // would recreate the file and block other machines for 12 seconds.
     if (this._beating) { try { await this._beating; } catch (_) {} }
-    try { await this.fs.unlink(this.path); } catch (_) {}
+    if (this.lost) return;              // not ours any more — deleting it would evict its owner
+    try {
+      const cur = await readLockInfo(this.fs, this.path);
+      if (cur && cur.lockId !== this.info.lockId) return;
+      await this.fs.unlink(this.path);
+    } catch (_) {}
   }
 }
 
@@ -163,11 +242,12 @@ function describe(info) {
 // Acquires the lock on one base folder, waiting for a live owner to finish.
 // onStatus({ waiting, holder, secondsLeft }) drives the UI; token.cancelled aborts.
 async function acquireOne(fsx, folderPath, opts) {
-  const { onStatus, token } = opts || {};
+  const { onStatus, token, onLost } = opts || {};
   const lockPath = fsx.join(folderPath, LOCK_NAME);
   const local = localLockInfo();
   const payload = Buffer.from(JSON.stringify(local) + '\n', 'utf8');
   let ghostTries = 0;   // create fails "exists" but no lock file is there
+  let takeoverTries = 0;
 
   for (;;) {
     if (token && token.cancelled) throw new Error('Cancelled');
@@ -176,7 +256,7 @@ async function acquireOne(fsx, folderPath, opts) {
     let createErr;
     try {
       await fsx.writeExclusive(lockPath, payload);
-      const lock = new DirLock(fsx, lockPath, local);
+      const lock = new DirLock(fsx, lockPath, local, onLost);
       lock._startHeartbeat();
       return lock;
     } catch (err) {
@@ -204,14 +284,15 @@ async function acquireOne(fsx, folderPath, opts) {
     const status = info ? processStatus(info, local) : 'unknown';
 
     if (status === 'notRunning' || status === 'itsUs') {
-      await takeOver(fsx, lockPath, onStatus, info);
+      await takeOver(fsx, lockPath, onStatus, info, ++takeoverTries);
       continue;                                   // and try to create it again
     }
 
     // Unknown owner (another machine): watch the file for life signs.
     const alive = await watchLifeSigns(fsx, lockPath, info, onStatus, token);
-    if (!alive) await takeOver(fsx, lockPath, onStatus, info);
-    // Either way, loop back and attempt the exclusive create.
+    if (alive) { takeoverTries = 0; continue; }
+    await takeOver(fsx, lockPath, onStatus, info, ++takeoverTries);
+    // Loop back and attempt the exclusive create.
   }
 }
 
@@ -248,23 +329,46 @@ async function watchLifeSigns(fsx, lockPath, info, onStatus, token) {
 
 // Removes an abandoned lock the safe way: rename first (atomic — only one
 // waiting machine can succeed), then delete the renamed file.
-async function takeOver(fsx, lockPath, onStatus, info) {
+async function takeOver(fsx, lockPath, onStatus, info, attempt) {
   const dir  = fsx.dirname(lockPath);
   const name = fsx.basename(lockPath);
-  const doomed = fsx.join(dir, abandonedLockName(name));
 
   if (onStatus) onStatus({ waiting: true, holder: describe(info), takingOver: true });
 
-  try {
-    // renameStrict: no delete-and-retry fallback. Renaming is the whole point —
-    // of two machines waiting on the same abandoned lock, exactly one may win.
-    await (fsx.renameStrict ? fsx.renameStrict(lockPath, doomed) : fsx.rename(lockPath, doomed));
-  } catch (_) {
-    // Another waiter won the rename, or the owner just released it. Either way
-    // we simply retry the exclusive create.
-    return;
+  // The old code always renamed to "Delete.0.<name>" and deleted it on a
+  // best-effort basis. A crash between the two left that file behind — and
+  // SFTPv3's rename refuses an existing target, so every later takeover failed
+  // for ever, silently, and the window sat on "Waiting for…" until someone
+  // deleted the file by hand on the server. Try several slots, and clear a
+  // stale corpse before reusing its name.
+  let lastErr = null;
+  for (let level = 0; level < ABANDONED_LEVEL_MAX; level++) {
+    const doomed = fsx.join(dir, `Delete.${level}.${name}`);
+    try {
+      // renameStrict: no delete-and-retry fallback. Renaming is the whole point —
+      // of two machines waiting on the same abandoned lock, exactly one may win.
+      await (fsx.renameStrict ? fsx.renameStrict(lockPath, doomed) : fsx.rename(lockPath, doomed));
+      try { await fsx.unlink(doomed); } catch (_) {}
+      return;
+    } catch (err) {
+      lastErr = err;
+      // Is the lock still there at all? If not, another waiter won the rename
+      // or the owner released it — nothing to do but retry the create.
+      let st = null;
+      try { st = await fsx.stat(lockPath); } catch (_) { return; }
+      if (!st) return;
+      // The target is occupied by a corpse from an interrupted takeover.
+      try { await fsx.unlink(doomed); } catch (_) { continue; }
+    }
   }
-  try { await fsx.unlink(doomed); } catch (_) {}
+
+  // Never loop for ever in silence: after enough rounds, say what is wrong and
+  // where, so the user can act instead of watching a spinner.
+  if (attempt >= 3) {
+    throw new Error(`The lock file at ${lockPath} is abandoned but cannot be cleared` +
+      (lastErr ? ` (${lastErr.message})` : '') +
+      '. Delete it manually, then run the comparison again.');
+  }
 }
 
 // Acquires every folder of a run. Folders are deduplicated (two pairs sharing a
@@ -282,12 +386,20 @@ async function acquireAll(entries, opts) {
   const held = [];
   try {
     for (const e of list) {
-      // A folder that does not exist yet cannot be locked (the create would
-      // fail with ENOENT) and holds nothing to protect — the run itself will
-      // create it. Skip it rather than failing the first sync into it.
-      let st = null;
-      try { st = await e.fs.stat(e.path); } catch (_) {}
-      if (!st) continue;
+      // stat() returns null for "absent" and throws for everything else. The
+      // old catch-all treated a permission error or a network hiccup as
+      // "absent" and ran the whole synchronization on that folder WITHOUT a
+      // lock, silently. Let the real error through.
+      const st = await e.fs.stat(e.path);
+      if (!st) {
+        // Genuinely not there yet. Create it now rather than skipping the lock:
+        // two machines starting their first backup into the same new NAS folder
+        // both used to proceed unprotected, and only the second run was safe.
+        try { await e.fs.mkdir(e.path); }
+        catch (err) {
+          throw new Error(`Cannot create ${e.path} to lock it: ${err.message}`);
+        }
+      }
       const lock = await acquireOne(e.fs, e.path, opts);
       held.push(lock);
     }
@@ -297,6 +409,11 @@ async function acquireAll(entries, opts) {
   }
   return {
     count: held.length,
+    // Non-null as soon as ANY of the folders stopped being ours mid-run.
+    lost() {
+      const l = held.find(x => x.lost);
+      return l ? `${l.path}: ${l.lost}` : null;
+    },
     async release() { for (const l of held) { try { await l.release(); } catch (_) {} } },
   };
 }

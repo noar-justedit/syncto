@@ -64,7 +64,26 @@ class NativeFs {
     let s = String(p || '').trim();
     if (!s) return s;
     if (s === '~' || s.startsWith('~/') || s.startsWith('~\\')) s = path.join(os.homedir(), s.slice(1));
-    return path.resolve(s);
+    return this.longPath(path.resolve(s));
+  }
+
+  // Windows caps a path at 260 characters unless it carries the \\?\ prefix.
+  // syncto appends ".syncto_tmp" to every target it writes, so twelve extra
+  // characters could push a perfectly legal name over the edge and the copy
+  // failed with ENOENT on a path the user could see in Explorer.
+  longPath(p) {
+    if (process.platform !== 'win32') return p;
+    if (!p || p.length < 240 || p.startsWith('\\\\?\\')) return p;
+    if (p.startsWith('\\\\')) return '\\\\?\\UNC\\' + p.slice(2);
+    return /^[a-zA-Z]:\\/.test(p) ? '\\\\?\\' + p : p;
+  }
+
+  // The spelling this filesystem should be asked for when creating a name that
+  // only exists on the other side. macOS hands back decomposed names (NFD) and
+  // accepts either form; everything else is byte-exact, so a decomposed name
+  // sent to a Linux server creates a second file beside the composed one.
+  normalizeName(name) {
+    return process.platform === 'darwin' ? name : String(name).normalize('NFC');
   }
 
   // lstat, not access: access() follows symlinks, so a dangling link would
@@ -138,24 +157,65 @@ class NativeFs {
 
   async rename(from, to) { await fs.promises.rename(from, to); }
 
-  // Same as rename on this backend — POSIX rename is already atomic. Exists so
-  // the directory lock can demand "no delete-and-retry tricks" on any backend.
-  async renameStrict(from, to) { await fs.promises.rename(from, to); }
+  // "Rename, and lose if the target already exists."
+  //
+  // This is the primitive the directory lock uses to decide which of two
+  // machines wins a takeover, and a plain rename() is the wrong tool: POSIX
+  // and Windows both let it OVERWRITE the target silently, so two machines
+  // could each believe they had won. link() is atomic and fails with EEXIST,
+  // which is exactly the contract. On filesystems with no hard links (FAT,
+  // some SMB shares) fall back to check-then-rename — narrower, but the only
+  // option there.
+  async renameStrict(from, to) {
+    try {
+      await fs.promises.link(from, to);
+      await fs.promises.unlink(from);
+      return;
+    } catch (err) {
+      if (err.code === 'EEXIST') throw err;
+      if (!['EPERM', 'ENOSYS', 'EXDEV', 'EOPNOTSUPP', 'EMLINK', 'EACCES'].includes(err.code)) throw err;
+    }
+    try { await fs.promises.lstat(to); }
+    catch (_) { await fs.promises.rename(from, to); return; }
+    const e = new Error(`Target already exists: ${to}`);
+    e.code = 'EEXIST';
+    throw e;
+  }
 
   async setMTime(p, mtimeMs) {
     const t = new Date(mtimeMs);
     await fs.promises.utimes(p, t, t);
   }
 
+  // utimes follows symlinks — it would stamp the TARGET, not the link. Without
+  // this a recreated link kept today's date, looked newer at every run, and
+  // was copied (and archived, under versioning) for ever.
+  async setLinkMTime(p, mtimeMs) {
+    const t = new Date(mtimeMs);
+    await fs.promises.lutimes(p, t, t);
+  }
+
   async chmod(p, mode) { try { await fs.promises.chmod(p, mode); } catch (_) {} }
 
-  // Flush the OS write cache so a verification read hits the physical medium
-  // instead of the page cache. Non-fatal: some network mounts refuse fsync.
+  // Push this file's dirty pages to the physical medium before it is read
+  // back. Returns false when it could not be done, so the caller can say so
+  // instead of presenting an unverifiable read as verified — a file copied
+  // with copyPermissions and a read-only source mode used to fail the 'r+'
+  // open with EACCES, and the error was swallowed on the spot.
+  //
+  // Worth knowing, and deliberately not overstated anywhere in the interface:
+  // fsync guarantees the data left the cache on its way OUT. It does not
+  // invalidate the read cache, and Node exposes no portable way to do that,
+  // so the verification read may still be served from RAM on some systems.
+  // It catches a truncated or mis-written file; it is not a media test.
   async flush(p) {
-    let fh = null;
-    try { fh = await fs.promises.open(p, 'r+'); await fh.sync(); }
-    catch (_) {}
-    finally { if (fh) { try { await fh.close(); } catch (_) {} } }
+    for (const mode of ['r+', 'r']) {
+      let fh = null;
+      try { fh = await fs.promises.open(p, mode); await fh.sync(); return true; }
+      catch (_) { /* try the next mode */ }
+      finally { if (fh) { try { await fh.close(); } catch (_) {} } }
+    }
+    return false;
   }
 
   supportsTrash() { return true; }

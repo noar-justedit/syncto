@@ -35,8 +35,17 @@ function getSsh2() { if (!ssh2) ssh2 = require('ssh2'); return ssh2; }
 
 const READ_BLOCK = 512 * 1024;   // SFTP throughput is bounded by the window, not the block
 
+// How long a single metadata request may take before the channel is declared
+// dead. ssh2 silently drops requests issued on a closed channel — the callback
+// is never called — so without this a sleeping laptop or a dropped Wi-Fi left
+// the whole run hanging for ever, with no error and an unresponsive Abort.
+const OP_TIMEOUT_MS = 45000;
+
+// NO backslash translation. These are POSIX paths: "a\b.txt" is a perfectly
+// legal file name on a Linux server, and turning it into "a/b.txt" made syncto
+// look for a directory that does not exist.
 function normalize(p) {
-  let s = String(p || '').replace(/\\/g, '/');
+  let s = String(p || '');
   if (!s.startsWith('/')) s = '/' + s;
   return posix.normalize(s).replace(/\/+$/, '') || '/';
 }
@@ -50,21 +59,69 @@ class SftpFs {
     this.conn = null;
     this.sftp = null;
     this._chain = Promise.resolve();
+    this._streams = new Set();   // transfers in flight, so a drop can kill them
+    this.dead = null;            // the error that killed this connection
   }
 
   deviceKey() { return `sftp:${this.opts.username}@${this.opts.host}:${this.opts.port || 22}`; }
   displayName(p) { return `sftp://${this.opts.username}@${this.opts.host}${p}`; }
 
-  join(...parts)  { return normalize(posix.join(...parts.map(x => String(x).replace(/\\/g, '/')))); }
+  normalizeName(name) { return String(name).normalize('NFC'); }
+
+  join(...parts)  { return normalize(posix.join(...parts.map(String))); }
   dirname(p)      { return posix.dirname(normalize(p)); }
   basename(p)     { return posix.basename(normalize(p)); }
   isAbsolute()    { return true; }
   resolve(p)      { return normalize(p); }
 
+  // Declares the connection unusable and makes every user of it fail NOW.
+  // Requests already handed to ssh2 on a closed channel never call back, so
+  // waiting for them is waiting for ever; the transfers in flight are torn
+  // down with the same error so the copy loop sees a failure it can report.
+  _die(err) {
+    if (this.dead) return;
+    this.dead = err instanceof Error ? err : new Error(String(err || 'The SFTP connection was lost.'));
+    for (const s of this._streams) { try { s.destroy(this.dead); } catch (_) {} }
+    this._streams.clear();
+    try { if (this.conn) this.conn.end(); } catch (_) {}
+    this.sftp = null;
+    this._connectPromise = null;
+  }
+
+  _track(stream) {
+    this._streams.add(stream);
+    const drop = () => this._streams.delete(stream);
+    stream.once('close', drop);
+    stream.once('error', drop);
+    stream.once('end', drop);
+    return stream;
+  }
+
   // Serializes SFTP requests: ssh2 will happily pipeline, but many servers
   // (and most NAS boxes) drop requests past a low concurrency limit.
+  //
+  // Every request also carries a deadline. Without one, a single request
+  // issued after the channel died blocked this queue — and therefore the whole
+  // run — permanently, because its callback was never going to arrive.
   _q(fn) {
-    const run = this._chain.then(fn, fn);
+    const guarded = () => {
+      if (this.dead) return Promise.reject(this.dead);
+      if (!this.sftp) return Promise.reject(new Error('The SFTP connection is not open.'));
+      return new Promise((resolve, reject) => {
+        let done = false;
+        const timer = setTimeout(() => {
+          if (done) return;
+          done = true;
+          const err = new Error(`The server did not answer within ${Math.round(OP_TIMEOUT_MS / 1000)} s.`);
+          this._die(err);
+          reject(err);
+        }, OP_TIMEOUT_MS);
+        Promise.resolve().then(fn).then(
+          v => { if (!done) { done = true; clearTimeout(timer); resolve(v); } },
+          e => { if (!done) { done = true; clearTimeout(timer); reject(e); } });
+      });
+    };
+    const run = this._chain.then(guarded, guarded);
     this._chain = run.then(() => {}, () => {});
     return run;
   }
@@ -74,33 +131,63 @@ class SftpFs {
     this._connectPromise = new Promise((resolve, reject) => {
       const { Client } = getSsh2();
       const conn = new Client();
+      let settled = false;
       const cfg = {
         host             : this.opts.host,
         port             : this.opts.port || 22,
         username         : this.opts.username,
         readyTimeout     : 20000,
         keepaliveInterval: 10000,
+        keepaliveCountMax: 3,
       };
       if (this.opts.password)   cfg.password   = this.opts.password;
       if (this.opts.privateKey) cfg.privateKey = this.opts.privateKey;
       if (this.opts.passphrase) cfg.passphrase = this.opts.passphrase;
 
+      // A connection that never became usable still holds a live socket and a
+      // keepalive timer. Ten attempts against a misconfigured server used to
+      // leave ten of them running until the app quit — and the server hit its
+      // session limit and started refusing everyone.
+      const bail = err => {
+        if (settled) return;
+        settled = true;
+        try { conn.end(); } catch (_) {}
+        this.conn = null; this.sftp = null;
+        // Do NOT keep the rejected promise: it would be replayed as a cached
+        // failure for every later attempt, even once the network is back.
+        this._connectPromise = null;
+        reject(err);
+      };
+
       conn.on('ready', () => {
         conn.sftp((err, sftp) => {
-          if (err) return reject(err);
-          this.conn = conn; this.sftp = sftp;
+          if (err) return bail(err);
+          if (settled) { try { conn.end(); } catch (_) {} return; }
+          settled = true;
+          this.conn = conn; this.sftp = sftp; this.dead = null;
+          // From here on, losing the channel is a run-stopping error rather
+          // than a silent freeze.
+          const lost = e => this._die(e || new Error('The SFTP connection was closed by the server.'));
+          conn.on('error', lost);
+          conn.on('close', () => lost());
+          conn.on('end',   () => lost());
+          sftp.on('error', lost);
+          sftp.on('close', () => lost());
           resolve();
         });
       });
-      conn.on('error', err => reject(err));
+      conn.on('error', bail);
+      conn.on('close', () => bail(new Error('The SFTP connection was closed before it was ready.')));
       conn.connect(cfg);
     });
     return this._connectPromise;
   }
 
   async close() {
+    for (const s of this._streams) { try { s.destroy(); } catch (_) {} }
+    this._streams.clear();
     try { if (this.conn) this.conn.end(); } catch (_) {}
-    this.conn = null; this.sftp = null; this._connectPromise = null;
+    this.conn = null; this.sftp = null; this._connectPromise = null; this.dead = null;
   }
 
   _mapStat(st) {
@@ -159,11 +246,13 @@ class SftpFs {
   // Streams bypass the queue on purpose: they hold a channel for their whole
   // lifetime, and the sync engine never runs two transfers on one connection.
   createReadStream(p) {
-    return this.sftp.createReadStream(normalize(p), { highWaterMark: READ_BLOCK });
+    if (this.dead) throw this.dead;
+    return this._track(this.sftp.createReadStream(normalize(p), { highWaterMark: READ_BLOCK }));
   }
 
   createWriteStream(p) {
-    return this.sftp.createWriteStream(normalize(p), { highWaterMark: READ_BLOCK });
+    if (this.dead) throw this.dead;
+    return this._track(this.sftp.createWriteStream(normalize(p), { highWaterMark: READ_BLOCK }));
   }
 
   // SSH_FXF_EXCL: the SFTP protocol has the exclusive-create flag natively.
@@ -229,16 +318,28 @@ class SftpFs {
     const src = normalize(from), dst = normalize(to);
     try {
       await this._rawRename(src, dst);
+      return;
     } catch (e) {
-      // Most servers refuse to rename onto an existing target. The engine's
-      // "tmp file → final name" rename legitimately needs to replace one, so
-      // clear the target and retry — but only when the SOURCE is still there,
-      // otherwise a failed rename would delete the target and nothing else.
-      if ((await this.exists(src)) && (await this.exists(dst))) {
-        await this.unlink(dst);
-        await this._rawRename(src, dst);
-      } else throw e;
+      if (!(await this.exists(src)) || !(await this.exists(dst))) throw e;
     }
+    // Most servers refuse to rename onto an existing target, and the engine's
+    // "tmp file → final name" rename legitimately needs to replace one.
+    //
+    // Deleting the target first was a hole: between the unlink and the rename
+    // there is a full network round trip, and a connection that dropped in
+    // that window left NOTHING at the destination — the previous version gone,
+    // the new one still under its .syncto_tmp name. Move the old file aside
+    // instead, and put it back if the rename does not go through.
+    const parked = dst + '.syncto_old';
+    try { await this.unlink(parked); } catch (_) {}
+    await this._rawRename(dst, parked);
+    try {
+      await this._rawRename(src, dst);
+    } catch (err) {
+      try { await this._rawRename(parked, dst); } catch (_) {}
+      throw err;
+    }
+    try { await this.unlink(parked); } catch (_) {}
   }
 
   // Rename with NO delete-and-retry fallback. This is what makes the lock

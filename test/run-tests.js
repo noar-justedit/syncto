@@ -958,15 +958,309 @@ async function testReviewRegressions() {
     ok(sess && sess.items['hide.txt'], 'the filtered-out entry survives in the database');
   }
 
-  // (p) The lock layer ignores folders that do not exist yet, and syncto's
-  // transient "Delete.N." takeover names are invisible to the comparison.
+  // (p) A folder that does not exist yet is CREATED and locked, not skipped:
+  // two machines starting their first backup into the same new share both used
+  // to run unprotected. syncto's transient "Delete.N." takeover names stay
+  // invisible to the comparison.
   {
     const fsx = new NativeFs();
-    const set = await acquireAll([{ fs: fsx, path: path.join(ROOT, 'not-yet-created') }], {});
-    eq(set.count, 0, 'a missing folder is not locked (the run will create it)');
+    const fresh = path.join(ROOT, 'not-yet-created');
+    const set = await acquireAll([{ fs: fsx, path: fresh }], {});
+    eq(set.count, 1, 'a folder that does not exist yet is created and locked');
+    ok(await fsx.exists(path.join(fresh, '.syncto.lock')), 'the lock file is really there');
     await set.release();
+    ok(!(await fsx.exists(path.join(fresh, '.syncto.lock'))), 'and it is gone after release');
     ok(isSyncToInternal('Delete.0..syncto.lock'), 'a lock being taken over is internal litter');
     ok(!isSyncToInternal('Delete.0.notes'), 'but a user file named Delete.0.notes is not');
+  }
+}
+
+// ══ 16. Audit fixes — 0.2.5 ════════════════════════════════════════════════
+// One case per data-loss or silent-failure bug found in the 0.2.4 audit.
+// Each of these failed on 0.2.4.
+
+// Compare and synchronize as two separate steps, so a test can change the
+// folders in between — which is exactly what several of these bugs need.
+async function stepped(job, between, opts) {
+  const s = new Session();
+  const token = { cancelled: false, paused: false };
+  const cmp = await s.compare(job, { token });
+  if (between) await between(s);
+  let run = null, error = null;
+  try { run = await s.sync(job, Object.assign({ token, appVersion: 'test' }, opts || {})); }
+  catch (err) { error = err; }
+  await s.close();
+  return { s, cmp, run, error };
+}
+
+// Moves an item into <dir>/.trash — the shape SyncRunner expects of trashItem.
+function makeTrash(dir) {
+  const bin = path.join(dir, '.trash');
+  return {
+    bin,
+    fn: async (fsx, abs) => {
+      fs.mkdirSync(bin, { recursive: true });
+      fs.renameSync(abs, path.join(bin, path.basename(abs)));
+      return true;
+    },
+  };
+}
+
+async function testAuditFixes() {
+  console.log('\n\n16. Audit fixes (0.2.5)');
+
+  // (a) THE one. An unmounted source reads as an empty folder, and an empty
+  //     folder plus a mirror is "delete everything on the other side". The
+  //     comparison said so out loud — without marking it fatal.
+  {
+    const { L, R } = scratch();
+    write(R, 'a.mov', 'keep'); write(R, 'sub/b.mov', 'keep');
+    fs.rmSync(L, { recursive: true, force: true });
+    const { run, error } = await stepped(makeJob(L, R, { sync: { variant: 'mirror' } }));
+    ok(!run, 'a missing source folder does not run a mirror');
+    ok(error && /not there/i.test(error.message), 'and says which side is missing');
+    ok(exists(R, 'a.mov') && exists(R, 'sub/b.mov'), 'the healthy side is untouched');
+  }
+
+  // (b) The same guard must not block the legitimate case: a target that does
+  //     not exist yet is created, not treated as a catastrophe.
+  {
+    const { L, R } = scratch();
+    write(L, 'a.mov', 'data');
+    fs.rmSync(R, { recursive: true, force: true });
+    const { run, error } = await stepped(makeJob(L, R, { sync: { variant: 'mirror' } }));
+    ok(!error, 'a missing target folder still synchronizes');
+    ok(run && read(R, 'a.mov') === 'data', 'and the file lands in it');
+  }
+
+  // (c) Overwriting is deleting, with a copy on top. Versioning configured on
+  //     one side only used to throw when DELETING and shrug when OVERWRITING,
+  //     so the replaced version was destroyed with "keep every version" on.
+  {
+    const { dir, L, R } = scratch();
+    write(L, 'a.mov', 'NEW', Date.now());
+    write(R, 'a.mov', 'OLD', Date.now() - 86400000);
+    const { run, error } = await stepped(makeJob(L, R, {
+      sync: { variant: 'mirror', deletion: 'versioning',
+              versioning: { leftFolder: path.join(dir, 'rev-left'), rightFolder: '' } },
+    }));
+    ok(!error, 'the run itself completes');
+    eq(read(R, 'a.mov'), 'OLD', 'the version that could not be archived is NOT replaced');
+    ok(run && run.errors.some(e => /revision folder/i.test(e.message)),
+       'and the refusal is reported as an error');
+  }
+
+  // (d) Same rule for the recycle bin: no bin here (and no permanent
+  //     fallback) means the previous version cannot be kept, so do not replace it.
+  {
+    const { L, R } = scratch();
+    write(L, 'a.mov', 'NEW', Date.now());
+    write(R, 'a.mov', 'OLD', Date.now() - 86400000);
+    const { run } = await stepped(makeJob(L, R, {
+      sync: { variant: 'mirror', deletion: 'recycler', permanentFallback: false },
+    }));
+    eq(read(R, 'a.mov'), 'OLD', 'no recycle bin: the old version stays put');
+    ok(run && run.errors.some(e => /recycle bin/i.test(e.message)), 'and the reason is reported');
+  }
+
+  // (e) preserveTimes off recorded the SOURCE date as the target's, so every
+  //     later run saw a change on both sides and bounced the file forever.
+  {
+    const { L, R } = scratch();
+    write(L, 'a.mov', 'data', Date.now() - 7 * 86400000);
+    const job = makeJob(L, R, { sync: { variant: 'twoWay', preserveTimes: false } });
+    const first = await runPair(job);
+    eq(first.run.counters.files, 1, 'first run copies the file');
+    const second = await runPair(job);
+    eq(second.run.counters.files, 0, 'the second run has nothing to copy');
+    eq(second.cmp.stats.updateLeft + second.cmp.stats.updateRight, 0,
+       'and nothing to update in either direction');
+  }
+
+  // (f) A comparison that was interrupted is not a comparison. It used to be
+  //     stamped as complete, which re-armed SYNCHRONIZE on a partial plan.
+  {
+    const { L, R } = scratch();
+    write(L, 'a.mov', 'data');
+    const s = new Session();
+    const token = { cancelled: true, paused: false };
+    const cmp = await s.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token });
+    ok(cmp.cancelled, 'a cancelled comparison says so');
+    eq(s.comparedAt, 0, 'and is not stamped as compared');
+    let threw = false;
+    try { await s.sync(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: { cancelled: false }, appVersion: 'test' }); }
+    catch (_) { threw = true; }
+    ok(threw, 'synchronizing on top of it is refused');
+    await s.close();
+  }
+
+  // (g) "Ignore errors" was declared, persisted, passed to the engine and read
+  //     nowhere: the run always carried on. Off, it must stop at the first one.
+  {
+    const { L, R } = scratch();
+    write(L, 'a.mov', 'one'); write(L, 'b.mov', 'two'); write(L, 'c.mov', 'three');
+    const vanish = () => fs.rmSync(path.join(L, 'a.mov'));
+    const stop = await stepped(makeJob(L, R, { sync: { variant: 'mirror', ignoreErrors: false } }), vanish);
+    ok(stop.run && stop.run.stopped, 'with "ignore errors" off the run stops');
+    eq(stop.run.counters.files, 0, 'and copies nothing after the failure');
+
+    const { L: L2, R: R2 } = scratch();
+    write(L2, 'a.mov', 'one'); write(L2, 'b.mov', 'two'); write(L2, 'c.mov', 'three');
+    const go = await stepped(makeJob(L2, R2, { sync: { variant: 'mirror', ignoreErrors: true } }),
+      () => fs.rmSync(path.join(L2, 'a.mov')));
+    ok(!go.run.stopped, 'with it on the run carries on');
+    eq(go.run.counters.files, 2, 'the two healthy files are copied');
+    // (h) A failed copy is not a copy. It used to be counted as one, so the
+    //     report read "Files copied: 3 · Errors: 1".
+    eq(go.run.counters.failed, 1, 'and the failure is counted separately');
+  }
+
+  // (i) A database that could not be written is an ERROR, not a note: the next
+  //     two-way run reads yesterday's state and resurrects deleted files.
+  {
+    const { L, R } = scratch();
+    write(L, 'a.mov', 'data');
+    fs.mkdirSync(path.join(R, '.syncto.db'));            // a directory: unwritable as a file
+    const { run } = await stepped(makeJob(L, R, { sync: { variant: 'twoWay' } }));
+    ok(run.errors.some(e => /database could not be written/i.test(e.message)),
+       'a failed database write is reported as an error');
+    ok(run.counters.errors > 0, 'and counted, so the summary cannot say "successful"');
+  }
+
+  // (j) The database is rewritten in place; a crash mid-write used to destroy
+  //     the history of EVERY pair sharing that base folder. Write then rename.
+  {
+    const { L, R } = scratch();
+    write(L, 'a.mov', 'data');
+    fs.mkdirSync(path.join(R, '.syncto.db'));
+    await stepped(makeJob(L, R, { sync: { variant: 'twoWay' } }));
+    ok(!exists(R, '.syncto.db.syncto_tmp'), 'a failed database write leaves no temporary file');
+    ok(exists(L, '.syncto.db'), 'and the side that succeeded keeps a real database');
+    const { readDb } = require('../src/main/core/db');
+    const doc = await readDb(new NativeFs(), L);
+    ok(doc && doc.sessions, 'which is still readable');
+  }
+
+  // (k) Deleting a folder through the recycle bin took its whole contents —
+  //     including the files the hard filter was hiding on purpose.
+  {
+    const { dir, L, R } = scratch();
+    write(R, 'old/a.txt', 'go');
+    write(R, 'old/keep.bak', 'excluded on purpose');
+    const trash = makeTrash(dir);
+    const { run } = await stepped(
+      makeJob(L, R, { sync: { variant: 'mirror', deletion: 'recycler' }, compare: { excludeFilter: '*.bak' } }),
+      null, { trashItem: trash.fn });
+    ok(exists(R, 'old/keep.bak'), 'the excluded file survives');
+    ok(run.errors.length > 0, 'and the folder removal fails loudly instead');
+  }
+
+  // (l) A .syncto_tmp left by a killed run was invisible to the comparison and
+  //     removed by nothing — 180 GB could sit on a NAS for ever.
+  {
+    const { L, R } = scratch();
+    write(L, 'a.mov', 'data');
+    write(R, 'ghost.mov.syncto_tmp', 'x'.repeat(1000));
+    const { run } = await stepped(makeJob(L, R, { sync: { variant: 'mirror' } }));
+    ok(!exists(R, 'ghost.mov.syncto_tmp'), 'the leftover from an interrupted run is swept');
+    ok(run.notes.some(n => /leftover temporary file/i.test(n)), 'and the sweep is reported');
+  }
+
+  // (m) The soft filter judged a two-sided file on the LEFT copy alone, so a
+  //     file edited yesterday on the right was dropped because the left copy
+  //     was old.
+  {
+    const { L, R } = scratch();
+    const old = Date.now() - 400 * 86400000;
+    write(L, 'contract.pdf', 'old', old);
+    write(R, 'contract.pdf', 'edited yesterday', Date.now() - 86400000);
+    const s = new Session();
+    const cmp = await s.compare(
+      makeJob(L, R, { sync: { variant: 'twoWay' }, compare: { softFilter: { timeUnit: 'lastDays', timeValue: 7 } } }),
+      { token: { cancelled: false } });
+    const node = s.nodes.find(n => n.rel === 'contract.pdf');
+    ok(node && node.active, 'a recent change on either side keeps the row active');
+    eq(cmp.stats.excluded, 0, 'so it is not silently counted as excluded');
+    await s.close();
+  }
+
+  // (n) The plan belongs to the folders that were COMPARED. Swapping the sides
+  //     and pressing SYNCHRONIZE replayed the old plan against the new labels.
+  {
+    const { L, R } = scratch();
+    write(L, 'a.mov', 'left'); write(R, 'b.mov', 'right');
+    const m = new MultiSession();
+    const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+    job.pairs = [{ left: L, right: R }];
+    await m.compare(job, { token: { cancelled: false } });
+    const swapped = makeJob(R, L, { sync: { variant: 'mirror' } });
+    swapped.pairs = [{ left: R, right: L }];
+    let threw = false;
+    try { await m.sync(swapped, { token: { cancelled: false }, appVersion: 'test' }); }
+    catch (err) { threw = /changed since the last comparison/i.test(err.message); }
+    ok(threw, 'synchronizing after a swap without re-comparing is refused');
+    ok(exists(R, 'b.mov'), 'and nothing was deleted on the swapped side');
+    await m.close();
+  }
+
+  // (o) A hostname is not an identity. Two machines cloned from one image
+  //     shared "host + user", so each read the other's LIVE lock, found no
+  //     such process locally, and took the folder.
+  {
+    const mine = localLockInfo();
+    const twin = Object.assign({}, mine, { installId: 'ffffffffffffffffffffffffffffffff', processId: 999999 });
+    eq(processStatus(twin, mine), 'unknown', 'a same-name machine with another install id is not us');
+    const legacy = Object.assign({}, mine, { processId: 999999 });
+    delete legacy.installId;
+    eq(processStatus(legacy, mine), 'unknown', 'a lock from an older version is not assumed to be ours either');
+    const ours = Object.assign({}, mine, { processId: 999999, sessionId: 1 });
+    eq(processStatus(ours, mine), 'notRunning', 'but our own dead process still shortcuts the wait');
+  }
+
+  // (p) renameStrict must LOSE when the target exists — the lock takeover is
+  //     built on it. POSIX rename overwrites silently, so both machines won.
+  {
+    const { dir } = scratch();
+    const fsx = new NativeFs();
+    const a = write(dir, 'a', 'A'), b = write(dir, 'b', 'B');
+    let threw = false;
+    try { await fsx.renameStrict(a, b); } catch (err) { threw = err.code === 'EEXIST'; }
+    ok(threw, 'renameStrict refuses an existing target');
+    eq(fs.readFileSync(b, 'utf8'), 'B', 'and leaves it untouched');
+    const c = path.join(dir, 'c');
+    await fsx.renameStrict(a, c);
+    ok(fs.existsSync(c) && !fs.existsSync(a), 'a free target still works');
+  }
+
+  // (q) A job file may be hand-edited or produced by another tool. A null
+  //     section used to blow up halfway through redrawing the window.
+  {
+    const { dir } = scratch();
+    const p = path.join(dir, 'broken.syncto');
+    fs.writeFileSync(p, JSON.stringify({ format: 'syncto-job', compare: null, sync: 'nope', pairs: [] }));
+    const { loadJob } = require('../src/main/config');
+    const job = loadJob(p);
+    ok(job.compare && typeof job.compare === 'object', 'a null section falls back to the default');
+    ok(job.sync && typeof job.sync.variant === 'string', 'so does a section of the wrong type');
+    ok(Array.isArray(job.pairs) && job.pairs.length === 1, 'and an empty pair list gets one blank pair');
+  }
+
+  // (r) Each side keeps the spelling it really has on disk. Building the
+  //     destination path from the source spelling is how an accented file ends
+  //     up duplicated on a server that stores names byte for byte.
+  {
+    const { L, R } = scratch();
+    const nfd = 'Café.txt', nfc = 'Café.txt';
+    write(L, nfd, 'new', Date.now());
+    write(R, nfc, 'old', Date.now() - 86400000);
+    const s = new Session();
+    await s.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: { cancelled: false } });
+    const node = s.nodes[0];
+    ok(s.nodes.length === 1, 'the two spellings are one item, not two');
+    eq(node.relL, nfd, 'the left path keeps the decomposed spelling');
+    eq(node.relR, nfc, 'the right path keeps the composed one');
+    eq(node.rel, nfc, 'and the key is the composed form, whichever side exists');
+    await s.close();
   }
 }
 
@@ -990,6 +1284,7 @@ async function testReviewRegressions() {
     await testMultiPair();
     await testLocking();
     await testReviewRegressions();
+    await testAuditFixes();
   } catch (err) {
     failed++;
     failures.push('UNCAUGHT: ' + (err.stack || err.message));

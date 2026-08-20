@@ -61,6 +61,10 @@ const OP = {
 };
 
 const TEMP_EXT   = '.syncto_tmp';
+// A target parked out of the way while its replacement is renamed into place
+// (SFTP has no atomic replace). Normally gone within milliseconds; a dropped
+// connection can strand one, and the next run sweeps it like any leftover.
+const OLD_EXT    = '.syncto_old';
 const DB_NAME    = '.syncto.db';      // gzipped JSON, one per base folder
 const LOCK_NAME  = '.syncto.lock';
 const DEFAULT_TOLERANCE_SEC = 2;
@@ -106,11 +110,14 @@ function compareTime(lhs, rhs, toleranceSec, shiftMinutes, now) {
 }
 
 // ── Byte-for-byte comparison ───────────────────────────────────────────────
+// Returns true, false, or NULL when the token was cancelled mid-file. Null is
+// not "different": returning false there marked byte-identical files for
+// overwrite, and the run that followed re-copied them for nothing.
 async function equalContent(fsL, pl, fsR, pr, onBytes, token) {
   const a = fsL.createReadStream(pl);
   const b = fsR.createReadStream(pr);
   let bufA = Buffer.alloc(0), bufB = Buffer.alloc(0);
-  let endA = false, endB = false, equal = true, done = false;
+  let endA = false, endB = false, equal = true, done = false, cancelled = false;
 
   const pull = (stream, which) => new Promise((resolve, reject) => {
     const onData = chunk => { stream.pause(); cleanup(); resolve(chunk); };
@@ -127,7 +134,7 @@ async function equalContent(fsL, pl, fsR, pr, onBytes, token) {
 
   try {
     while (!done) {
-      if (token && token.cancelled) { equal = false; break; }
+      if (token && token.cancelled) { cancelled = true; break; }
       if (!endA && bufA.length === 0) {
         const c = await pull(a, 'a');
         if (c == null) endA = true; else bufA = c;
@@ -148,7 +155,7 @@ async function equalContent(fsL, pl, fsR, pr, onBytes, token) {
     try { a.destroy(); } catch (_) {}
     try { b.destroy(); } catch (_) {}
   }
-  return equal;
+  return cancelled ? null : equal;
 }
 
 // ── Tree building ──────────────────────────────────────────────────────────
@@ -166,6 +173,7 @@ class Comparer {
     this.soft   = new SoftFilter(this.cfg.softFilter);
     this.nodes  = [];
     this.errors = [];
+    this.leftovers = [];      // stray .syncto_tmp files from an interrupted run
     this.stats  = { scanned: 0, comparedBytes: 0 };
     this.symlinks = this.cfg.symlinks || 'exclude';   // exclude | asLink
   }
@@ -179,15 +187,31 @@ class Comparer {
     });
   }
 
+  // Per-side spelling of a name that only exists on the other side. A Mac
+  // stores "é" decomposed (NFD), a Linux server or a Windows share composed
+  // (NFC); reusing the source spelling to build the destination path makes the
+  // target create a SECOND file next to the one already there.
+  _spell(side, name) {
+    const fsx = (side === 'left' ? this.left : this.right).fs;
+    return fsx.normalizeName ? fsx.normalizeName(name) : name;
+  }
+
   async run() {
     const lRoot = await this.left.fs.stat(this.left.path);
     const rRoot = await this.right.fs.stat(this.right.path);
     if (!lRoot && !rRoot) throw new Error('Neither folder exists.');
-    if (!lRoot) this.errors.push({ path: this.left.path,  message: 'Left folder not found — it will be created.' });
-    if (!rRoot) this.errors.push({ path: this.right.path, message: 'Right folder not found — it will be created.' });
+    // `missingRoot` is what tells sync() this side is empty because it is gone,
+    // not because it is genuinely empty. A missing base folder plus a mirror is
+    // a mass deletion of the healthy side — see Session.sync().
+    if (!lRoot) this.errors.push({ path: this.left.path,  message: 'Left folder not found — it will be created.',  missingRoot: 'left'  });
+    if (!rRoot) this.errors.push({ path: this.right.path, message: 'Right folder not found — it will be created.', missingRoot: 'right' });
 
-    await this._walk('', -1, 0, !!lRoot, !!rRoot);
-    return { nodes: this.nodes, errors: this.errors, stats: this.stats };
+    await this._walk({ c: '', l: '', r: '' }, -1, 0, !!lRoot, !!rRoot);
+    return {
+      nodes: this.nodes, errors: this.errors, stats: this.stats,
+      leftovers: this.leftovers,
+      cancelled: !!this.token.cancelled,
+    };
   }
 
   // Returns a Map, or null when the directory could not be read. Null is NOT
@@ -202,7 +226,14 @@ class Comparer {
       const map = new Map();
       for (const e of list) {
         if (ALWAYS_SKIP.has(e.name) || isSyncToInternal(e.name)) continue;
-        if (e.name.endsWith(TEMP_EXT)) continue;   // leftover from an aborted run
+        if (e.name.endsWith(TEMP_EXT) || e.name.endsWith(OLD_EXT)) {
+          // Leftover from a run that was killed or lost power. It is invisible
+          // to the comparison — which is right — but nothing ever removed it
+          // either, so an interrupted 180 GB copy sat on the NAS for ever and
+          // the space vanished with no explanation anywhere in the app.
+          this.leftovers.push({ side, path: base.fs.join(dir, e.name), size: e.size || 0 });
+          continue;
+        }
         if (e.type === 'symlink' && this.symlinks === 'exclude') continue;
         if (e.type === 'other') continue;
         // Case-insensitive key so a Mac and a Windows share agree on identity,
@@ -226,11 +257,14 @@ class Comparer {
     }
   }
 
-  async _walk(relDir, parentIdx, depth, lExists, rExists) {
+  // `rels` carries three views of the current directory: `c` the canonical one
+  // (NFC, side-independent — it keys the database and the grid), `l` and `r`
+  // the spelling each side really has on disk.
+  async _walk(rels, parentIdx, depth, lExists, rExists) {
     if (this.token.cancelled) return;
     const [L, R] = await Promise.all([
-      this._list('left',  relDir, lExists),
-      this._list('right', relDir, rExists),
+      this._list('left',  rels.l, lExists),
+      this._list('right', rels.r, rExists),
     ]);
     // One side unreadable: comparing would fabricate one-sided items and turn
     // an I/O error into deletions. The whole directory is left out instead;
@@ -244,8 +278,15 @@ class Comparer {
       if (this.token.cancelled) return;
       const l = L.get(key) || null;
       const r = R.get(key) || null;
-      const name = (l || r).name;
-      const rel  = relDir ? relDir + '/' + name : name;
+      const name  = (l || r).name.normalize('NFC');
+      const rel   = rels.c ? rels.c + '/' + name : name;
+      const lName = l ? l.name : this._spell('left',  name);
+      const rName = r ? r.name : this._spell('right', name);
+      const child = {
+        c: rel,
+        l: rels.l ? rels.l + '/' + lName : lName,
+        r: rels.r ? rels.r + '/' + rName : rName,
+      };
 
       const kind = (l || r).type;
       // A folder on one side and a file on the other: not comparable.
@@ -254,27 +295,28 @@ class Comparer {
       if (kind === 'folder' && !typeClash) {
         if (!this.filter.passFolder(rel)) continue;
         const idx = this.nodes.length;
-        this.nodes.push(this._makeNode(idx, rel, name, 'folder', parentIdx, depth, l, r, null));
+        this.nodes.push(this._makeNode(idx, child, name, 'folder', parentIdx, depth, l, r, null));
         this.stats.scanned++;
         if (this.nodes.length % 200 === 0) this._emit(rel);
-        await this._walk(rel, idx, depth + 1, !!l, !!r);
+        await this._walk(child, idx, depth + 1, !!l, !!r);
         continue;
       }
 
       if (!this.filter.passFile(rel)) continue;
-      const node = this._makeNode(this.nodes.length, rel, name,
+      const node = this._makeNode(this.nodes.length, child, name,
         typeClash ? 'file' : kind, parentIdx, depth, l, r, typeClash);
-      if (!typeClash && l && r && kind !== 'symlink') await this._categorizeFile(node, rel, l, r);
-      else if (!typeClash && l && r && kind === 'symlink') await this._categorizeSymlink(node, rel, l, r);
+      if (!typeClash && l && r && kind !== 'symlink') await this._categorizeFile(node, child, l, r);
+      else if (!typeClash && l && r && kind === 'symlink') await this._categorizeSymlink(node, child, l, r);
       this.nodes.push(node);
       this.stats.scanned++;
       if (this.nodes.length % 200 === 0) this._emit(rel);
     }
   }
 
-  _makeNode(idx, rel, name, type, parentIdx, depth, l, r, typeClash) {
+  _makeNode(idx, rels, name, type, parentIdx, depth, l, r, typeClash) {
+    const rel = rels.c;
     const node = {
-      idx, rel, name, type, parent: parentIdx, depth,
+      idx, rel, relL: rels.l, relR: rels.r, name, type, parent: parentIdx, depth,
       left : l ? { exists: true, size: l.size, mtime: l.mtime, id: l.id } : { exists: false },
       right: r ? { exists: true, size: r.size, mtime: r.mtime, id: r.id } : { exists: false },
       cat  : CAT.EQUAL,
@@ -298,15 +340,19 @@ class Comparer {
       node.cat = CAT.EQUAL;
     }
     // Soft filter marks rows inactive without removing them from the view.
+    // Either side passing is enough: judging a two-sided item on the left copy
+    // alone silently dropped a file edited yesterday on the right because the
+    // left copy was a year old.
     if (type !== 'folder') {
-      const size  = l ? l.size  : (r ? r.size  : 0);
-      const mtime = l ? l.mtime : (r ? r.mtime : 0);
-      if (!this.soft.passes(size, mtime)) node.active = false;
+      const ok = (l && this.soft.passes(l.size, l.mtime)) ||
+                 (r && this.soft.passes(r.size, r.mtime));
+      if (!ok) node.active = false;
     }
     return node;
   }
 
-  async _categorizeFile(node, rel, l, r) {
+  async _categorizeFile(node, rels, l, r) {
+    const rel = rels.c;
     const variant = this.cfg.compareVariant || 'timeSize';
     const tol     = this.cfg.timeTolerance;
     const shifts  = this.cfg.timeShifts || [];
@@ -323,13 +369,17 @@ class Comparer {
         node.catMsg = 'Content comparison was skipped for an excluded file.';
         return;
       }
-      const pl = this.left.fs.join(this.left.path, ...rel.split('/'));
-      const pr = this.right.fs.join(this.right.path, ...rel.split('/'));
+      const pl = this.left.fs.join(this.left.path, ...rels.l.split('/'));
+      const pr = this.right.fs.join(this.right.path, ...rels.r.split('/'));
       try {
         this._emit(rel);
         const same = await equalContent(
           this.left.fs, pl, this.right.fs, pr,
           n => { this.stats.comparedBytes += n; }, this.token);
+        // Cancelled mid-file: leave the node on its harmless default (equal,
+        // no operation). The run is flagged cancelled, so nothing will be
+        // synchronized from this half-built tree anyway.
+        if (same === null) return;
         node.cat = same ? CAT.EQUAL : CAT.DIFFERENT;
       } catch (err) {
         node.cat = CAT.CONFLICT;
@@ -352,19 +402,28 @@ class Comparer {
     }
   }
 
-  async _categorizeSymlink(node, rel, l, r) {
+  async _categorizeSymlink(node, rels, l, r) {
     const variant = this.cfg.compareVariant || 'timeSize';
     if (variant === 'timeSize') {
       const res = compareTime(l.mtime, r.mtime, this.cfg.timeTolerance, this.cfg.timeShifts);
-      node.cat = res === 'equal' ? CAT.EQUAL
-               : res === 'leftNewer' ? CAT.LEFT_NEWER
+      if (res === 'equal') { node.cat = CAT.EQUAL; return; }
+      // A symlink has no content of its own but its target, and a recreated
+      // link always carries today's date — on a filesystem without lutimes
+      // (SFTP) the dates can never match. Ask what the links point at before
+      // declaring one newer, or the pair is re-copied every single run.
+      try {
+        const a = await this.left.fs.readlink(this.left.fs.join(this.left.path, ...rels.l.split('/')));
+        const b = await this.right.fs.readlink(this.right.fs.join(this.right.path, ...rels.r.split('/')));
+        if (a === b) { node.cat = CAT.EQUAL; return; }
+      } catch (_) { /* fall through to the date verdict */ }
+      node.cat = res === 'leftNewer' ? CAT.LEFT_NEWER
                : res === 'rightNewer' ? CAT.RIGHT_NEWER
                : CAT.TIME_INVALID;
       return;
     }
     try {
-      const a = await this.left.fs.readlink(this.left.fs.join(this.left.path, ...rel.split('/')));
-      const b = await this.right.fs.readlink(this.right.fs.join(this.right.path, ...rel.split('/')));
+      const a = await this.left.fs.readlink(this.left.fs.join(this.left.path, ...rels.l.split('/')));
+      const b = await this.right.fs.readlink(this.right.fs.join(this.right.path, ...rels.r.split('/')));
       node.cat = (a === b) ? CAT.EQUAL : CAT.DIFFERENT;
     } catch (err) {
       node.cat = CAT.CONFLICT;
@@ -375,6 +434,6 @@ class Comparer {
 
 module.exports = {
   Comparer, CAT, OP, compareTime, sameTime, equalContent,
-  TEMP_EXT, DB_NAME, LOCK_NAME, CHECKSUM_FILE, ALWAYS_SKIP, isSyncToInternal,
+  TEMP_EXT, OLD_EXT, DB_NAME, LOCK_NAME, CHECKSUM_FILE, ALWAYS_SKIP, isSyncToInternal,
   DEFAULT_TOLERANCE_SEC,
 };

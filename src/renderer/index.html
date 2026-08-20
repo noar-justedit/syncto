@@ -19,6 +19,14 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<!--
+  This window holds the whole IPC bridge: reading any folder, launching a file
+  with its default application, and the stored SFTP credentials. The policy
+  below is what stops a single forgotten escape from becoming code execution —
+  no inline scripts, no remote anything, no frames. The main process sends the
+  same policy as a response header, where nothing in the document can strip it.
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'">
 <title>syncto</title>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}

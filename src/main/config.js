@@ -105,10 +105,33 @@ function defaultPrefs() {
   };
 }
 
+// Writes a file the way the sync engine writes data: beside it, then rename.
+// writeFileSync truncates the target the moment it opens, so an interrupted
+// write left an empty or half-written file. For preferences.json that meant a
+// blank application on the next launch — recent jobs, window size and the SFTP
+// credentials all gone, with no message; for a .syncto it meant the user's own
+// job file destroyed.
+function writeFileAtomic(file, text) {
+  const tmp = file + '.tmp';
+  try {
+    fs.writeFileSync(tmp, text, 'utf8');
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try { fs.unlinkSync(tmp); } catch (_) {}
+    throw err;
+  }
+}
+
 // Deep merge that keeps unknown keys from the file and fills in new defaults.
+// A non-object `over` where the default is an object (a hand-edited job with
+// "compare": null) would have replaced a whole section with null and left the
+// interface throwing halfway through a redraw; keep the default instead.
 function merge(base, over) {
   if (over == null || typeof over !== 'object' || Array.isArray(over)) {
-    return over === undefined ? base : over;
+    if (over === undefined) return base;
+    if (base && typeof base === 'object' && !Array.isArray(base)) return base;
+    if (Array.isArray(base) && !Array.isArray(over)) return base;
+    return over;
   }
   const out = Array.isArray(base) ? base.slice() : Object.assign({}, base);
   for (const k of Object.keys(over)) {
@@ -135,7 +158,7 @@ class Prefs {
     if (patch) this.data = merge(this.data, patch);
     try {
       fs.mkdirSync(path.dirname(this.file), { recursive: true });
-      fs.writeFileSync(this.file, JSON.stringify(this.data, null, 2), 'utf8');
+      writeFileAtomic(this.file, JSON.stringify(this.data, null, 2));
     } catch (_) {}
     return this.data;
   }
@@ -170,8 +193,24 @@ function migrateJob(raw) {
 
 function loadJob(file) {
   const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Not a syncto job file.');
   if (raw.format !== JOB_FORMAT) throw new Error('Not a syncto job file.');
   const job = merge(defaultJob(), migrateJob(raw));
+  // A job may be hand-edited or produced by another tool. Every section the
+  // interface reads unconditionally must be an object by the time it gets
+  // there, or the redraw throws with the path fields already replaced and the
+  // rest of the window left showing the previous job.
+  for (const k of ['compare', 'sync', 'autoSync']) {
+    const def = defaultJob()[k];
+    if (def && (!job[k] || typeof job[k] !== 'object' || Array.isArray(job[k]))) job[k] = def;
+  }
+  if (job.sync && (!job.sync.versioning || typeof job.sync.versioning !== 'object')) {
+    job.sync.versioning = defaultJob().sync.versioning;
+  }
+  if (job.sync && (!job.sync.report || typeof job.sync.report !== 'object')) {
+    job.sync.report = defaultJob().sync.report;
+  }
+  if (!Array.isArray(job.pairs) || !job.pairs.length) job.pairs = [{ left: '', right: '' }];
   delete job.left; delete job.right;
   return job;
 }
@@ -179,7 +218,7 @@ function loadJob(file) {
 function saveJob(file, job) {
   const out = merge(defaultJob(), job);
   out.format = JOB_FORMAT;
-  fs.writeFileSync(file, JSON.stringify(out, null, 2), 'utf8');
+  writeFileAtomic(file, JSON.stringify(out, null, 2));
   return out;
 }
 

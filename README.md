@@ -67,6 +67,13 @@ Go to **https://nodejs.org**, click the green **LTS** button, run the installer.
 For Windows, **double-click `scripts/build-win-from-mac.command`** — it
 cross-builds from your Mac.
 
+Double-click only ever works on a `.command` file: macOS opens a `.sh` in a text
+editor. And if a launcher ever answers **"you do not have appropriate access
+privileges"**, the folder travelled somewhere that drops file permissions (a
+FAT/exFAT stick, a sync from Windows, some unzip tools). Open Terminal in the
+`syncto` folder and run `chmod +x build.sh scripts/*.sh scripts/*.command`
+once — the launchers repair themselves after that.
+
 **Building the Windows version from a Mac works.** syncto has no compiled
 native module — hash-wasm is pure WebAssembly and ssh2 is pure JavaScript — so
 there is nothing to cross-compile. The portable `.zip` needs nothing extra; the
@@ -88,7 +95,7 @@ From a terminal, `./build.sh` at the project root does the same:
 | `./build.sh --test` | run the engine test suite |
 
 ### Test without building (dev mode)
-Install Node.js (Step 1), then double-click `scripts/dev.sh`.
+Install Node.js (Step 1), then double-click `scripts/dev.command`.
 
 ---
 
@@ -215,6 +222,21 @@ data back over the network, so **Secure** is considerably slower than on a
 local drive. SFTP has no trash and no inode information, so use permanent
 deletion there.
 
+### When something fails
+
+**Ignore errors** (Settings) decides what happens after the first failure. Off
+— the default — the run stops there, writes its database and its report, and
+tells you why. On, it works through every remaining item and lists the failures
+at the end. Off is the right choice for a backup you are watching; on is the
+right choice for an overnight job over a flaky network.
+
+**Retries** are separate and always apply: a failing item is attempted the
+configured number of times before it counts as a failure at all.
+
+A folder that cannot be *read*, or a base folder that is not there, is never
+treated as an empty folder — that would make a mirror delete the healthy side.
+Such a run is refused, with the path that needs fixing.
+
 ### Jobs
 
 **⌘S** saves the folder pairs and every setting as a `.syncto` file — the file
@@ -241,8 +263,10 @@ settings, compared and synchronized in one go.
 | `.syncto.db` | root of both folders | the last synchronized state, for two-way sync and move detection. Hidden, gzipped. Delete it and two-way sync restarts from scratch. |
 | `.syncto.lock` | root of each folder, while running | who is synchronizing right now. Removed at the end; reclaimed automatically after a crash. |
 | `syncto-checksums.txt` | root of each target | the checksum list, at the Secure level (merged run after run) |
-| `*.syncto_tmp` | next to a file being written | fail-safe copy. A leftover means a run was interrupted; the next run ignores it and cleans it up. |
+| `*.syncto_tmp` | next to a file being written | fail-safe copy. A leftover means a run was interrupted; the comparison ignores it and the next synchronization removes it, reporting how much space it reclaimed. |
+| `*.syncto_old` | next to a file being replaced, on SFTP | the previous version, parked for the instant it takes to rename its replacement into place. SFTP cannot replace a file atomically, and deleting the target first would lose it if the connection dropped. Swept like any leftover. |
 | `syncto_<job>_<date>.html` | `Documents/syncto reports` | the report. Written outside the synchronized folders on purpose. |
+| `install-id` | `~/.syncto/` | identifies this installation to the directory lock, so two machines sharing a hostname cannot mistake each other's lock for their own. Delete it and a new one is generated. |
 
 ---
 

@@ -34,7 +34,7 @@
 // SECOND PASS, once every file has been copied — same order as ingesto: copy
 // everything, then read everything back.
 
-const { OP, TEMP_EXT, ALWAYS_SKIP, isSyncToInternal } = require('./compare');
+const { OP, TEMP_EXT, OLD_EXT, ALWAYS_SKIP, isSyncToInternal } = require('./compare');
 const { createHasher, hashStream, algoFor } = require('./hash');
 const { Versioner, runTimestamp, streamCopy } = require('./versioning');
 
@@ -159,6 +159,18 @@ class SyncRunner {
     return rel ? s.fs.join(s.path, ...rel.split('/')) : s.path;
   }
 
+  // A node's path on ONE side, in that side's own spelling. `rel` is the
+  // canonical NFC form used as a key everywhere; relL/relR are what the two
+  // filesystems really hold. Building a destination path from the source
+  // spelling is how an accented file ends up duplicated on a Linux server.
+  relOn(node, side) {
+    const r = side === 'left' ? node.relL : node.relR;
+    return r == null ? node.rel : r;
+  }
+
+  absNode(node, side) { return this.abs(side, this.relOn(node, side)); }
+
+
   emit(force, current) {
     const t = now();
     if (!force && t - this._lastEmit < 120) return;
@@ -169,7 +181,10 @@ class SyncRunner {
       phase: 'sync',
       pass : this.phase,                       // 'copy' | 'verify' | 'cleanup'
       current: current || this.current || '',
-      filesDone: this.done.files, filesTotal: this.plan.files,
+      // Attempted, not succeeded: the ring has to reach the end of the plan
+      // even when some files failed, while `done.files` stays the honest
+      // count of files that really landed.
+      filesDone: this.done.files + (this.done.failed || 0), filesTotal: this.plan.files,
       bytesDone: this.done.workBytes, bytesTotal: this.plan.workBytes,
       copiedBytes: this.done.bytes,
       deleted: this.done.deleted, deletionsTotal: this.plan.deletions,
@@ -238,10 +253,10 @@ class SyncRunner {
         // One entry per pair, anchored on the TO node; its FROM mate is
         // resolved here so the executor never has to look it up.
         case OP.MOVE_LEFT_TO:
-          moves.push({ n, side: 'left',  fromRel: this.nodes[n.movePair].rel });
+          moves.push({ n, side: 'left',  fromNode: this.nodes[n.movePair], fromRel: this.nodes[n.movePair].rel });
           break;
         case OP.MOVE_RIGHT_TO:
-          moves.push({ n, side: 'right', fromRel: this.nodes[n.movePair].rel });
+          moves.push({ n, side: 'right', fromNode: this.nodes[n.movePair], fromRel: this.nodes[n.movePair].rel });
           break;
         default: break;
       }
@@ -276,9 +291,10 @@ class SyncRunner {
   }
 
   // Removes an item according to the configured deletion policy.
-  async dispose(side, rel, isFolder) {
+  async dispose(side, node, isFolder) {
     const fsx  = this.side(side).fs;
-    const path = this.abs(side, rel);
+    const rel  = node.rel;
+    const path = this.absNode(node, side);
     const mode = this.cfg.deletion || 'recycler';
 
     if (mode === 'versioning') {
@@ -293,6 +309,14 @@ class SyncRunner {
     }
 
     if (mode === 'recycler') {
+      // A folder still holding items the hard filter hid must NOT go to the
+      // trash whole — the user excluded those files precisely so syncto would
+      // not touch them. rmdirClean sweeps only OS litter and lets rmdir fail
+      // loudly on anything else, which is the guard the trash path skipped.
+      if (isFolder) {
+        await this.rmdirClean(fsx, path);
+        return 'removed';
+      }
       if (fsx.supportsTrash() && this.trashItem) {
         const ok = await this.trashItem(fsx, path);
         if (ok) return 'trashed';
@@ -317,7 +341,8 @@ class SyncRunner {
       const entries = await fsx.readdir(path);
       for (const e of entries) {
         if (e.type === 'file' &&
-            (ALWAYS_SKIP.has(e.name) || isSyncToInternal(e.name) || e.name.endsWith(TEMP_EXT))) {
+            (ALWAYS_SKIP.has(e.name) || isSyncToInternal(e.name) ||
+             e.name.endsWith(TEMP_EXT) || e.name.endsWith(OLD_EXT))) {
           try { await fsx.unlink(fsx.join(path, e.name)); } catch (_) {}
         }
       }
@@ -329,8 +354,8 @@ class SyncRunner {
   async copyOne(item) {
     const { n, to, from } = item;
     const srcFs = this.side(from).fs, dstFs = this.side(to).fs;
-    const src   = this.abs(from, n.rel);
-    const dst   = this.abs(to,   n.rel);
+    const src   = this.absNode(n, from);
+    const dst   = this.absNode(n, to);
     const level = this.cfg.copyLevel || 'verified';
     const algo  = algoFor(level);
     const failSafe = this.cfg.failSafe !== false;
@@ -346,20 +371,37 @@ class SyncRunner {
     if (n.type === 'symlink') {
       const target = await srcFs.readlink(src);
       if (await dstFs.exists(dst)) {
-        await this.archiveExisting(to, n.rel);
+        await this.archiveExisting(to, n);
         // Permanent mode archives nothing, and a full trash can fail silently:
         // the old link may still be there, and symlink() refuses to replace.
         if (await dstFs.exists(dst)) await dstFs.unlink(dst);
       }
       await dstFs.symlink(target, dst);
-      return { bytes: 0, hash: null, mtime: srcStat.mtime, size: 0 };
+      // The recreated link carries today's date. Without lutimes the target
+      // would look newer at every run and be recreated forever — and under
+      // versioning, archived forever. Record what the link REALLY has now.
+      let linkMtime = srcStat.mtime;
+      if (dstFs.setLinkMTime) {
+        try { await dstFs.setLinkMTime(dst, srcStat.mtime); }
+        catch (_) { linkMtime = null; }
+      } else {
+        linkMtime = null;
+      }
+      if (linkMtime == null) {
+        const st = await dstFs.stat(dst);
+        linkMtime = st ? st.mtime : srcStat.mtime;
+      }
+      return {
+        bytes: 0, hash: null, mtime: srcStat.mtime, size: 0,
+        dstMtime: linkMtime, srcId: srcStat.id || null, dstId: null,
+      };
     }
 
     await dstFs.mkdir(dstFs.dirname(dst));
 
     // An existing target is put aside before being replaced, so "overwrite"
     // never means "lose the previous version" when versioning is on.
-    if (!failSafe && await dstFs.exists(dst)) await this.archiveExisting(to, n.rel);
+    if (!failSafe && await dstFs.exists(dst)) await this.archiveExisting(to, n);
 
     const hasher = algo ? await createHasher(algo) : null;
     let copied;
@@ -377,7 +419,14 @@ class SyncRunner {
 
     // Cheap guard, before the rename: did everything land? A truncated copy
     // therefore never takes the target's name, whatever the level.
-    if (level !== 'fast') {
+    //
+    // This now runs at the fast level too. One stat against a whole file copy
+    // costs nothing, and over SFTP it is the only thing that catches a full
+    // disk: ssh2 emits 'finish' before the server has acknowledged the CLOSE,
+    // and a quota error arrives in that acknowledgement — after the copy has
+    // been declared a success. Without this, a truncated file was renamed
+    // straight over the good copy it was meant to replace.
+    {
       const st = await dstFs.stat(tmp);
       if (!st || st.size !== srcStat.size) {
         try { if (failSafe) await dstFs.unlink(tmp); } catch (_) {}
@@ -386,7 +435,16 @@ class SyncRunner {
     }
 
     if (failSafe) {
-      if (await dstFs.exists(dst)) await this.archiveExisting(to, n.rel);
+      // Archive BEFORE the rename, and let a refusal abort the copy: the
+      // temporary file is cleaned up and the target keeps its old content.
+      if (await dstFs.exists(dst)) {
+        try {
+          await this.archiveExisting(to, n);
+        } catch (err) {
+          try { await dstFs.unlink(tmp); } catch (_) {}
+          throw err;
+        }
+      }
       await dstFs.rename(tmp, dst);
     }
 
@@ -418,7 +476,13 @@ class SyncRunner {
     let dstId = null, dstMtime = srcStat.mtime;
     try {
       const st = await dstFs.stat(dst);
-      if (st) { dstId = st.id; if (!mtimeKept && this.cfg.preserveTimes !== false) dstMtime = st.mtime; }
+      // `mtimeKept` is false both when preserving the date FAILED and when it
+      // was never attempted (preserveTimes off). Either way the copy carries
+      // its own date, and that is what the database has to record. The extra
+      // `preserveTimes !== false` test made the "off" case store the source's
+      // date instead — a two-way job then saw a change on both sides at every
+      // run and bounced the file back and forth for ever.
+      if (st) { dstId = st.id; if (!mtimeKept) dstMtime = st.mtime; }
     } catch (_) {}
 
     return {
@@ -434,10 +498,10 @@ class SyncRunner {
   // refuse cross-directory renames), fall back to a LOCAL copy + delete on
   // that same side — still no transfer between left and right.
   async moveOne(item) {
-    const { n, side, fromRel } = item;
+    const { n, side, fromNode, fromRel } = item;
     const fsx  = this.side(side).fs;
-    const from = this.abs(side, fromRel);
-    const to   = this.abs(side, n.rel);
+    const from = fromNode ? this.absNode(fromNode, side) : this.abs(side, fromRel);
+    const to   = this.absNode(n, side);
 
     this.current = `${fromRel} → ${n.rel}`;
     this.emit(true);
@@ -470,19 +534,37 @@ class SyncRunner {
   }
 
   // Moves the file about to be replaced into the revision store / trash.
-  async archiveExisting(side, rel) {
+  //
+  // This throws on exactly the cases dispose() throws on. It used to `return`
+  // instead — so "keep every version" with a revision folder set on one side
+  // only, or a trash that refused the item, destroyed the replaced version in
+  // silence while the DELETE path for the same configuration shouted. An
+  // overwrite is a deletion with a copy on top; it gets the same guarantees.
+  async archiveExisting(side, node) {
     const mode = this.cfg.deletion || 'recycler';
     if (mode === 'permanent') return;
     const fsx = this.side(side).fs;
-    const p = this.abs(side, rel);
+    const p = this.absNode(node, side);
     if (!(await fsx.exists(p))) return;
+
     if (mode === 'versioning') {
       const v = this.versionerFor(side);
-      if (v) { await v.archive(fsx, p, rel); return; }
+      if (!v) {
+        throw new Error('Versioning is selected but no revision folder is set for the ' + side +
+          ' side — the file about to be replaced would be lost.');
+      }
+      await v.archive(fsx, p, node.rel);
       return;
     }
-    if (mode === 'recycler' && fsx.supportsTrash() && this.trashItem) {
-      await this.trashItem(fsx, p);
+
+    if (fsx.supportsTrash() && this.trashItem) {
+      const ok = await this.trashItem(fsx, p);
+      if (ok) return;
+    }
+    // No trash here (SFTP, most network shares), or the trash refused it.
+    if (!this.cfg.permanentFallback) {
+      throw new Error('This location has no recycle bin, so the version about to be replaced ' +
+        'cannot be kept. Choose permanent deletion or versioning.');
     }
   }
 
@@ -497,7 +579,7 @@ class SyncRunner {
     catch (err) {
       if (!/cancelled/i.test(err.message || '')) throw err;
     }
-    this.emit(true, this.token.cancelled ? 'Cancelled' : 'Done');
+    this.emit(true, this.token.cancelled ? 'Cancelled' : (this.stopped ? 'Stopped' : 'Done'));
     return {
       results  : this.results,
       applied  : this.applied,
@@ -508,8 +590,23 @@ class SyncRunner {
       counters : this.done,
       plan     : this.plan,
       cancelled: !!this.token.cancelled,
+      stopped  : !!this.stopped,
       stamp    : this.stamp,
     };
+  }
+
+  // Called from every phase after a failure. Returns true when the run must
+  // stop here. Stopping is graceful, exactly like cancelling: the database and
+  // the report are still written from what really happened.
+  halt(err) {
+    if (/cancelled/i.test((err && err.message) || '')) return true;
+    if (this.cfg.ignoreErrors) return false;
+    if (!this.stopped) {
+      this.stopped = true;
+      this.notes.push('Stopped at the first error because "ignore errors" is off. ' +
+        'Nothing after this point was attempted.');
+    }
+    return true;
   }
 
   async _run() {
@@ -534,17 +631,17 @@ class SyncRunner {
         this.applied.set(item.fromRel, { ok: true, deleted: true });
       } catch (err) {
         this.record(item.n, false, { side: item.side, error: err.message || String(err) });
-        if (/cancelled/i.test(err.message || '')) break;
+        if (this.halt(err)) break;
       }
       this.emit(false);
     }
 
     // 1. delete files
-    for (const { n, side } of plan.del) {
+    if (!this.stopped) for (const { n, side } of plan.del) {
       await this.gate();
       this.current = n.rel;
       try {
-        const how = await this.withRetry(n.rel, () => this.dispose(side, n.rel, false));
+        const how = await this.withRetry(n.rel, () => this.dispose(side, n, false));
         this.done.deleted++;
         this.record(n, true, { side, how, deleted: true });
         this.applied.set(n.rel, { ok: true, deleted: true });
@@ -552,33 +649,34 @@ class SyncRunner {
         this.record(n, false, { side, error: err.message || String(err) });
         // Cancellation stops the loop unconditionally — "ignore errors" means
         // "keep going past failures", never "keep deleting after a cancel".
-        if (/cancelled/i.test(err.message || '')) break;
+        if (this.halt(err)) break;
       }
       this.emit(false);
     }
 
     // 2. create folders
-    for (const { n, side } of plan.mkdir) {
+    if (!this.stopped) for (const { n, side } of plan.mkdir) {
       await this.gate();
       this.current = n.rel;
       const fsx = this.side(side).fs;
       try {
-        await this.withRetry(n.rel, () => fsx.mkdir(this.abs(side, n.rel)));
+        await this.withRetry(n.rel, () => fsx.mkdir(this.absNode(n, side)));
         const src = this.other(side);
         if (this.cfg.preserveTimes !== false && n[src].exists) {
-          try { await fsx.setMTime(this.abs(side, n.rel), n[src].mtime); } catch (_) {}
+          try { await fsx.setMTime(this.absNode(n, side), n[src].mtime); } catch (_) {}
         }
         this.done.folders++;
         this.record(n, true, { side });
         this.applied.set(n.rel, { ok: true, mtime: n[src].mtime || 0, size: 0 });
       } catch (err) {
         this.record(n, false, { side, error: err.message || String(err) });
+        if (this.halt(err)) break;
       }
       this.emit(false);
     }
 
     // 3. copy files
-    for (const item of plan.copy) {
+    if (!this.stopped) for (const item of plan.copy) {
       await this.gate();
       try {
         const res = await this.withRetry(item.n.rel, () => this.copyOne(item));
@@ -594,9 +692,13 @@ class SyncRunner {
           idR: item.to === 'right' ? res.dstId : res.srcId,
         });
       } catch (err) {
-        this.done.files++;
+        // NOT done.files++ — that counter is what the report calls "files
+        // copied" and what the progress ring advances on. Counting failures
+        // there produced reports reading "Files copied: 10 / Errors: 3" with
+        // the number of files that actually landed appearing nowhere.
+        this.done.failed = (this.done.failed || 0) + 1;
         this.record(item.n, false, { side: item.to, error: err.message || String(err) });
-        if (/cancelled/i.test(err.message || '')) break;
+        if (this.halt(err)) break;
       }
       this.emit(false);
     }
@@ -615,7 +717,12 @@ class SyncRunner {
         this.emit(true);
         const fsx = this.side(item.side).fs;
         try {
-          await fsx.flush(item.path);
+          const flushed = await fsx.flush(item.path);
+          if (flushed === false && !this._flushWarned) {
+            this._flushWarned = true;
+            this.notes.push('The write cache could not be flushed on this volume, so the ' +
+              'verification read may have been served from memory rather than from the medium.');
+          }
           const verifier = await createHasher(item.algo);
           const back = await hashStream(fsx, item.path, verifier,
             b => { this.done.workBytes += b; this.meter.add(b); this.emit(false); }, this.token);
@@ -634,6 +741,7 @@ class SyncRunner {
           this.applied.delete(item.rel);
           const res = this.results.find(r => r.rel === item.rel && r.ok);
           if (res) { res.ok = false; res.error = err.message || String(err); }
+          if (this.halt(err)) break;
         }
         this.emit(false);
       }
@@ -643,24 +751,46 @@ class SyncRunner {
     }
 
     // 5. delete folders, deepest first
-    for (const { n, side } of plan.rmdir) {
+    if (!this.stopped) for (const { n, side } of plan.rmdir) {
       if (this.token.cancelled) break;
       this.current = n.rel;
       try {
-        await this.dispose(side, n.rel, true);
+        await this.dispose(side, n, true);
         this.done.deleted++;
         this.record(n, true, { side, deleted: true });
         this.applied.set(n.rel, { ok: true, deleted: true });
       } catch (err) {
         this.record(n, false, { side, error: err.message || String(err) });
+        if (this.halt(err)) break;
       }
       this.emit(false);
     }
+
+    // 6. sweep the .syncto_tmp files a previous run left behind. They are
+    //    half-written copies, never user data, and the comparison hides them —
+    //    so nothing else would ever remove them. We hold the lock on both
+    //    folders here, so no other machine is writing them right now.
+    await this.sweepLeftovers();
 
     // Prune stale revisions once everything else is done.
     for (const side of ['left', 'right']) {
       const v = this.versionerFor(side);
       if (v) { try { await v.prune(m => this.notes.push(m)); } catch (_) {} }
+    }
+  }
+
+  async sweepLeftovers() {
+    const list = this.leftovers || [];
+    if (!list.length || this.token.cancelled) return;
+    let n = 0, bytes = 0;
+    for (const item of list) {
+      const fsx = this.side(item.side).fs;
+      try { await fsx.unlink(item.path); n++; bytes += item.size || 0; }
+      catch (_) { /* gone already, or not ours to remove */ }
+    }
+    if (n) {
+      this.notes.push(`Removed ${n} leftover temporary file${n > 1 ? 's' : ''} ` +
+        `(${(bytes / 1e9).toFixed(2)} GB) from an interrupted run.`);
     }
   }
 }

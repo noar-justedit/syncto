@@ -6,7 +6,16 @@
 # can read the result.
 #
 cd "$(dirname "$0")"
-./build-mac.sh
+
+# Restore the executable bit on every script here before doing anything else.
+# A ZIP unpacked by some tools, a copy through a FAT/exFAT stick, or a folder
+# synchronised from Windows all drop it — and all the user sees is "permission
+# denied", with no hint of what to do about it.
+chmod +x ./*.sh ./*.command ../build.sh 2>/dev/null
+
+# Called through `bash` rather than `./`, so this still works if the chmod above
+# was refused (read-only volume, file owned by someone else).
+bash ./build-mac.sh
 status=$?
 echo ""
 read -p "Press Enter to close this window..."
