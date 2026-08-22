@@ -4,6 +4,105 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.3.0] — 2026-08-22
+
+Reaching a server no longer means typing an `sftp://` URL from memory into a
+field that otherwise expects a local path. And passwords are no longer stored
+in a readable file.
+
+Jobs (`.syncto`), sync databases (`.syncto.db`) and checksum lists are
+unchanged. The preferences file changes shape once, on first launch.
+
+### Added
+
+- **A server button in every folder field.** The Lucide *server* glyph, beside
+  **Browse**, in Source, in Destination, and in every additional pair. It opens
+  a window that asks for the address, the port, the login, the password or a
+  private key — and then lets you walk the server's folders and pick one. The
+  field still ends up holding an `sftp://` URL, so existing jobs and the engine
+  are untouched; nobody has to write one any more.
+- **A remote folder browser.** One level at a time, with a clickable path and a
+  **New folder…** button, because "the destination does not exist yet" is the
+  normal state of a new backup target. Only folders are listed — a destination
+  is a folder, and listing the files of a rushes directory would mean tens of
+  thousands of unpickable rows.
+- **Saved servers.** Named, listed at the top of the window, one click to fill
+  everything in. This is what actually removes the friction: without it, typing
+  a URL would just have become filling five boxes.
+- **A private key field**, next to the password. The engine already accepted
+  one; there was no way to enter it. Only the path is stored, never the key.
+- **Connection errors in plain language.** ssh2 says "All configured
+  authentication methods failed"; syncto now says which login was refused and
+  what to check. Same for a wrong port, an unreachable host, and a timeout.
+
+### Changed — worth knowing
+
+- **Passwords move to the operating system's credential store.** Up to 0.2.6
+  they sat in `preferences.json` in plain text. They are now encrypted through
+  Electron's `safeStorage`, which is backed by the **macOS Keychain** and by
+  **DPAPI on Windows**. On first launch, any password already in that file is
+  moved and the readable copy deleted; a `password` key cannot survive a write
+  from then on, whatever puts it there.
+  **The deliberate limit:** if a machine has no usable credential store, syncto
+  does *not* fall back to writing the password down. It says so in the window
+  and asks each time.
+  **Why not keytar,** the usual answer to this: it is a compiled native module.
+  syncto has none, and that is precisely why a Windows build can be produced
+  from a Mac. One native dependency would have ended cross-building — for a
+  password field.
+- **A remembered password never reaches the interface.** It is decrypted in the
+  main process, used for the connection, and dropped. The window only ever
+  learns that a password exists.
+- The URL written into the field carries the login and the host, never the
+  password — it is displayed, saved into `.syncto` files, and printed in
+  reports.
+- The placeholder in both fields no longer advertises URL syntax.
+
+### Fixed
+
+- `SftpFs` gained `realpath`, so the browser opens in the login directory
+  instead of at `/` on an archive server with two hundred entries at the root.
+
+### Tests
+
+268 checks, up from 244.
+
+---
+
+## [0.2.6] — 2026-08-22
+
+Two interface fixes. Nothing in the synchronization engine changed, so 0.2.5
+jobs, databases and checksum lists carry over untouched.
+
+### Fixed
+
+- **"Show identical" came back ticked at every launch.** Clicking the
+  *identical* chip in the statistics bar switched it on behind the user's back
+  — the window's way of making those rows visible — and the next write to
+  `preferences.json` made that permanent. Nothing ever switched it off again,
+  and nothing said it had happened, so the setting looked like it defaulted to
+  on. Filtering on that chip now tells the engine to include those rows
+  directly, and the switch stays exactly where you left it. On first launch of
+  0.2.6, a value stored by the old behaviour is cleared once (the preferences
+  file carries a revision number for this); anything you set deliberately
+  afterwards is kept.
+- **The overview listed every folder even when there was nothing to do.** Zone
+  2 walked the whole compared tree, so two folders already in sync still filled
+  it with rows and percentage bars describing work that did not exist. A folder
+  now has to carry actual work to appear, and its size is the data that will
+  really cross — not the size of what is already sitting there, which made the
+  bars meaningless. Two folders in sync leave the panel empty, with one line
+  saying so. Ticking **Show identical** puts the whole tree back, for when you
+  want to click a folder that is *not* changing and find it in the grid.
+  A deletion still shows its folder, at zero bytes: it is work, but nothing
+  travels.
+
+### Tests
+
+244 checks, up from 228. Six cover the overview and the switch.
+
+---
+
 ## [0.2.5] — 2026-08-20
 
 A full audit of 0.2.4 and the repair of everything it found: 36 issues, six of

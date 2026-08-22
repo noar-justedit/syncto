@@ -117,8 +117,13 @@ class Session {
     const v = view || {};
     const needle = (v.search || '').trim().toLowerCase();
     const out = [];
+    // Filtering BY "no action" is itself a request to see those rows. The
+    // window used to get there by switching "show identical" on behind the
+    // user's back — which then got saved to the preferences and came back
+    // ticked at every launch from then on.
+    const askedForEqual = v.onlyOperation === OP.NONE;
     for (const n of this.nodes) {
-      if (!v.showEqual && n.op === OP.NONE) continue;
+      if (!v.showEqual && !askedForEqual && n.op === OP.NONE) continue;
       if (!v.showExcluded && !n.active) continue;
       if (v.onlyCategory && n.cat !== v.onlyCategory) continue;
       if (v.onlyOperation && n.op !== v.onlyOperation) continue;
@@ -220,32 +225,63 @@ class Session {
   // ── Overview — one line per top-level item, like FreeFileSync's panel ────
   // Sizes count every file underneath (the larger of the two sides, so a
   // half-copied folder is not under-reported); pct is the share of the total.
-  overview() {
+  // Zone 2: where the work of this run sits, folder by folder.
+  //
+  // It used to walk every compared node, so two folders already in sync still
+  // produced a full listing with percentage bars — a screen full of numbers
+  // describing nothing to do. A row now has to carry actual work to appear,
+  // and its size is the data that will really move, not the size of what is
+  // already there. "Show identical" opts back into the whole tree, for when
+  // you want to click a folder that is NOT changing and find it in the grid.
+  overview(view) {
+    const all = !!(view && view.showEqual);
     const groups = new Map();   // top-level rel -> { name, type, items, bytes, idx, active }
     for (const n of this.nodes) {
       const top = n.rel.includes('/') ? n.rel.slice(0, n.rel.indexOf('/')) : n.rel;
       let g = groups.get(top);
       if (!g) {
-        g = { name: top, type: n.rel === top ? n.type : 'folder', items: 0, bytes: 0, idx: -1, active: true };
+        g = { name: top, type: n.rel === top ? n.type : 'folder', items: 0, bytes: 0, idx: -1, active: true, work: 0 };
         groups.set(top, g);
       }
-      if (n.rel !== top) g.items++;
-      else if (n.type !== 'folder') g.items = 1;
-      if (n.type !== 'folder') {
-        g.bytes += Math.max(n.left.exists ? n.left.size || 0 : 0,
-                            n.right.exists ? n.right.size || 0 : 0);
-      }
+      // The top-level row itself is what the grid jumps to, so it is recorded
+      // whatever it does — a folder is almost always "equal" while its
+      // contents are not.
       if (n.rel === top) {
         g.idx = n.idx;
         g.active = n.active;
         if (n.type === 'folder') g.type = 'folder';
       }
+
+      const busy = n.active && n.op !== OP.NONE && n.op !== OP.DO_NOTHING &&
+                   n.op !== OP.MOVE_LEFT_FROM && n.op !== OP.MOVE_RIGHT_FROM;
+      if (busy) g.work++;
+
+      if (all) {
+        if (n.rel !== top) g.items++;
+        else if (n.type !== 'folder') g.items = 1;
+        if (n.type !== 'folder') {
+          g.bytes += Math.max(n.left.exists ? n.left.size || 0 : 0,
+                              n.right.exists ? n.right.size || 0 : 0);
+        }
+      } else if (busy) {
+        g.items++;
+        // The bytes that will cross: the source side of a copy. A deletion
+        // moves nothing, and a detected move is a rename — counting either
+        // would inflate the bars with data that never travels.
+        if (n.type !== 'folder') {
+          if (n.op === OP.CREATE_RIGHT || n.op === OP.OVERWRITE_RIGHT) {
+            g.bytes += n.left.exists ? (n.left.size || 0) : 0;
+          } else if (n.op === OP.CREATE_LEFT || n.op === OP.OVERWRITE_LEFT) {
+            g.bytes += n.right.exists ? (n.right.size || 0) : 0;
+          }
+        }
+      }
     }
-    const rows = [...groups.values()];
+    const rows = [...groups.values()].filter(g => all || g.work > 0);
     const total = rows.reduce((s, g) => s + g.bytes, 0) || 1;
     rows.forEach(g => { g.pct = Math.round((g.bytes / total) * 100); });
     rows.sort((a, b) => b.bytes - a.bytes);
-    return { rows, totalBytes: total === 1 ? 0 : total };
+    return { rows, totalBytes: total === 1 ? 0 : total, identical: rows.length === 0 };
   }
 
   // ── Synchronize ──────────────────────────────────────────────────────────
@@ -605,11 +641,11 @@ class MultiSession {
     return out;
   }
 
-  overview() {
+  overview(view) {
     const rows = [];
     let total = 0;
     for (let p = 0; p < this.sessions.length; p++) {
-      const ov = this.sessions[p].overview();
+      const ov = this.sessions[p].overview(view);
       for (const g of ov.rows) {
         g.idx = g.idx >= 0 ? p * PAIR_BASE + g.idx : -1;
         g.pair = p + 1;
@@ -620,7 +656,7 @@ class MultiSession {
     }
     rows.forEach(g => { g.pct = total > 0 ? Math.round((g.bytes / (total || 1)) * 100) : 0; });
     rows.sort((a, b) => b.bytes - a.bytes);
-    return { rows, totalBytes: total, pairs: this.sessions.length };
+    return { rows, totalBytes: total, pairs: this.sessions.length, identical: rows.length === 0 };
   }
 
   async sync(job, opts) {

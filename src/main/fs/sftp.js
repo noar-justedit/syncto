@@ -231,6 +231,15 @@ class SftpFs {
       });
   }
 
+  // What the server thinks a path really is. Used with "." to find the login
+  // directory, so the folder browser opens where the user lives instead of at
+  // the root of an archive server with two hundred entries.
+  async realpath(p) {
+    return this._q(() => new Promise((resolve, reject) => {
+      this.sftp.realpath(String(p == null ? '.' : p), (err, t) => err ? reject(err) : resolve(t));
+    }));
+  }
+
   async readlink(p) {
     return this._q(() => new Promise((resolve, reject) => {
       this.sftp.readlink(normalize(p), (err, t) => err ? reject(err) : resolve(t));

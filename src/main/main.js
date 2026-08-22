@@ -91,7 +91,9 @@ function checkForUpdate() {
 
 const { MultiSession, verifyFolder } = require('./core/session');
 const { FsPool } = require('./fs/afs');
-const { Prefs, defaultJob, loadJob, saveJob, jobNameFromPath, JOB_EXT } = require('./config');
+const { Prefs, defaultJob, loadJob, saveJob, jobNameFromPath, JOB_EXT, credentialMap } = require('./config');
+const { RemoteBrowser } = require('./fs/browse');
+const secrets = require('./secrets');
 
 const IS_MAC = process.platform === 'darwin';
 const DEV    = process.argv.includes('--dev');
@@ -290,6 +292,81 @@ ipcMain.handle('browse-folder', async (_, title) => {
   return (res.canceled || !res.filePaths.length) ? null : res.filePaths[0];
 });
 
+// ── IPC: the "Connect to a server" window ──────────────────────────────────
+// Its own connection, deliberately separate from the one a run uses: browsing
+// a server must never disturb a synchronization in progress, and closing this
+// window must never pull a connection out from under one.
+const browser = new RemoteBrowser();
+
+function friendly(err) {
+  const msg = (err && err.message) || String(err);
+  return { ok: false, error: msg };
+}
+
+ipcMain.handle('server-list-saved', () => ({
+  servers: prefs.listServers(),
+  vaultAvailable: secrets.available(),
+}));
+
+// conn.savedId names an entry whose password stays here: it is decrypted in
+// this process, used, and dropped. A remembered password is never sent to the
+// window — the window only ever knows that one exists. A password the user is
+// typing right now obviously does travel, once, from the field it was typed in.
+ipcMain.handle('server-connect', async (_, conn) => {
+  try {
+    let full = Object.assign({}, conn);
+    if (conn && conn.savedId) {
+      const kept = prefs.serverSecrets(conn.savedId);
+      if (!kept) return { ok: false, error: 'That saved server is gone.' };
+      full = Object.assign(kept, {
+        savedId: conn.savedId,
+        // Anything retyped in the window wins over what was remembered.
+        password  : conn.password  || kept.password,
+        passphrase: conn.passphrase || kept.passphrase,
+        keyPath   : conn.keyPath   || kept.keyPath,
+      });
+      if (!full.password && !full.keyPath) {
+        return { ok: false, error: 'needs-password', needsPassword: true };
+      }
+    }
+    const res = await browser.connect(full);
+    return Object.assign({ ok: true }, res);
+  } catch (err) { return friendly(err); }
+});
+
+ipcMain.handle('server-list', async (_, dir) => {
+  try { return Object.assign({ ok: true }, await browser.list(dir)); }
+  catch (err) { return friendly(err); }
+});
+
+ipcMain.handle('server-mkdir', async (_, dir, name) => {
+  try { return Object.assign({ ok: true }, await browser.mkdir(dir, name)); }
+  catch (err) { return friendly(err); }
+});
+
+ipcMain.handle('server-save', (_, conn) => {
+  try { return Object.assign({ ok: true }, prefs.saveServer(conn)); }
+  catch (err) { return friendly(err); }
+});
+
+ipcMain.handle('server-forget', (_, id) => ({ ok: true, servers: prefs.removeServer(id) }));
+
+ipcMain.handle('server-disconnect', async () => { await browser.close(); return { ok: true }; });
+
+// The folder field's value. Built here so the renderer never has to assemble
+// an sftp:// URL — and so the password can never end up inside one.
+ipcMain.handle('server-url', (_, conn, folder) => RemoteBrowser.urlFor(conn, folder));
+
+// A private key is picked from disk; only its PATH is ever stored.
+ipcMain.handle('browse-key', async () => {
+  const res = await dialog.showOpenDialog(win, {
+    title: 'Choose a private key',
+    properties: ['openFile', 'showHiddenFiles'],
+    defaultPath: path.join(app.getPath('home'), '.ssh'),
+  });
+  return (res.canceled || !res.filePaths.length) ? null : res.filePaths[0];
+});
+
 ipcMain.handle('reveal-path',  (_, p) => { try { shell.showItemInFolder(p); } catch (_) {} });
 ipcMain.handle('open-path',    (_, p) => shell.openPath(p));
 ipcMain.handle('open-external',(_, u) => openExternalSafely(u));
@@ -410,7 +487,7 @@ ipcMain.handle('compare', async (_, job) => {
   try {
     const res = await session.compare(job, {
       token: tokens.compare,
-      credentials: prefs.data.sftp,
+      credentials: credentialMap(prefs.data.servers),
       onProgress: p => send('compare-progress', p),
     });
     return { ok: true, ...res };
@@ -422,7 +499,7 @@ ipcMain.handle('compare', async (_, job) => {
 ipcMain.handle('compare-cancel', () => { tokens.compare.cancelled = true; return true; });
 
 ipcMain.handle('get-rows', (_, offset, limit, view) => session.rows(offset, limit, view));
-ipcMain.handle('get-overview', () => session.overview());
+ipcMain.handle('get-overview', (_, view) => session.overview(view));
 ipcMain.handle('visible-indices', (_, view) => session.visibleIndices(view));
 ipcMain.handle('set-direction', (_, indices, dir) => session.setDirection(indices, dir));
 ipcMain.handle('set-active',    (_, indices, act) => session.setActive(indices, act));
@@ -461,7 +538,7 @@ ipcMain.handle('verify-folder', async (_, folder) => {
   try {
     const res = await verifyFolder(pool, folder, {
       token: tokens.verify,
-      credentials: prefs.data.sftp,
+      credentials: credentialMap(prefs.data.servers),
       onProgress: p => send('verify-progress', p),
     });
     return { ok: true, ...res };

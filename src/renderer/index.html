@@ -174,6 +174,19 @@ padding:9px 11px;font-size:13px;color:var(--text);font-family:var(--mono);outlin
 .br-btn{flex-shrink:0;padding:0 12px;border-radius:var(--rs);border:1px solid var(--border);
 background:var(--bg3);color:var(--text3);font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font);}
 .br-btn:hover{color:var(--text);border-color:var(--border2);}
+/* Connect to a server. Same footprint as Browse, an icon instead of a word —
+   and, once connected, the status light for that side. */
+.srv-btn{flex-shrink:0;width:36px;border-radius:var(--rs);border:1px solid var(--border);
+background:var(--bg3);color:var(--text3);cursor:pointer;display:flex;align-items:center;
+justify-content:center;transition:all .15s;position:relative;}
+.srv-btn svg{width:16px;height:16px;}
+.srv-btn:hover{color:var(--accent);border-color:var(--accent-g);background:var(--accent-d);}
+.srv-btn.on{color:var(--green);border-color:var(--green-g);background:var(--green-d);}
+.srv-btn.on::after{content:'';position:absolute;top:-3px;right:-3px;width:7px;height:7px;
+border-radius:50%;background:var(--green);box-shadow:0 0 6px var(--green);
+border:1.5px solid var(--bg);}
+.prow .srv-btn{width:30px;}
+.prow .srv-btn svg{width:14px;height:14px;}
 #swap-btn{flex-shrink:0;align-self:flex-end;margin-bottom:17px;width:38px;height:38px;border-radius:50%;
 border:1px solid var(--border2);background:var(--bg3);color:var(--text3);cursor:pointer;
 display:flex;align-items:center;justify-content:center;transition:all .18s;}
@@ -497,6 +510,74 @@ cursor:pointer;transition:all .15s;}
 .m-btn.primary:hover{border-color:var(--accent);}
 .m-btn.danger{background:#341819;border-color:rgba(242,85,90,.5);color:var(--red);}
 
+/* ── Connect to a server ─────────────────────────────────────────────────
+   Two steps in one card: the credentials, then the remote folder browser.
+   The card does not resize between them — nothing jumps under the cursor. */
+#ov-server .mcard{width:520px;}
+.srv-saved{display:flex;flex-direction:column;gap:5px;margin-bottom:4px;}
+.srow{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:7px;
+border:1px solid var(--border);background:var(--bg3);cursor:pointer;font-size:12.5px;
+transition:all .15s;width:100%;text-align:left;color:var(--text);font-family:var(--font);}
+.srow:hover{border-color:var(--accent-g);background:var(--accent-d);}
+.srow > svg{width:15px;height:15px;color:var(--text3);flex-shrink:0;}
+.srow:hover > svg{color:var(--accent);}
+.srow .s-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.srow .host{font-family:var(--mono);font-size:11px;color:var(--text3);margin-left:auto;
+flex-shrink:0;padding-left:8px;}
+.srow .s-forget{flex-shrink:0;width:20px;height:20px;border:none;background:none;
+color:var(--text3);cursor:pointer;display:flex;align-items:center;justify-content:center;
+border-radius:4px;}
+.srow .s-forget:hover{color:var(--red);background:var(--red-d);}
+.srow .s-forget svg{width:12px;height:12px;}
+.srv-div{display:flex;align-items:center;gap:10px;margin:14px 0 12px;font-size:10.5px;
+letter-spacing:.12em;text-transform:uppercase;color:var(--text3);font-weight:800;}
+.srv-div::before,.srv-div::after{content:'';height:1px;background:var(--border);flex:1;}
+.srv-status{display:flex;align-items:center;gap:8px;font-size:12px;font-family:var(--mono);
+padding:8px 11px;border-radius:6px;margin-bottom:13px;border:1px solid transparent;
+line-height:1.45;}
+.srv-status svg{width:14px;height:14px;flex-shrink:0;}
+.srv-status.idle{background:var(--bg3);border-color:var(--border);color:var(--text3);}
+.srv-status.busy{background:var(--orange-d);border-color:rgba(242,160,61,.35);color:var(--orange);}
+.srv-status.good{background:var(--green-d);border-color:var(--green-g);color:var(--green);}
+.srv-status.bad{background:var(--red-d);border-color:rgba(242,85,90,.4);color:var(--red);}
+@keyframes srvspin{to{transform:rotate(360deg)}}
+.srv-status .spin{animation:srvspin 1s linear infinite;transform-origin:50% 50%;}
+.srv-row2{display:flex;gap:8px;flex:1;min-width:0;}
+.srv-row2 .ipx{flex:1;min-width:0;}
+.srv-row2 .portx{width:82px;flex-shrink:0;}
+.srv-hint{font-size:11.5px;color:var(--text3);margin:-4px 0 12px 116px;line-height:1.5;}
+#ov-server .set-row > label:first-child{width:104px;}
+.srv-keyrow{display:flex;gap:6px;flex:1;min-width:0;}
+.srv-keyrow input{flex:1;min-width:0;}
+.srv-remember{display:flex;align-items:center;gap:9px;font-size:12.5px;color:var(--text2);
+margin:2px 0 0 116px;}
+.srv-vaultnote{font-size:11.5px;color:var(--orange);margin:8px 0 0 116px;line-height:1.5;}
+.srv-crumbs{display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-family:var(--mono);
+font-size:11.5px;color:var(--text3);background:var(--bg);border:1px solid var(--border);
+border-radius:6px;padding:7px 10px;margin-bottom:8px;}
+.srv-crumbs button{background:none;border:none;color:var(--text2);font-family:var(--mono);
+font-size:11.5px;cursor:pointer;padding:0;}
+.srv-crumbs button:hover{color:var(--accent);text-decoration:underline;}
+.srv-crumbs .sep{color:#4a4f5a;}
+.srv-crumbs .cur{color:var(--text);}
+.srv-tree{background:var(--bg);border:1px solid var(--border);border-radius:6px;
+height:218px;overflow-y:auto;padding:4px;}
+.srv-tree::-webkit-scrollbar{width:6px;}
+.srv-tree::-webkit-scrollbar-thumb{background:var(--bg4);border-radius:3px;}
+.tnode{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:5px;
+cursor:pointer;font-family:var(--mono);font-size:12px;color:var(--text2);
+border:1px solid transparent;width:100%;background:none;text-align:left;}
+.tnode:hover{background:var(--bg3);color:var(--text);}
+.tnode.sel{background:var(--accent-d);border-color:var(--accent-g);color:#c9b8ff;}
+.tnode svg{width:14px;height:14px;flex-shrink:0;color:var(--text3);}
+.tnode.sel svg{color:var(--accent);}
+.tnode.up{color:var(--text3);}
+.srv-picked{font-family:var(--mono);font-size:11.5px;color:var(--text3);margin-top:9px;
+word-break:break-all;line-height:1.5;}
+.srv-picked b{color:var(--green);font-weight:600;}
+.srv-tools{display:flex;gap:8px;margin-top:9px;}
+.srv-tools .br-btn{padding:5px 10px;}
+
 /* Summary */
 .sum-hd{display:flex;align-items:center;gap:13px;margin-bottom:17px;}
 .sum-ico{width:50px;height:50px;border-radius:50%;display:flex;align-items:center;justify-content:center;
@@ -656,8 +737,11 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
   <div class="fld l">
     <div class="fld-lbl"><span class="dot"></span>Source</div>
     <div class="fld-in">
-      <input id="left-path" placeholder="/Volumes/Card  or  sftp://user@host/srv/backup" spellcheck="false">
+      <input id="left-path" placeholder="/Volumes/Card — or connect to a server" spellcheck="false">
       <button class="br-btn" id="left-browse">Browse</button>
+      <button class="srv-btn" id="left-server" data-tip="Connect to a server (SFTP)" aria-label="Connect to a server">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 6h.01"/><path d="M6 18h.01"/></svg>
+      </button>
     </div>
     <div class="fld-free" id="left-free"></div>
   </div>
@@ -667,8 +751,11 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
   <div class="fld r">
     <div class="fld-lbl"><span class="dot"></span>Destination</div>
     <div class="fld-in">
-      <input id="right-path" placeholder="/Volumes/RAID/Project" spellcheck="false">
+      <input id="right-path" placeholder="/Volumes/RAID/Project — or connect to a server" spellcheck="false">
       <button class="br-btn" id="right-browse">Browse</button>
+      <button class="srv-btn" id="right-server" data-tip="Connect to a server (SFTP)" aria-label="Connect to a server">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 6h.01"/><path d="M6 18h.01"/></svg>
+      </button>
     </div>
     <div class="fld-free" id="right-free"></div>
   </div>
@@ -997,6 +1084,94 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
     <div class="m-btns">
       <button class="m-btn" id="auto-cf-cancel">Cancel</button>
       <button class="m-btn danger" id="auto-cf-ok">Enable auto-sync</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ Connect to a server ════════════════════════════════════════ -->
+<div class="ov" id="ov-server">
+  <div class="mcard">
+    <div class="m-h1" style="display:flex;align-items:center;gap:9px">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;color:var(--accent)"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 6h.01"/><path d="M6 18h.01"/></svg>
+      <span id="srv-title">Connect to a server</span>
+    </div>
+    <div class="m-sub" id="srv-sub"></div>
+
+    <!-- Step 1 — where and who -->
+    <div id="srv-step1">
+      <div class="srv-saved" id="srv-saved"></div>
+      <div class="srv-div" id="srv-div" style="display:none">or a new server</div>
+
+      <div class="srv-status idle" id="srv-status">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+        <span id="srv-status-txt">Not connected</span>
+      </div>
+
+      <div class="set-row">
+        <label for="srv-host">Address</label>
+        <div class="srv-row2">
+          <input class="ipx" id="srv-host" placeholder="192.168.1.50  or  nas.local" spellcheck="false">
+          <input class="portx" id="srv-port" value="22" aria-label="Port" inputmode="numeric">
+        </div>
+      </div>
+      <div class="set-row">
+        <label for="srv-user">Login</label>
+        <input id="srv-user" placeholder="your user name on that machine" spellcheck="false" autocomplete="off">
+      </div>
+      <div class="set-row">
+        <label for="srv-pass">Password</label>
+        <input id="srv-pass" type="password" placeholder="••••••••" autocomplete="off">
+      </div>
+      <div class="set-row">
+        <label for="srv-key">Private key</label>
+        <div class="srv-keyrow">
+          <input id="srv-key" placeholder="optional — instead of a password" spellcheck="false">
+          <button class="br-btn" id="srv-key-browse">Choose…</button>
+        </div>
+      </div>
+      <div class="srv-hint">Leave the key empty to use the password. With a key, the password box
+        holds its passphrase if it has one.</div>
+
+      <div class="set-row">
+        <label for="srv-name">Name</label>
+        <input id="srv-name" placeholder="NAS Montage" spellcheck="false">
+      </div>
+      <label class="srv-remember">
+        <span class="switch"><input type="checkbox" id="srv-remember" checked><span class="slider"></span></span>
+        Remember this server
+      </label>
+      <div class="srv-vaultnote" id="srv-vaultnote" style="display:none"></div>
+
+      <div class="m-btns">
+        <button class="m-btn" id="srv-cancel">Cancel</button>
+        <button class="m-btn primary" id="srv-connect">Connect</button>
+      </div>
+    </div>
+
+    <!-- Step 2 — which folder -->
+    <div id="srv-step2" style="display:none">
+      <div class="srv-status good" id="srv-status2">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+        <span id="srv-status2-txt">Connected</span>
+      </div>
+      <div class="srv-crumbs" id="srv-crumbs"></div>
+      <div class="srv-tree" id="srv-tree" role="listbox" aria-label="Remote folders"></div>
+      <div class="srv-tools">
+        <button class="br-btn" id="srv-newfolder">New folder…</button>
+        <button class="br-btn" id="srv-refresh">Refresh</button>
+      </div>
+      <div class="srv-tools" id="srv-tools-new" style="display:none">
+        <input id="srv-newname" placeholder="Name of the new folder" spellcheck="false"
+               style="flex:1;min-width:0;background:var(--bg);border:1px solid var(--border);
+                      border-radius:6px;padding:6px 10px;font-size:12.5px;color:var(--text);
+                      font-family:var(--mono);outline:none;">
+        <button class="br-btn" id="srv-newok">Create</button>
+      </div>
+      <div class="srv-picked" id="srv-picked"></div>
+      <div class="m-btns">
+        <button class="m-btn" id="srv-back">Back</button>
+        <button class="m-btn primary" id="srv-use">Use this folder</button>
+      </div>
     </div>
   </div>
 </div>

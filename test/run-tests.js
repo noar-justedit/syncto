@@ -1264,6 +1264,190 @@ async function testAuditFixes() {
   }
 }
 
+// ══ 17. Interface — 0.2.6 ══════════════════════════════════════════════════
+async function testOverviewAndShowEqual() {
+  console.log('\n\n17. Overview and "show identical" (0.2.6)');
+
+  // (a) Two folders already in sync: zone 2 has nothing to say. It used to
+  //     list every top-level folder with a percentage bar, describing work
+  //     that did not exist.
+  {
+    const { L, R } = scratch();
+    const t = Date.now() - 86400000;
+    write(L, 'Rushes/A001.mov', 'same', t); write(R, 'Rushes/A001.mov', 'same', t);
+    write(L, 'Audio/mix.wav', 'same', t);   write(R, 'Audio/mix.wav', 'same', t);
+    const s = new Session();
+    await s.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: { cancelled: false } });
+    const ov = s.overview();
+    eq(ov.rows.length, 0, 'identical folders produce an empty overview');
+    ok(ov.identical, 'and say so explicitly');
+    eq(ov.totalBytes, 0, 'with no bytes to account for');
+
+    // The switch opts back into the full tree, for navigation.
+    const full = s.overview({ showEqual: true });
+    eq(full.rows.length, 2, '"show identical" lists the folders again');
+    await s.close();
+  }
+
+  // (b) One changed file: only its folder shows, and the size is the data
+  //     that will really cross — not the size of everything already there.
+  {
+    const { L, R } = scratch();
+    const t = Date.now() - 86400000;
+    write(L, 'Rushes/A001.mov', 'x'.repeat(500), t);
+    write(R, 'Rushes/A001.mov', 'x'.repeat(500), t);
+    write(L, 'Rushes/A002.mov', 'y'.repeat(120), Date.now());
+    write(L, 'Audio/mix.wav', 'same', t); write(R, 'Audio/mix.wav', 'same', t);
+    const s = new Session();
+    await s.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: { cancelled: false } });
+    const ov = s.overview();
+    eq(ov.rows.length, 1, 'only the folder with work appears');
+    eq(ov.rows[0].name, 'Rushes', 'and it is the right one');
+    eq(ov.rows[0].items, 1, 'counting only the item that moves');
+    eq(ov.rows[0].bytes, 120, 'and only the bytes that will cross');
+    await s.close();
+  }
+
+  // (c) Deletions are work too, even though they transfer nothing.
+  {
+    const { L, R } = scratch();
+    write(R, 'Old/stale.mov', 'gone');
+    const s = new Session();
+    await s.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: { cancelled: false } });
+    const ov = s.overview();
+    eq(ov.rows.length, 1, 'a folder that will be emptied still appears');
+    eq(ov.rows[0].bytes, 0, 'with no bytes, because a deletion moves nothing');
+    await s.close();
+  }
+
+  // (d) Filtering on the "identical" chip must show those rows WITHOUT the
+  //     window switching "show identical" on — that flag was then written to
+  //     the preferences and came back ticked at every launch.
+  {
+    const { L, R } = scratch();
+    const t = Date.now() - 86400000;
+    write(L, 'same.txt', 'x', t); write(R, 'same.txt', 'x', t);
+    write(L, 'new.txt', 'y', Date.now());
+    const s = new Session();
+    await s.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: { cancelled: false } });
+    eq(s.rows(0, 50, { showEqual: false }).total, 1, 'by default only the row with work is listed');
+    const onlyEqual = s.rows(0, 50, { showEqual: false, onlyOperation: 'none' });
+    eq(onlyEqual.total, 1, 'filtering on "identical" reveals the identical row');
+    eq(onlyEqual.rows[0].rel, 'same.txt', 'and it is the identical one');
+    await s.close();
+  }
+
+  // (e) The preferences carry a revision, so the value the old bug stored is
+  //     cleared once instead of following the user around for ever.
+  {
+    const { dir } = scratch();
+    const { Prefs } = require('../src/main/config');
+    const p = new Prefs(dir);
+    fs.writeFileSync(path.join(dir, 'preferences.json'),
+      JSON.stringify({ ui: { showEqual: true }, recent: [{ name: 'keep', path: '/tmp/x' }] }));
+    p.load();
+    eq(p.data.ui.showEqual, false, 'a pre-0.2.6 "show identical" is cleared on upgrade');
+    eq(p.data.recent.length, 1, 'and the rest of the preferences survive');
+    p.data.ui.showEqual = true;
+    p.save();
+    const again = new Prefs(dir);
+    again.load();
+    eq(again.data.ui.showEqual, true, 'a value set deliberately afterwards is kept');
+  }
+}
+
+// ══ 18. Servers and credentials — 0.2.7 ═══════════════════════════════════
+function testServers() {
+  console.log('\n\n18. Servers and credentials (0.2.7)');
+  const { migratePrefs, credentialMap, Prefs } = require('../src/main/config');
+  const { RemoteBrowser } = require('../src/main/fs/browse');
+  const { parseLocation } = require('../src/main/fs/afs');
+  const secrets = require('../src/main/secrets');
+
+  // Outside Electron there is no OS credential store, and the code must know
+  // it. That is the whole point of the fallback: refuse to remember, never
+  // downgrade to writing the password in the clear.
+  ok(!secrets.available(), 'no credential store outside Electron, and the code knows it');
+  eq(secrets.encrypt('hunter2'), null, 'so encrypt() refuses rather than returning plain text');
+
+  // (a) A 0.2.6 preferences file carried the password in plain text under
+  //     sftp["user@host"]. Upgrading turns it into a named server AND leaves
+  //     nothing readable behind.
+  {
+    const raw = {
+      ui: { showEqual: true },
+      sftp: { 'arnaud@192.168.1.50': { username: 'arnaud', password: 'hunter2', passphrase: 'secret-phrase' } },
+    };
+    const out = migratePrefs(JSON.parse(JSON.stringify(raw)));
+    const text = JSON.stringify(out);
+    ok(!text.includes('hunter2'), 'the old plain-text password does not survive the migration');
+    ok(!text.includes('secret-phrase'), 'nor does the passphrase');
+    eq(out.sftp, undefined, 'the flat credential map is gone');
+    eq(out.servers.length, 1, 'and it became one named server');
+    eq(out.servers[0].username, 'arnaud', 'with the login kept');
+    eq(out.servers[0].host, '192.168.1.50', 'and the host kept');
+    eq(out.revision, 2, 'stamped with the preferences revision');
+  }
+
+  // (b) A `password` key must not survive a write, whoever put it there — an
+  //     older build, a hand edit, a restored backup, or the renderer.
+  {
+    const { dir } = scratch();
+    const p = new Prefs(dir);
+    p.load();
+    p.data.servers = [{ id: 'x', name: 'NAS', host: '10.0.0.8', port: 22,
+                        username: 'dit', password: 'plain-text-leak' }];
+    p.save();
+    const onDisk = fs.readFileSync(path.join(dir, 'preferences.json'), 'utf8');
+    ok(!onDisk.includes('plain-text-leak'), 'a password set on the object never reaches the file');
+    ok(onDisk.includes('10.0.0.8'), 'while the rest of the entry is stored normally');
+  }
+
+  // (c) The engine still receives what it expects: a map keyed by user@host.
+  {
+    const map = credentialMap([
+      { host: 'nas.local', username: 'arnaud', port: 22 },
+      { host: '10.0.0.8', username: 'dit', port: 2222 },
+      { host: '', username: 'nobody' },                      // incomplete: skipped
+    ]);
+    eq(Object.keys(map).sort(), ['arnaud@nas.local', 'dit@10.0.0.8'], 'keys are user@host');
+    eq(map['arnaud@nas.local'].password, '', 'with no password to hand over on this machine');
+  }
+
+  // (d) The URL that lands in the folder field must never carry a password —
+  //     it is displayed, saved into .syncto job files, and printed in reports.
+  {
+    const url = RemoteBrowser.urlFor({ host: '192.168.1.50', port: 22, username: 'arnaud' }, '/srv/backup/projets');
+    eq(url, 'sftp://arnaud@192.168.1.50/srv/backup/projets', 'the default port is left out');
+    eq(RemoteBrowser.urlFor({ host: 'nas.local', port: 2222, username: 'dit' }, '/data'),
+       'sftp://dit@nas.local:2222/data', 'a custom port is kept');
+
+    // And the engine parses back exactly what the window produced.
+    const loc = parseLocation(url, credentialMap([{ host: '192.168.1.50', username: 'arnaud' }]));
+    eq(loc.kind, 'sftp', 'the engine recognises it');
+    eq(loc.username, 'arnaud', 'with the right login');
+    eq(loc.host, '192.168.1.50', 'the right host');
+    eq(loc.port, 22, 'the right port');
+    eq(loc.path, '/srv/backup/projets', 'and the right folder');
+  }
+
+  // (e) Saving a server twice is an update, not a duplicate: reconnecting to
+  //     the same NAS must not grow the list every time.
+  {
+    const { dir } = scratch();
+    const p = new Prefs(dir);
+    p.load();
+    p.saveServer({ name: 'NAS', host: 'nas.local', port: 22, username: 'arnaud', savePassword: false });
+    p.saveServer({ name: 'NAS Montage', host: 'nas.local', port: 22, username: 'arnaud', savePassword: false });
+    eq(p.listServers().length, 1, 'the same user@host:port updates its entry');
+    eq(p.listServers()[0].name, 'NAS Montage', 'and takes the new name');
+    p.saveServer({ name: 'Archives', host: '10.0.0.8', port: 22, username: 'dit', savePassword: false });
+    eq(p.listServers().length, 2, 'a different server is a new entry');
+    ok(p.listServers().every(s => !('password' in s) && !('passwordEnc' in s)),
+       'and the list handed to the window carries no secret at all');
+  }
+}
+
 // ══ Run ════════════════════════════════════════════════════════════════════
 (async function main() {
   console.log('syncto engine tests');
@@ -1285,6 +1469,8 @@ async function testAuditFixes() {
     await testLocking();
     await testReviewRegressions();
     await testAuditFixes();
+    await testOverviewAndShowEqual();
+    testServers();
   } catch (err) {
     failed++;
     failures.push('UNCAUGHT: ' + (err.stack || err.message));

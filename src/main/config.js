@@ -26,6 +26,7 @@
 
 const fs   = require('fs');
 const path = require('path');
+const secrets = require('./secrets');
 
 const JOB_EXT    = '.syncto';
 const JOB_FORMAT = 'syncto-job';
@@ -94,15 +95,114 @@ function defaultJob() {
   };
 }
 
+const PREFS_REVISION = 2;
+
 function defaultPrefs() {
   return {
+    revision: PREFS_REVISION,
     window: { width: 1280, height: 820 },
     lastJobPath: '',
     recent: [],
     ui: { showEqual: false },
     job: defaultJob(),
-    sftp: {},                            // host key -> { username, privateKeyPath }
+    // Named servers, in the order they appear in the connection window.
+    // NOTE the shape: passwordEnc / passphraseEnc, never `password`. Secrets
+    // are ciphertext from the OS credential store (see secrets.js) and no
+    // readable password is ever written to this file.
+    // { id, name, host, port, username, keyPath, savePassword, passwordEnc, passphraseEnc }
+    servers: [],
   };
+}
+
+// The engine looks credentials up by "user@host" (see fs/afs.js parseLocation),
+// which is all it needs and all it should know. The window works with named
+// entries instead, because "NAS Montage" is what a person recognises.
+//
+// Decryption happens here, on the way to a run, and the result is held in
+// memory for that run only.
+function credentialMap(servers) {
+  const out = {};
+  for (const s of (servers || [])) {
+    if (!s || !s.host || !s.username) continue;
+    let privateKey = null;
+    if (s.keyPath) {
+      try { privateKey = fs.readFileSync(s.keyPath); } catch (_) { privateKey = null; }
+    }
+    out[`${s.username}@${s.host}`] = {
+      username  : s.username,
+      password  : secrets.decrypt(s.passwordEnc),
+      privateKey,
+      passphrase: secrets.decrypt(s.passphraseEnc),
+    };
+  }
+  return out;
+}
+
+// Up to 0.2.5, clicking the "identical" chip in the stats bar switched
+// "show identical" on behind the user's back, and the next write to the
+// preferences made it permanent — the switch came back ticked at every launch
+// with no way to tell it had never been asked for. The cause is fixed; this
+// clears the value it left behind, once.
+function migratePrefs(raw) {
+  if (!raw || typeof raw !== 'object') return raw;
+  const from = Number(raw.revision) || 0;
+
+  if (from < 1) {
+    if (raw.ui && typeof raw.ui === 'object') raw.ui.showEqual = false;
+  }
+
+  // Up to 0.2.6 the only way to reach a server was to type an sftp:// URL, and
+  // whatever credentials that produced sat under "user@host" — with the
+  // password in plain text. Turn each one into a named entry so it appears in
+  // the connection window, move its password into the OS credential store, and
+  // delete every readable secret from this file on the way through.
+  if (from < 2) {
+    if (!Array.isArray(raw.servers)) raw.servers = [];
+    const known = new Set(raw.servers.map(s => `${s.username}@${s.host}`));
+    let n = raw.servers.length;
+    for (const key of Object.keys(raw.sftp || {})) {
+      const m = /^([^@]*)@(.+)$/.exec(key);
+      if (!m || known.has(key)) continue;
+      const c = raw.sftp[key] || {};
+      const username = c.username || m[1];
+      const host = m[2];
+      if (!username || !host) continue;
+      const enc = secrets.encrypt(c.password);
+      raw.servers.push({
+        id  : `srv-${++n}-${host}`,
+        name: host,
+        host, port: 22, username,
+        keyPath      : c.keyPath || c.privateKeyPath || '',
+        savePassword : !!enc,
+        passwordEnc  : enc || '',
+        passphraseEnc: secrets.encrypt(c.passphrase) || '',
+      });
+      known.add(key);
+    }
+    // Gone for good. If the machine has no usable credential store, the
+    // password is simply not kept — asking again beats leaving it readable.
+    delete raw.sftp;
+  }
+
+  // Belt and braces on every load, whatever the revision: a `password` or
+  // `passphrase` key must never survive in this file, even if an older build,
+  // a hand edit or a restored backup put one there.
+  for (const s of (raw.servers || [])) {
+    if (!s || typeof s !== 'object') continue;
+    if (s.password) {
+      const enc = secrets.encrypt(s.password);
+      if (enc) { s.passwordEnc = enc; s.savePassword = true; }
+      delete s.password;
+    }
+    if (s.passphrase) {
+      const enc = secrets.encrypt(s.passphrase);
+      if (enc) s.passphraseEnc = enc;
+      delete s.passphrase;
+    }
+  }
+
+  raw.revision = PREFS_REVISION;
+  return raw;
 }
 
 // Writes a file the way the sync engine writes data: beside it, then rename.
@@ -150,18 +250,111 @@ class Prefs {
   load() {
     try {
       const raw = JSON.parse(fs.readFileSync(this.file, 'utf8'));
-      this.data = merge(defaultPrefs(), raw);
+      this.data = merge(defaultPrefs(), migratePrefs(raw));
     } catch (_) { this.data = defaultPrefs(); }
     return this.data;
   }
   save(patch) {
     if (patch) this.data = merge(this.data, patch);
+    // The renderer can send arbitrary patches through save-prefs. This is the
+    // one gate every write passes through, so it is where the promise "no
+    // readable password is ever written to disk" is actually kept — not in the
+    // callers, which would only have to forget once.
+    scrubSecrets(this.data);
     try {
       fs.mkdirSync(path.dirname(this.file), { recursive: true });
       writeFileAtomic(this.file, JSON.stringify(this.data, null, 2));
     } catch (_) {}
     return this.data;
   }
+
+  // ── Servers ──────────────────────────────────────────────────────────────
+  // What the connection window shows. Never the secrets themselves: the window
+  // gets a flag saying a password is remembered, and that is all it needs.
+  listServers() {
+    return (this.data.servers || []).map(s => ({
+      id: s.id, name: s.name, host: s.host, port: s.port || 22,
+      username: s.username, keyPath: s.keyPath || '',
+      hasPassword: !!s.passwordEnc,
+      savePassword: !!s.savePassword,
+    }));
+  }
+
+  // Credentials for one entry, decrypted, for an immediate connection attempt.
+  serverSecrets(id) {
+    const s = (this.data.servers || []).find(x => x.id === id);
+    if (!s) return null;
+    return {
+      host: s.host, port: s.port || 22, username: s.username,
+      keyPath: s.keyPath || '',
+      password: secrets.decrypt(s.passwordEnc),
+      passphrase: secrets.decrypt(s.passphraseEnc),
+    };
+  }
+
+  // conn: { id?, name, host, port, username, password, keyPath, passphrase,
+  //         savePassword }
+  // Returns the stored entry (without secrets) plus whether the password could
+  // actually be remembered — on a machine with no usable credential store it
+  // cannot, and the window says so rather than pretending.
+  saveServer(conn) {
+    if (!Array.isArray(this.data.servers)) this.data.servers = [];
+    const list = this.data.servers;
+    const key = `${conn.username}@${conn.host}`;
+    let entry = list.find(s => s.id === conn.id) ||
+                list.find(s => `${s.username}@${s.host}` === key && (s.port || 22) === (Number(conn.port) || 22));
+    if (!entry) {
+      entry = { id: `srv-${Date.now().toString(36)}-${list.length + 1}` };
+      list.push(entry);
+    }
+    entry.name     = String(conn.name || conn.host || '').trim() || conn.host;
+    entry.host     = conn.host;
+    entry.port     = Number(conn.port) || 22;
+    entry.username = conn.username;
+    entry.keyPath  = conn.keyPath || '';
+
+    const wants = conn.savePassword !== false;
+    entry.savePassword = wants;
+    if (!wants) {
+      entry.passwordEnc = '';
+    } else if (conn.password) {
+      entry.passwordEnc = secrets.encrypt(conn.password) || '';
+    }
+    if (conn.passphrase) entry.passphraseEnc = secrets.encrypt(conn.passphrase) || '';
+
+    this.save();
+    return {
+      server: this.listServers().find(s => s.id === entry.id),
+      // False means: asked to remember, could not. The caller tells the user.
+      remembered: !wants || !conn.password ? true : !!entry.passwordEnc,
+      vaultAvailable: secrets.available(),
+    };
+  }
+
+  removeServer(id) {
+    this.data.servers = (this.data.servers || []).filter(s => s.id !== id);
+    this.save();
+    return this.listServers();
+  }
+}
+
+// No `password` or `passphrase` key survives a write, whatever put it there.
+function scrubSecrets(data) {
+  if (!data || !Array.isArray(data.servers)) return;
+  for (const s of data.servers) {
+    if (!s || typeof s !== 'object') continue;
+    if (s.password) {
+      const enc = secrets.encrypt(s.password);
+      if (enc) { s.passwordEnc = enc; s.savePassword = true; }
+      delete s.password;
+    }
+    if (s.passphrase) {
+      const enc = secrets.encrypt(s.passphrase);
+      if (enc) s.passphraseEnc = enc;
+      delete s.passphrase;
+    }
+  }
+  delete data.sftp;
 }
 
 // A job saved before multi-pair support carried a single left/right at the
@@ -222,4 +415,5 @@ function saveJob(file, job) {
   return out;
 }
 
-module.exports = { Prefs, defaultJob, defaultPrefs, loadJob, saveJob, merge, migrateJob, jobNameFromPath, JOB_EXT, JOB_FORMAT };
+module.exports = { Prefs, defaultJob, defaultPrefs, loadJob, saveJob, merge, migrateJob,
+  migratePrefs, credentialMap, jobNameFromPath, JOB_EXT, JOB_FORMAT };

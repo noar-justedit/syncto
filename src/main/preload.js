@@ -36,7 +36,19 @@ const api = {
   jobOpen    : ()        => ipcRenderer.invoke('job-open'),
   jobOpenPath: (p)       => ipcRenderer.invoke('job-open-path', p),
   jobSave    : (job, as) => ipcRenderer.invoke('job-save', job, as),
-  getOverview: ()        => ipcRenderer.invoke('get-overview'),
+  getOverview: (view)    => ipcRenderer.invoke('get-overview', view),
+
+  // Connect-to-a-server window. No method here ever returns a password: the
+  // renderer learns that one is remembered, never what it is.
+  serverListSaved : ()            => ipcRenderer.invoke('server-list-saved'),
+  serverConnect   : (conn)        => ipcRenderer.invoke('server-connect', conn),
+  serverList      : (dir)         => ipcRenderer.invoke('server-list', dir),
+  serverMkdir     : (dir, name)   => ipcRenderer.invoke('server-mkdir', dir, name),
+  serverSave      : (conn)        => ipcRenderer.invoke('server-save', conn),
+  serverForget    : (id)          => ipcRenderer.invoke('server-forget', id),
+  serverDisconnect: ()            => ipcRenderer.invoke('server-disconnect'),
+  serverUrl       : (conn, folder)=> ipcRenderer.invoke('server-url', conn, folder),
+  browseKey       : ()            => ipcRenderer.invoke('browse-key'),
 
   compare      : (job)  => ipcRenderer.invoke('compare', job),
   compareCancel: ()     => ipcRenderer.invoke('compare-cancel'),

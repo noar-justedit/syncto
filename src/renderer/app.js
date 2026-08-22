@@ -49,12 +49,16 @@ function ensurePairs(j) {
   return j;
 }
 
+// Lucide "server". Same glyph in the two main fields and in every pair row.
+const ICON_SERVER = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 6h.01"/><path d="M6 18h.01"/></svg>';
+
 // Pairs 2..N as stacked SOURCE/DESTINATION rows under the main fields —
 // the FreeFileSync layout: every pair visible and editable at once.
 function renderPairRows() {
   const j = state.job;
   const RM = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
   const ARR = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>';
+  const SRV = ICON_SERVER;
   $('pairrows').innerHTML = j.pairs.slice(1).map((p, k) => {
     const i = k + 1;
     return `<div class="prow" data-i="${i}">
@@ -62,11 +66,13 @@ function renderPairRows() {
       <div class="pr-field">
         <input class="pr-left" value="${esc(p.left)}" placeholder="Source folder" spellcheck="false">
         <button class="br-btn pr-browse-l">Browse</button>
+        <button class="srv-btn pr-server-l${p.left.startsWith('sftp://') ? ' on' : ''}" data-tip="Connect to a server (SFTP)" aria-label="Connect to a server">${SRV}</button>
       </div>
       <span class="pr-gap">${ARR}</span>
       <div class="pr-field">
         <input class="pr-right" value="${esc(p.right)}" placeholder="Destination folder" spellcheck="false">
         <button class="br-btn pr-browse-r">Browse</button>
+        <button class="srv-btn pr-server-r${p.right.startsWith('sftp://') ? ' on' : ''}" data-tip="Connect to a server (SFTP)" aria-label="Connect to a server">${SRV}</button>
       </div>
       <button class="pr-rm" data-tip="Remove this pair">${RM}</button>
     </div>`;
@@ -525,7 +531,10 @@ $('stat-chips').addEventListener('click', async e => {
   const key = chip.dataset.key;
   if (chip.dataset.kind === 'op') {
     state.view.onlyOperation = state.view.onlyOperation === key ? '' : key;
-    if (key === 'none' && state.view.onlyOperation) state.view.showEqual = true;
+    // Deliberately NOT touching state.view.showEqual here. Filtering on the
+    // "identical" chip already tells the engine to include those rows; forcing
+    // the switch on instead left it ticked, saved it to the preferences on the
+    // next write, and it came back ticked at every launch afterwards.
   }
   renderStats();
   await refreshGrid(true);
@@ -1056,7 +1065,12 @@ function bind() {
   });
 
 
-  $('chk-equal').addEventListener('change', async e => { state.view.showEqual = e.target.checked; await refreshGrid(true); });
+  $('chk-equal').addEventListener('change', async e => {
+    state.view.showEqual = e.target.checked;
+    await refreshGrid(true);
+    await refreshOverview();     // zone 2 follows the same switch now
+    persist();
+  });
   $('chk-excluded').addEventListener('change', async e => { state.view.showExcluded = e.target.checked; await refreshGrid(true); });
 
   let searchTimer = null;
@@ -1140,6 +1154,9 @@ function bind() {
         'ov-confirm' : 'cf-cancel',   'ov-summary': 'sum-close',
         'ov-verify'  : 'vf-close',    'ov-auto'   : 'auto-cf-cancel',
         'update-ov'  : 'upd-later',
+        // Closing this one drops the SSH connection — hiding the window and
+        // leaving the session open would hold a slot on the server for nothing.
+        'ov-server'  : 'srv-cancel',
       };
       for (const ov of document.querySelectorAll('.ov.open')) {
         const btn = ESC_CLOSE[ov.id] && document.getElementById(ESC_CLOSE[ov.id]);
@@ -1148,6 +1165,7 @@ function bind() {
     }
   });
 
+  bindServerDialog();
   installTooltips();
 }
 
@@ -1155,9 +1173,15 @@ async function onPathChanged() {
   uiToJob();
   invalidateIfPairsChanged();
   persist();
-  for (const [inputId, labelId] of [['left-path', 'left-free'], ['right-path', 'right-free']]) {
+  for (const [inputId, labelId, btnId] of [
+    ['left-path', 'left-free', 'left-server'],
+    ['right-path', 'right-free', 'right-server'],
+  ]) {
     const p = $(inputId).value.trim();
     const lbl = $(labelId);
+    // The server button doubles as the indicator for that side: lit when the
+    // field holds a server, plain when it holds a local path.
+    $(btnId).classList.toggle('on', p.startsWith('sftp://'));
     if (!p || p.startsWith('sftp://')) { lbl.textContent = p.startsWith('sftp://') ? 'remote' : ''; continue; }
     const ok = await API.folderExists(p);
     if (!ok) { lbl.textContent = 'does not exist yet'; continue; }
@@ -1251,9 +1275,12 @@ async function refreshOverview() {
     box.innerHTML = '<div class="ov-empty">Run a comparison to see the folder breakdown.</div>';
     return;
   }
-  const ov = await API.getOverview();
+  const ov = await API.getOverview(state.view);
   if (!ov || !ov.rows.length) {
-    box.innerHTML = '<div class="ov-empty">Both folders are empty.</div>';
+    const nothing = state.stats.rows > 0;
+    box.innerHTML = nothing
+      ? '<div class="ov-empty">Nothing to do — both sides already match.<br>Tick “Show identical” to list the folders anyway.</div>'
+      : '<div class="ov-empty">Both folders are empty.</div>';
     return;
   }
   box.innerHTML = ov.rows.map(g => `
@@ -1547,6 +1574,320 @@ function showUpdateNotice({ version, url }) {
   ov.querySelector('#upd-later').onclick = dismiss;
   ov.querySelector('#upd-go').onclick = () => { API.openExternal(url); dismiss(); };
   ov.onclick = e => { if (e.target === ov) dismiss(); };
+}
+
+// ── Connect to a server ────────────────────────────────────────────────────
+// Replaces "type an sftp:// URL from memory into a field that otherwise wants
+// a local path". Two steps in one window: who and where, then which folder.
+//
+// The password is never held here longer than the moment it is typed. A
+// remembered one is decrypted in the main process, used, and dropped — it
+// never crosses into this window at all.
+const srv = {
+  target: null,      // { kind:'main'|'pair', side:'left'|'right', index }
+  cwd   : '/',
+  picked: '/',
+  conn  : null,      // what we actually connected with (no password kept)
+  savedId: null,
+};
+
+const SRV_ICONS = {
+  idle: '<path d="M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+  busy: '<g class="spin" style="transform-box:fill-box"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></g>',
+  good: '<path d="M20 6 9 17l-5-5"/>',
+  bad : '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+};
+
+function srvStatus(kind, text) {
+  const box = $('srv-status');
+  box.className = 'srv-status ' + kind;
+  box.querySelector('svg').innerHTML = SRV_ICONS[kind];
+  $('srv-status-txt').textContent = text;
+}
+
+function srvShowStep(n) {
+  $('srv-step1').style.display = n === 1 ? '' : 'none';
+  $('srv-step2').style.display = n === 2 ? '' : 'none';
+}
+
+async function openServerDialog(target) {
+  srv.target = target;
+  srv.savedId = null;
+  srv.conn = null;
+  const side = target.side === 'left' ? 'source' : 'destination';
+  $('srv-sub').innerHTML = `This becomes the <span style="color:var(--${target.side === 'left' ? 'blue' : 'green'})">${side}</span>` +
+    (target.kind === 'pair' ? ` of pair ${target.index + 1}` : '') + '.';
+  $('srv-title').textContent = 'Connect to a server';
+  srvShowStep(1);
+  srvStatus('idle', 'Not connected');
+  $('srv-pass').value = '';
+  $('ov-server').classList.add('open');
+
+  const res = await API.serverListSaved();
+  const list = res.servers || [];
+  const box = $('srv-saved');
+  box.innerHTML = list.map(s => `
+    <div class="srow" data-id="${esc(s.id)}" data-tip="${esc(s.username)}@${esc(s.host)}:${s.port}">
+      ${ICON_SERVER}
+      <span class="s-name">${esc(s.name)}</span>
+      <span class="host">${esc(s.username)}@${esc(s.host)}</span>
+      <button class="s-forget" data-forget="${esc(s.id)}" data-tip="Forget this server" aria-label="Forget">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+      </button>
+    </div>`).join('');
+  $('srv-div').style.display = list.length ? '' : 'none';
+
+  // Said once, plainly: if the machine has no usable credential store, syncto
+  // will not write the password down anywhere as a consolation prize.
+  const note = $('srv-vaultnote');
+  if (res.vaultAvailable) {
+    note.style.display = 'none';
+  } else {
+    note.style.display = '';
+    note.textContent = 'This machine has no usable credential store, so the password cannot be ' +
+      'remembered safely — syncto will ask for it each time rather than write it to a file.';
+    $('srv-remember').checked = false;
+  }
+  setTimeout(() => $('srv-host').focus(), 60);
+}
+
+function srvFormConn() {
+  return {
+    savedId : srv.savedId,
+    host    : $('srv-host').value.trim(),
+    port    : Number($('srv-port').value) || 22,
+    username: $('srv-user').value.trim(),
+    password: $('srv-pass').value,
+    keyPath : $('srv-key').value.trim(),
+    name    : $('srv-name').value.trim(),
+    savePassword: $('srv-remember').checked,
+  };
+}
+
+async function srvConnect() {
+  const conn = srvFormConn();
+  if (!conn.host)     { srvStatus('bad', 'Enter the address of the server.'); $('srv-host').focus(); return; }
+  if (!conn.username) { srvStatus('bad', 'Enter the login to use.'); $('srv-user').focus(); return; }
+
+  $('srv-connect').disabled = true;
+  srvStatus('busy', `Connecting to ${conn.host}…`);
+  const res = await API.serverConnect(conn);
+  $('srv-connect').disabled = false;
+
+  if (!res.ok) {
+    if (res.needsPassword) {
+      srvStatus('bad', 'This server has no remembered password — type it here.');
+      $('srv-pass').focus();
+      return;
+    }
+    srvStatus('bad', res.error);
+    return;
+  }
+
+  // Only now is the entry worth keeping: it is a server that actually answers.
+  srv.conn = { host: conn.host, port: conn.port, username: conn.username };
+  if (conn.savePassword || conn.keyPath || srv.savedId) {
+    const saved = await API.serverSave(conn);
+    if (saved.ok && saved.server) srv.savedId = saved.server.id;
+    if (saved.ok && !saved.remembered) {
+      // Do not let this pass silently: the user ticked "remember" and it
+      // did not happen, and they will find out at the worst moment otherwise.
+      $('srv-status2-txt').textContent =
+        `Connected to ${res.banner} — the password could NOT be stored on this machine.`;
+    }
+  }
+
+  $('srv-title').textContent = 'Choose a folder';
+  $('srv-status2-txt').textContent = `Connected — ${res.banner}`;
+  srvShowStep(2);
+  srv.cwd = res.start || '/';
+  srv.picked = srv.cwd;
+  await srvDraw();
+}
+
+function srvCrumbs() {
+  const c = $('srv-crumbs');
+  c.innerHTML = '';
+  const parts = srv.cwd.split('/').filter(Boolean);
+  const add = (label, path, isCur) => {
+    if (isCur) {
+      const s = document.createElement('span');
+      s.className = 'cur'; s.textContent = label;
+      c.appendChild(s);
+    } else {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.addEventListener('click', async () => { srv.cwd = path; srv.picked = path; await srvDraw(); });
+      c.appendChild(b);
+    }
+  };
+  add('/', '/', parts.length === 0);
+  let acc = '';
+  parts.forEach((p, i) => {
+    acc = acc ? acc + '/' + p : '/' + p;
+    if (i > 0) {
+      const sep = document.createElement('span');
+      sep.className = 'sep'; sep.textContent = '/';
+      c.appendChild(sep);
+    }
+    add(p, acc, i === parts.length - 1);
+  });
+}
+
+const ICON_FOLDER_SM = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>';
+const ICON_UP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>';
+
+async function srvDraw() {
+  const tree = $('srv-tree');
+  tree.innerHTML = '<div class="tnode" style="cursor:default"><span style="color:var(--text3)">Reading…</span></div>';
+  srvCrumbs();
+
+  const res = await API.serverList(srv.cwd);
+  tree.innerHTML = '';
+  if (!res.ok) {
+    const e = document.createElement('div');
+    e.className = 'tnode';
+    e.style.cursor = 'default';
+    e.innerHTML = `<span style="color:var(--red)">${esc(res.error)}</span>`;
+    tree.appendChild(e);
+    $('srv-picked').innerHTML = '';
+    return;
+  }
+
+  if (res.parent !== null) {
+    const up = document.createElement('button');
+    up.className = 'tnode up';
+    up.innerHTML = ICON_UP + '<span>..</span>';
+    up.addEventListener('click', async () => { srv.cwd = res.parent; srv.picked = res.parent; await srvDraw(); });
+    tree.appendChild(up);
+  }
+
+  if (!res.folders.length) {
+    const e = document.createElement('div');
+    e.className = 'tnode';
+    e.style.cursor = 'default';
+    e.innerHTML = '<span style="color:var(--text3)">No sub-folder here</span>';
+    tree.appendChild(e);
+  }
+
+  for (const f of res.folders) {
+    const n = document.createElement('button');
+    n.className = 'tnode' + (f.path === srv.picked ? ' sel' : '');
+    n.setAttribute('role', 'option');
+    n.setAttribute('aria-selected', f.path === srv.picked ? 'true' : 'false');
+    n.innerHTML = ICON_FOLDER_SM + '<span></span>';
+    n.lastChild.textContent = f.name;         // never innerHTML for a remote name
+    // One click selects, a second one goes in — the habit every file dialog has.
+    n.addEventListener('click', async () => {
+      if (srv.picked === f.path) { srv.cwd = f.path; srv.picked = f.path; await srvDraw(); }
+      else { srv.picked = f.path; await srvDraw(); }
+    });
+    n.addEventListener('dblclick', async () => { srv.cwd = f.path; srv.picked = f.path; await srvDraw(); });
+    tree.appendChild(n);
+  }
+
+  $('srv-picked').innerHTML = 'Selected: <b></b>';
+  $('srv-picked').querySelector('b').textContent = srv.picked;
+}
+
+async function srvUseFolder() {
+  const url = await API.serverUrl(srv.conn, srv.picked);
+  const t = srv.target;
+  if (t.kind === 'main') {
+    $(t.side === 'left' ? 'left-path' : 'right-path').value = url;
+    $(t.side === 'left' ? 'left-server' : 'right-server').classList.add('on');
+  } else {
+    state.job.pairs[t.index][t.side] = url;
+    renderPairRows();
+  }
+  closeServerDialog();
+  onPathChanged();
+}
+
+async function closeServerDialog() {
+  $('ov-server').classList.remove('open');
+  $('srv-pass').value = '';
+  await API.serverDisconnect();
+}
+
+function bindServerDialog() {
+  $('left-server').addEventListener('click',  () => openServerDialog({ kind: 'main', side: 'left'  }));
+  $('right-server').addEventListener('click', () => openServerDialog({ kind: 'main', side: 'right' }));
+
+  $('srv-cancel').addEventListener('click', closeServerDialog);
+  $('srv-back').addEventListener('click', () => { srvShowStep(1); $('srv-title').textContent = 'Connect to a server'; });
+  $('srv-connect').addEventListener('click', srvConnect);
+  $('srv-use').addEventListener('click', srvUseFolder);
+  $('srv-refresh').addEventListener('click', srvDraw);
+
+  $('srv-key-browse').addEventListener('click', async () => {
+    const p = await API.browseKey();
+    if (p) $('srv-key').value = p;
+  });
+
+  // The default port follows nothing but SFTP here, so it is only ever a hint.
+  $('srv-host').addEventListener('keydown', e => { if (e.key === 'Enter') srvConnect(); });
+  $('srv-user').addEventListener('keydown', e => { if (e.key === 'Enter') srvConnect(); });
+  $('srv-pass').addEventListener('keydown', e => { if (e.key === 'Enter') srvConnect(); });
+
+  $('srv-saved').addEventListener('click', async e => {
+    const forget = e.target.closest('[data-forget]');
+    if (forget) {
+      e.stopPropagation();
+      await API.serverForget(forget.dataset.forget);
+      await openServerDialog(srv.target);
+      return;
+    }
+    const row = e.target.closest('.srow');
+    if (!row) return;
+    const res = await API.serverListSaved();
+    const s = (res.servers || []).find(x => x.id === row.dataset.id);
+    if (!s) return;
+    srv.savedId = s.id;
+    $('srv-host').value = s.host;
+    $('srv-port').value = s.port;
+    $('srv-user').value = s.username;
+    $('srv-key').value  = s.keyPath || '';
+    $('srv-name').value = s.name;
+    $('srv-pass').value = '';
+    $('srv-remember').checked = !!s.savePassword;
+    srvStatus('idle', s.hasPassword || s.keyPath
+      ? 'Ready — press Connect'
+      : 'Type the password, then press Connect');
+    srvConnect();
+  });
+
+  // Electron has no window.prompt, so the name is typed in place — which is
+  // better anyway: the folder being created stays visible above the field.
+  $('srv-newfolder').addEventListener('click', () => {
+    const tools = $('srv-tools-new');
+    const on = tools.style.display !== 'none';
+    tools.style.display = on ? 'none' : '';
+    if (!on) { $('srv-newname').value = ''; $('srv-newname').focus(); }
+  });
+  const createFolder = async () => {
+    const name = $('srv-newname').value.trim();
+    if (!name) return;
+    const res = await API.serverMkdir(srv.cwd, name);
+    if (!res.ok) { showError('Could not create the folder', res.error); return; }
+    $('srv-tools-new').style.display = 'none';
+    srv.picked = res.path;
+    await srvDraw();
+  };
+  $('srv-newok').addEventListener('click', createFolder);
+  $('srv-newname').addEventListener('keydown', e => {
+    if (e.key === 'Enter') createFolder();
+    if (e.key === 'Escape') { e.stopPropagation(); $('srv-tools-new').style.display = 'none'; }
+  });
+
+  // Pair rows are rebuilt constantly, so the handler lives on the container.
+  $('pairrows').addEventListener('click', e => {
+    const row = e.target.closest('.prow');
+    if (!row) return;
+    const i = Number(row.dataset.i);
+    if (e.target.closest('.pr-server-l')) { uiToJob(); openServerDialog({ kind: 'pair', side: 'left',  index: i }); }
+    if (e.target.closest('.pr-server-r')) { uiToJob(); openServerDialog({ kind: 'pair', side: 'right', index: i }); }
+  });
 }
 
 // ── Tooltips ───────────────────────────────────────────────────────────────

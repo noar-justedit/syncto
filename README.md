@@ -209,18 +209,28 @@ One rule to remember:
 Right-clicking any row (grid or overview) offers ready-made patterns; Space
 excludes the selection temporarily.
 
-### SFTP
+### Servers (SFTP)
 
-Type the address straight into a folder field:
+Click the **server button** next to *Browse* in either folder field. Enter the
+address, the port, the login, and a password or a private key; syncto connects,
+then lets you walk the server's folders and pick one — or create it. The field
+ends up holding `sftp://user@host/path`, which you can still type by hand if
+you prefer.
 
-```
-sftp://user@host:22/srv/backup
-```
+Servers you use again are listed at the top of that window: one click fills
+everything in.
 
-Everything works the same, including checksum verification — it just reads the
-data back over the network, so **Secure** is considerably slower than on a
+**Passwords are never written to a readable file.** They go to the macOS
+Keychain or the Windows credential manager, through Electron's `safeStorage`.
+If a machine has no usable credential store, syncto says so and asks for the
+password each time rather than storing it in the clear. Only the *path* of a
+private key is stored, never the key.
+
+Everything else works the same, including checksum verification — it just reads
+the data back over the network, so **Secure** is considerably slower than on a
 local drive. SFTP has no trash and no inode information, so use permanent
-deletion there.
+deletion there, and expect renamed files to be re-copied rather than detected
+as moves.
 
 ### When something fails
 
