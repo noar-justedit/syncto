@@ -609,9 +609,78 @@ class SyncRunner {
     return true;
   }
 
+  // Does the recycle bin actually work on this folder?
+  //
+  // NativeFs.supportsTrash() answers "yes" for every local path, and that is a
+  // guess, not a fact: macOS and Windows both refuse to move a file to the
+  // trash on most network shares. The only reliable answer is to try it — on a
+  // file of our own, before touching anything of the user's.
+  //
+  // Doing this once per side, up front, is the whole point. The same failure
+  // used to surface as one error per file, mid-run, which with "stop at the
+  // first error" meant a NAS job that copied nothing at all.
+  async trashWorks(side) {
+    if (!this._trashProbe) this._trashProbe = {};
+    if (this._trashProbe[side] !== undefined) return this._trashProbe[side];
+
+    const fsx = this.side(side).fs;
+    if (!fsx.supportsTrash() || !this.trashItem) return (this._trashProbe[side] = false);
+
+    // ".syncto." prefixed, so a leftover is invisible to every comparison.
+    const probe = fsx.join(this.side(side).path, '.syncto.trash-probe');
+    let ok = false;
+    try {
+      await new Promise((resolve, reject) => {
+        const ws = fsx.createWriteStream(probe);
+        ws.on('error', reject);
+        ws.on('finish', resolve);
+        ws.end(Buffer.from('syncto trash probe\n', 'utf8'));
+      });
+      ok = await this.trashItem(fsx, probe);
+    } catch (_) {
+      ok = false;
+    }
+    // Whatever happened, do not leave the probe behind.
+    try { if (await fsx.exists(probe)) await fsx.unlink(probe); } catch (_) {}
+    return (this._trashProbe[side] = !!ok);
+  }
+
+  // Everything that cannot possibly work, said once, before a single byte
+  // moves — instead of discovered file by file half way through a run.
+  async preflight(plan) {
+    const mode = this.cfg.deletion || 'recycler';
+    if (mode !== 'recycler' || this.cfg.permanentFallback) return;
+
+    // Which sides will actually lose a file: deletions, and overwrites, which
+    // put the replaced version aside the same way.
+    const sides = new Set();
+    for (const d of plan.del)   sides.add(d.side);
+    for (const d of plan.rmdir) sides.add(d.side);
+    for (const c of plan.copy) {
+      const n = c.n;
+      if (n.op === OP.OVERWRITE_LEFT || n.op === OP.OVERWRITE_RIGHT) sides.add(c.to);
+    }
+    if (!sides.size) return;
+
+    for (const side of sides) {
+      if (await this.trashWorks(side)) continue;
+      const where = this.side(side).path;
+      // Wording matters here: this is the message that has to get a user
+      // moving again, so it names the folder and the exact controls to change.
+      const err = new Error(
+        `The recycle bin does not work on ${where} — network volumes usually have none. ` +
+        `syncto will not delete or replace anything permanently while "Move to the trash" is ` +
+        `selected. In Settings › Deletion, either set "When removing" to "Delete permanently", ` +
+        `or turn on "No trash? delete anyway" to fall back automatically wherever there is no bin.`);
+      err.preflight = true;
+      throw err;
+    }
+  }
+
   async _run() {
     const plan = this.buildPlan();
     this.emit(true, 'Preparing…');
+    await this.preflight(plan);
 
     // 0. execute detected moves — before anything else, so nothing they touch
     //    is deleted or re-copied by the later phases

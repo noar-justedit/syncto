@@ -4,6 +4,61 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.3.1] — 2026-08-28
+
+A job that could not run at all against a NAS, and an overview panel nobody
+could read. Nothing in the synchronization engine's decisions changed, so 0.3.0
+jobs, databases and checksum lists carry over untouched.
+
+### Fixed
+
+- **A mirror to a NAS did nothing at all.** Reported from a real run: *Completed
+  with 2 errors*, 0 files copied, 0 items removed, 0 s.
+  Two things combined. `supportsTrash()` answers "yes" for every local path,
+  which is a guess — macOS and Windows both refuse to move a file to the trash
+  on most network shares. And 0.2.5 had just made "ignore errors" real, so the
+  first refusal stopped the whole run before a single file was copied.
+  syncto now **probes the recycle bin once, before the run**, by trashing a
+  file of its own, and refuses up front — naming the folder and the two
+  settings that fix it, worded exactly as they read on screen. The confirmation
+  dialog runs the same check, so it is said while the settings are one click
+  away instead of after a run that did nothing. A destination that *does* have
+  a working bin is not slowed down or blocked, and a job with nothing to delete
+  or replace is never checked at all.
+- **"Ignore errors" is on by default again.** 0.2.5 made the setting real for
+  the first time — it had been stored, loaded and read nowhere — and left it
+  off, which turned one unreadable file into a job that copied nothing. That is
+  the wrong trade for a backup tool. A run works through what it can and lists
+  the failures at the end; untick it for a run you are watching and want
+  stopped at the first problem.
+  A job saved before 0.3.1 carries a `false` nobody chose, since the setting
+  did nothing when it was written; it is corrected on load. Jobs now carry a
+  revision marker so a deliberate choice made from here on is kept.
+
+### Changed — the overview panel
+
+- **One block per folder pair, with its label.** Every row in the overview is a
+  *top-level* entry of its own pair — but with several pairs, the lists were
+  merged and sorted by size together, so a root folder of pair 2 landed between
+  two root folders of pair 1 with nothing on screen saying so. It read as an
+  arbitrary mix of roots and sub-folders: `Resolve`, a root of
+  `_GOODIES → public`, sat among the roots of `MEDIAS_RAID0 → TNAS`, and the
+  only clue was a tooltip you had to hover. Pairs keep their own block now, and
+  rows are sorted by size *within* a pair.
+- **Clicking a folder shows its contents in the grid.** The panel is a
+  navigator, not a legend: click a row and the grid is limited to that folder
+  and everything under it. A bar above the grid says what is being shown, with
+  one button back to everything; clicking the same row again clears it too.
+  Prefix names are handled properly — `Rush` does not also pull in `Rushes`.
+
+### Tests
+
+292 checks, up from 268. The new ones reproduce the NAS run that copied
+nothing, cover a working bin and permanent deletion so the check cannot become
+a nuisance, and pin the overview scope including the prefix case.
+
+---
+
 ## [0.3.0] — 2026-08-22
 
 Reaching a server no longer means typing an `sftp://` URL from memory into a

@@ -37,6 +37,7 @@ const api = {
   jobOpenPath: (p)       => ipcRenderer.invoke('job-open-path', p),
   jobSave    : (job, as) => ipcRenderer.invoke('job-save', job, as),
   getOverview: (view)    => ipcRenderer.invoke('get-overview', view),
+  preflight  : (job)     => ipcRenderer.invoke('preflight', job),
 
   // Connect-to-a-server window. No method here ever returns a password: the
   // renderer learns that one is remembered, never what it is.

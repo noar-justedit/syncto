@@ -24,7 +24,9 @@ const ROWH = 26;
 
 const state = {
   job    : null,
-  view   : { showEqual: false, showExcluded: false, search: '', onlyCategory: '', onlyOperation: '' },
+  // scope: { p, rel, label } — set by clicking a folder in the overview, so
+  // the grid shows that folder and everything under it, and nothing else.
+  view   : { showEqual: false, showExcluded: false, search: '', onlyCategory: '', onlyOperation: '', scope: null },
   total  : 0,
   stats  : null,
   rows   : new Map(),        // absolute row index -> row object
@@ -553,6 +555,9 @@ function invalidateComparison(reason) {
   state.comparedPairs = null;
   state.stats = null;
   state.selIdx = null;
+  // The scope names a folder of a tree that is about to be replaced.
+  state.view.scope = null;
+  renderScopeBar();
   const note = $('status-note');
   if (note) note.textContent = reason || 'Folders changed — compare again.';
   if (!state.busy) setBusyUi(false);
@@ -578,6 +583,8 @@ async function doCompare() {
   if (!completePairs().length) { alert('Set both folders of at least one pair first.'); return; }
 
   state.selIdx = null;      // the old selection indexes a tree about to vanish
+  state.view.scope = null;  // and so does the scope
+  renderScopeBar();
   state.busy = 'compare';
   state.speeds = [];
   setBusyUi(true, 'Comparing…');
@@ -622,6 +629,22 @@ async function doCompare() {
 }
 
 // ── Synchronize ────────────────────────────────────────────────────────────
+// Anything that would make the run refuse is checked here, while the settings
+// are still one click away. A NAS with no working recycle bin used to be
+// discovered file by file, mid-run, after the run had already given up.
+async function checkBeforeSync() {
+  const res = await API.preflight(state.job);
+  if (!res.ok || !res.warnings.length) return true;
+
+  $('cf-block').style.display = '';
+  $('cf-block-body').innerHTML = res.warnings
+    .map(w => `<div class="err-item">${w.label ? '[' + esc(w.label) + '] ' : ''}${esc(w.message)}</div>`)
+    .join('');
+  $('cf-ok').disabled = true;
+  $('btn-cf-settings').style.display = '';
+  return false;
+}
+
 function askConfirm() {
   const s = state.stats;
   uiToJob();
@@ -660,7 +683,12 @@ function askConfirm() {
   $('cf-warn').style.display = warns.length ? '' : 'none';
   $('cf-warn-body').innerHTML = warns.map(w => `<div class="err-item">${esc(w)}</div>`).join('');
 
+  // Reset from a previous pass before the check runs again.
+  $('cf-block').style.display = 'none';
+  $('btn-cf-settings').style.display = 'none';
+  $('cf-ok').disabled = false;
   $('ov-confirm').classList.add('open');
+  checkBeforeSync();
 }
 
 async function doSync() {
@@ -962,7 +990,18 @@ function bind() {
     if (state.stats && after !== before) await doCompare();
   });
 
+  $('scope-clear').addEventListener('click', async () => {
+    state.view.scope = null;
+    renderScopeBar();
+    await refreshGrid(true);
+    await refreshOverview();
+  });
+
   $('cf-cancel').addEventListener('click', () => $('ov-confirm').classList.remove('open'));
+  $('btn-cf-settings').addEventListener('click', () => {
+    $('ov-confirm').classList.remove('open');
+    $('btn-settings').click();
+  });
   $('cf-ok').addEventListener('click', doSync);
   $('sum-close').addEventListener('click', () => $('ov-summary').classList.remove('open'));
   $('vf-close').addEventListener('click', () => { API.verifyCancel(); $('ov-verify').classList.remove('open'); });
@@ -1283,25 +1322,63 @@ async function refreshOverview() {
       : '<div class="ov-empty">Both folders are empty.</div>';
     return;
   }
-  box.innerHTML = ov.rows.map(g => `
-    <div class="ov-row${g.idx === state.selIdx ? ' sel' : ''}${g.active ? '' : ' off'}"
-         data-idx="${g.idx}" data-name="${esc(g.name)}" data-type="${g.type}" data-active="${g.active ? 1 : 0}"
-         data-tip="${g.pairLabel ? '[' + esc(g.pairLabel) + '] ' : ''}${esc(g.name)} — ${g.items} item${g.items === 1 ? '' : 's'}, ${esc(fmtBytes(g.bytes))}">
+  // Every row here is a TOP-LEVEL entry of its pair. With several pairs those
+  // lists used to be merged and sorted by size together, so a root folder of
+  // pair 2 landed between two root folders of pair 1 with nothing on screen
+  // saying so — which reads as an arbitrary mix of roots and sub-folders.
+  // Each pair now gets its own heading.
+  const multi = ov.pairs > 1;
+  box.innerHTML = ov.rows.map(g => {
+    const head = (multi && g.first)
+      ? `<div class="ov-pairhead"><span class="n">${g.pair}</span>${esc(g.pairLabel)}</div>`
+      : '';
+    const scoped = state.view.scope && state.view.scope.p === g.pairIdx &&
+                   state.view.scope.rel === g.name;
+    return head + `
+    <div class="ov-row${g.idx === state.selIdx ? ' sel' : ''}${g.active ? '' : ' off'}${scoped ? ' scoped' : ''}"
+         data-idx="${g.idx}" data-name="${esc(g.name)}" data-type="${g.type}"
+         data-pair="${g.pairIdx}" data-active="${g.active ? 1 : 0}"
+         data-tip="${g.pairLabel ? '[' + esc(g.pairLabel) + '] ' : ''}${esc(g.name)} — ${g.items} item${g.items === 1 ? '' : 's'}, ${esc(fmtBytes(g.bytes))}. Click to show its contents in the grid.">
       <div class="ov-pct"><div class="bar" style="width:${g.pct}%"></div><div class="lbl">${g.pct}%</div></div>
       <div class="ov-name">${g.type === 'folder' ? ICON_FOLDER : ICON_FILE}<span>${esc(g.name)}</span></div>
       <div class="ov-items">${g.items}</div>
       <div class="ov-bytes">${esc(fmtBytes(g.bytes))}</div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
+}
+
+// The bar above the grid that says what it is currently showing, and how to
+// get back to everything.
+function renderScopeBar() {
+  const bar = $('scope-bar');
+  const sc = state.view.scope;
+  if (!sc || !sc.rel) { bar.style.display = 'none'; return; }
+  bar.style.display = '';
+  $('scope-name').textContent = sc.rel;
+  $('scope-pair').textContent = sc.label || '';
+  $('scope-pair').style.display = sc.label ? '' : 'none';
+}
+
+async function setScope(pairIdx, rel, label) {
+  const sc = state.view.scope;
+  const same = sc && sc.p === pairIdx && sc.rel === rel;
+  state.view.scope = same ? null : { p: pairIdx, rel, label };
+  renderScopeBar();
+  await refreshGrid(true);
+  await refreshOverview();
 }
 
 // Selection + right-click in the overview: same behaviour as the grid.
+// Clicking a folder in the overview shows THAT folder in the grid — the
+// panel is a navigator, not just a legend. Clicking it again shows everything.
 $('ov-list').addEventListener('click', async e => {
   const it = e.target.closest('.ov-row');
   if (!it) return;
   const idx = Number(it.dataset.idx);
-  if (idx < 0) return;
-  state.selIdx = state.selIdx === idx ? null : idx;
-  await refreshOverview();
+  if (idx >= 0) state.selIdx = idx;
+  const pairIdx = Number(it.dataset.pair);
+  const label = it.dataset.tip.startsWith('[') ? it.dataset.tip.slice(1, it.dataset.tip.indexOf(']')) : '';
+  await setScope(Number.isNaN(pairIdx) ? 0 : pairIdx, it.dataset.name, label);
   await renderWindow();
 });
 

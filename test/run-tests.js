@@ -1051,16 +1051,19 @@ async function testAuditFixes() {
   }
 
   // (d) Same rule for the recycle bin: no bin here (and no permanent
-  //     fallback) means the previous version cannot be kept, so do not replace it.
+  //     fallback) means the previous version cannot be kept, so do not replace
+  //     it. Since 0.3.1 this is settled BEFORE the run rather than file by
+  //     file during it — see section 19.
   {
     const { L, R } = scratch();
     write(L, 'a.mov', 'NEW', Date.now());
     write(R, 'a.mov', 'OLD', Date.now() - 86400000);
-    const { run } = await stepped(makeJob(L, R, {
+    const { run, error } = await stepped(makeJob(L, R, {
       sync: { variant: 'mirror', deletion: 'recycler', permanentFallback: false },
     }));
     eq(read(R, 'a.mov'), 'OLD', 'no recycle bin: the old version stays put');
-    ok(run && run.errors.some(e => /recycle bin/i.test(e.message)), 'and the reason is reported');
+    ok(!run, 'the run does not start at all');
+    ok(error && /recycle bin/i.test(error.message), 'and the reason is reported');
   }
 
   // (e) preserveTimes off recorded the SOURCE date as the target's, so every
@@ -1337,6 +1340,33 @@ async function testOverviewAndShowEqual() {
     await s.close();
   }
 
+  // (f) Clicking a folder in the overview scopes the grid to it. Every row
+  //     the overview lists is a TOP-LEVEL entry of its own pair — with two
+  //     pairs merged into one list, that was impossible to tell.
+  {
+    const { L, R } = scratch();
+    write(L, 'Rushes/A001/clip.mov', 'a');
+    write(L, 'Rushes/A002/clip.mov', 'b');
+    write(L, 'Docs/notes.txt', 'c');
+    const s = new Session();
+    await s.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: { cancelled: false } });
+    const wide = s.rows(0, 200, {}).total;
+    const scoped = s.rows(0, 200, { scope: { rel: 'Rushes' } });
+    ok(scoped.total < wide, 'a scope shows fewer rows than the whole tree');
+    ok(scoped.rows.every(r => r.rel === 'Rushes' || r.rel.startsWith('Rushes/')),
+       'and only rows inside the folder that was clicked');
+    ok(scoped.rows.some(r => r.rel === 'Rushes/A001/clip.mov'),
+       'including the ones nested deeper inside it');
+    ok(!scoped.rows.some(r => r.rel.startsWith('Docs')), 'a sibling folder is left out');
+    // A name that is a prefix of another must not drag it in.
+    write(L, 'Rush/other.txt', 'd');
+    const s2 = new Session();
+    await s2.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: { cancelled: false } });
+    const tight = s2.rows(0, 200, { scope: { rel: 'Rush' } });
+    ok(tight.rows.every(r => !r.rel.startsWith('Rushes')), '"Rush" does not also match "Rushes"');
+    await s.close(); await s2.close();
+  }
+
   // (e) The preferences carry a revision, so the value the old bug stored is
   //     cleared once instead of following the user around for ever.
   {
@@ -1448,6 +1478,119 @@ function testServers() {
   }
 }
 
+// ══ 19. NAS regression — 0.3.1 ════════════════════════════════════════════
+// Reported from a real run: mirror to a NAS, 0 files copied, "Stopped at the
+// first error". Two 0.2.5 changes combined into a job that could do nothing.
+async function testNasRegression() {
+  console.log('\n\n19. Recycle bin on a NAS (0.3.1)');
+
+  // A trash that refuses everything: what macOS does on most network shares,
+  // while NativeFs.supportsTrash() cheerfully answers "yes" for any local path.
+  const deadTrash = async () => false;
+  const liveTrash = (dir) => {
+    const bin = path.join(dir, '.trash');
+    return async (fsx, abs) => {
+      fs.mkdirSync(bin, { recursive: true });
+      fs.renameSync(abs, path.join(bin, path.basename(abs) + '-' + Math.random().toString(36).slice(2)));
+      return true;
+    };
+  };
+
+  // (a) The whole reported failure: deletions planned on a volume with no
+  //     working bin. It must be settled before the run, not discovered on the
+  //     first file — and NOTHING must have been touched.
+  {
+    const { L, R } = scratch();
+    write(L, 'keep.mov', 'data');
+    write(R, 'keep.mov', 'data');
+    write(R, 'stale/CACHE.DAT', 'x');
+    const { run, error } = await stepped(
+      makeJob(L, R, { sync: { variant: 'mirror', deletion: 'recycler', permanentFallback: false } }),
+      null, { trashItem: deadTrash });
+    ok(!run, 'the run refuses to start');
+    ok(error && /recycle bin does not work/i.test(error.message), 'saying the bin does not work there');
+    ok(error && error.message.includes(R), 'and naming the folder');
+    ok(error && /Delete permanently/i.test(error.message) && /delete anyway/i.test(error.message),
+       'and naming both settings that fix it, exactly as they read on screen');
+    ok(exists(R, 'stale/CACHE.DAT'), 'nothing was deleted');
+    ok(!exists(R, '.syncto.trash-probe'), 'and the probe left nothing behind');
+  }
+
+  // (b) The same job with a working bin runs normally — the check must not
+  //     block a NAS that does have one.
+  {
+    const { dir, L, R } = scratch();
+    write(L, 'keep.mov', 'data');
+    write(R, 'stale.mov', 'x');
+    const { run, error } = await stepped(
+      makeJob(L, R, { sync: { variant: 'mirror', deletion: 'recycler', permanentFallback: false } }),
+      null, { trashItem: liveTrash(dir) });
+    ok(!error, 'a working recycle bin is not blocked');
+    ok(run && run.counters.files === 1, 'and the copy happens');
+    ok(!exists(R, 'stale.mov'), 'with the deletion carried out');
+  }
+
+  // (c) Permanent deletion never needed a bin, so it must not be checked.
+  {
+    const { L, R } = scratch();
+    write(L, 'keep.mov', 'data');
+    write(R, 'stale.mov', 'x');
+    const { run, error } = await stepped(
+      makeJob(L, R, { sync: { variant: 'mirror', deletion: 'permanent' } }),
+      null, { trashItem: deadTrash });
+    ok(!error && run, 'permanent deletion runs without a recycle bin');
+    ok(!exists(R, 'stale.mov'), 'and removes the stray file');
+  }
+
+  // (d) A job with nothing to delete or replace is not blocked either: a bin
+  //     that does not work only matters when something is going to be lost.
+  {
+    const { L, R } = scratch();
+    write(L, 'new.mov', 'data');
+    const { run, error } = await stepped(
+      makeJob(L, R, { sync: { variant: 'mirror', deletion: 'recycler', permanentFallback: false } }),
+      null, { trashItem: deadTrash });
+    ok(!error, 'a pure copy is never blocked by the recycle bin');
+    ok(run && run.counters.files === 1, 'and it copies');
+  }
+
+  // (e) "Ignore errors" is on by default again. 0.2.5 made the setting real
+  //     and left it off, so one unreadable file meant a run that copied
+  //     nothing — the wrong trade for a backup tool.
+  {
+    const { L, R } = scratch();
+    write(L, 'a.mov', 'one'); write(L, 'b.mov', 'two'); write(L, 'c.mov', 'three');
+    const job = defaultJob();
+    job.left = L; job.right = R; job.name = 'test';
+    job.sync.variant = 'mirror'; job.sync.deletion = 'permanent';
+    job.sync.report.enabled = false; job.sync.retryCount = 0;
+    eq(job.sync.ignoreErrors, true, 'a new job carries on past a failure by default');
+    const res = await stepped(job, () => fs.rmSync(path.join(L, 'a.mov')));
+    ok(!res.run.stopped, 'so the run is not stopped by one missing file');
+    eq(res.run.counters.files, 2, 'and the healthy files are copied');
+  }
+
+  // (f) A job saved before the setting did anything carries a meaningless
+  //     `false`. Loading it must not arm "stop at the first error".
+  {
+    const { dir } = scratch();
+    const { loadJob } = require('../src/main/config');
+    const p = path.join(dir, 'old.syncto');
+    fs.writeFileSync(p, JSON.stringify({
+      format: 'syncto-job', pairs: [{ left: '/a', right: '/b' }],
+      sync: { variant: 'mirror', ignoreErrors: false },
+    }));
+    eq(loadJob(p).sync.ignoreErrors, true, 'an old job is not left with the dead default');
+
+    const q = path.join(dir, 'new.syncto');
+    fs.writeFileSync(q, JSON.stringify({
+      format: 'syncto-job', rev: 1, pairs: [{ left: '/a', right: '/b' }],
+      sync: { variant: 'mirror', ignoreErrors: false },
+    }));
+    eq(loadJob(q).sync.ignoreErrors, false, 'but a deliberate choice made since is kept');
+  }
+}
+
 // ══ Run ════════════════════════════════════════════════════════════════════
 (async function main() {
   console.log('syncto engine tests');
@@ -1471,6 +1614,7 @@ function testServers() {
     await testAuditFixes();
     await testOverviewAndShowEqual();
     testServers();
+    await testNasRegression();
   } catch (err) {
     failed++;
     failures.push('UNCAUGHT: ' + (err.stack || err.message));

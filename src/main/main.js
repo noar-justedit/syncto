@@ -500,6 +500,14 @@ ipcMain.handle('compare-cancel', () => { tokens.compare.cancelled = true; return
 
 ipcMain.handle('get-rows', (_, offset, limit, view) => session.rows(offset, limit, view));
 ipcMain.handle('get-overview', (_, view) => session.overview(view));
+
+// Asked by the confirmation dialog. Anything that would make the run refuse is
+// better said here, with the folders on screen and the settings one click
+// away, than as an error after a run that did nothing.
+ipcMain.handle('preflight', async (_, job) => {
+  try { return { ok: true, warnings: await session.preflight(job, { trashItem }) }; }
+  catch (err) { return { ok: false, error: err.message || String(err) }; }
+});
 ipcMain.handle('visible-indices', (_, view) => session.visibleIndices(view));
 ipcMain.handle('set-direction', (_, indices, dir) => session.setDirection(indices, dir));
 ipcMain.handle('set-active',    (_, indices, act) => session.setActive(indices, act));

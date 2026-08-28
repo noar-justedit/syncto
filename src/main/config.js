@@ -82,7 +82,13 @@ function defaultJob() {
       copyPermissions: false,
       retryCount     : 2,
       retryDelayMs   : 5000,
-      ignoreErrors   : false,
+      // On by default: a run works through what it can and lists the failures
+      // at the end. 0.2.5 made this setting real for the first time (it had
+      // been read nowhere) and left it off, which turned one unreadable file
+      // into a job that copied nothing — the wrong trade for a backup tool.
+      // Untick it for a run you are watching and want stopped at the first
+      // problem.
+      ignoreErrors   : true,
       report: {
         enabled: false, html: true, csv: false, json: false,
         folder : '',                    // empty -> Documents/syncto reports
@@ -369,6 +375,13 @@ function migrateJob(raw) {
       .map(p => ({ left: p.left || '', right: p.right || '' }));
     if (!raw.pairs.length) raw.pairs = [{ left: '', right: '' }];
   }
+  // Before 0.3.1 this flag was stored but never read, so a `false` in an old
+  // job is the old default, not a decision anybody made. Leaving it as-is
+  // would silently arm "stop at the first error" on every job written before
+  // the setting did anything. `rev` marks a job that has been through here.
+  if (raw && raw.sync && !raw.rev) raw.sync.ignoreErrors = true;
+  if (raw) raw.rev = 1;
+
   if (raw && raw.sync) {
     // The Pro level was removed: without this coercion algoFor('pro') returns
     // null and an old "pro" job silently degrades to a FAST copy — the exact

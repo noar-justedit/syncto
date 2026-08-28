@@ -122,7 +122,11 @@ class Session {
     // user's back — which then got saved to the preferences and came back
     // ticked at every launch from then on.
     const askedForEqual = v.onlyOperation === OP.NONE;
+    // Scoped to one folder, from a click in the overview: that folder and
+    // everything under it, nothing else.
+    const scope = v.scope && v.scope.rel ? v.scope.rel : '';
     for (const n of this.nodes) {
+      if (scope && n.rel !== scope && !n.rel.startsWith(scope + '/')) continue;
       if (!v.showEqual && !askedForEqual && n.op === OP.NONE) continue;
       if (!v.showExcluded && !n.active) continue;
       if (v.onlyCategory && n.cat !== v.onlyCategory) continue;
@@ -282,6 +286,26 @@ class Session {
     rows.forEach(g => { g.pct = Math.round((g.bytes / total) * 100); });
     rows.sort((a, b) => b.bytes - a.bytes);
     return { rows, totalBytes: total === 1 ? 0 : total, identical: rows.length === 0 };
+  }
+
+  // Everything that would make the run refuse, checked WITHOUT running it, so
+  // the confirmation dialog can say it while the user still has a choice.
+  // Returns [] when the job is good to go.
+  async preflight(job, opts) {
+    if (!this.nodes.length) return [];
+    const runner = new SyncRunner({
+      left: this.left, right: this.right,
+      nodes: this.nodes,
+      config: Object.assign({}, job.sync),
+      trashItem: (opts || {}).trashItem,
+      token: { cancelled: false },
+    });
+    try {
+      await runner.preflight(runner.buildPlan());
+      return [];
+    } catch (err) {
+      return [{ message: err.message, preflight: !!err.preflight }];
+    }
   }
 
   // ── Synchronize ──────────────────────────────────────────────────────────
@@ -577,10 +601,19 @@ class MultiSession {
 
   // One header pseudo-row per pair (only when there are several), followed by
   // that pair's visible rows carrying globalized indices.
+  // A scope names ONE pair's folder, so the other pairs drop out entirely —
+  // otherwise clicking "Rushes" in the overview would also show a "Rushes"
+  // that happens to exist in another pair.
+  _inScope(p, view) {
+    const sc = view && view.scope;
+    return !sc || sc.p === undefined || sc.p === null || sc.p === p;
+  }
+
   rows(offset, limit, view) {
     const multi = this.sessions.length > 1;
     const all = [];
     for (let p = 0; p < this.sessions.length; p++) {
+      if (!this._inScope(p, view)) continue;
       const s = this.sessions[p];
       const vis = s._visibleIndices(view);
       if (multi) all.push({ hdr: true, p });
@@ -636,6 +669,7 @@ class MultiSession {
   visibleIndices(view) {
     const out = [];
     for (let p = 0; p < this.sessions.length; p++) {
+      if (!this._inScope(p, view)) continue;
       for (const i of this.sessions[p]._visibleIndices(view)) out.push(p * PAIR_BASE + i);
     }
     return out;
@@ -646,17 +680,41 @@ class MultiSession {
     let total = 0;
     for (let p = 0; p < this.sessions.length; p++) {
       const ov = this.sessions[p].overview(view);
-      for (const g of ov.rows) {
+      // Biggest first WITHIN a pair, and pairs kept in their own order. Sorting
+      // every pair's folders into one list by size interleaved them with no
+      // visible clue where each came from, which read as a random jumble of
+      // root folders and sub-folders.
+      ov.rows.sort((a, b) => b.bytes - a.bytes);
+      ov.rows.forEach((g, i) => {
         g.idx = g.idx >= 0 ? p * PAIR_BASE + g.idx : -1;
+        g.pairIdx = p;
         g.pair = p + 1;
         g.pairLabel = pairLabel(this.pairs[p]);
+        g.first = i === 0;               // the renderer puts a heading here
         rows.push(g);
-      }
+      });
       total += ov.totalBytes;
     }
     rows.forEach(g => { g.pct = total > 0 ? Math.round((g.bytes / (total || 1)) * 100) : 0; });
-    rows.sort((a, b) => b.bytes - a.bytes);
     return { rows, totalBytes: total, pairs: this.sessions.length, identical: rows.length === 0 };
+  }
+
+  // Same check as Session.preflight, across every pair, before anything runs.
+  async preflight(job, opts) {
+    const out = [];
+    for (let p = 0; p < this.sessions.length; p++) {
+      const pairJob = Object.assign({}, job, {
+        left: this.pairs[p].left, right: this.pairs[p].right,
+      });
+      const w = await this.sessions[p].preflight(pairJob, opts);
+      for (const x of w) {
+        out.push(Object.assign({}, x, {
+          pair: p + 1,
+          label: this.sessions.length > 1 ? pairLabel(this.pairs[p]) : '',
+        }));
+      }
+    }
+    return out;
   }
 
   async sync(job, opts) {
