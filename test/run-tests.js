@@ -1591,6 +1591,119 @@ async function testNasRegression() {
   }
 }
 
+
+// ══ 20. After the run, and phone notifications — 0.4.0 ════════════════════
+function testAfterAndNtfy() {
+  console.log('\n\n20. After the run and ntfy (0.4.0)');
+  const power  = require('../src/main/power');
+  const notify = require('../src/main/notify');
+  const { Prefs } = require('../src/main/config');
+
+  // (a) The right command on the right system. Asserted rather than run —
+  //     a test suite that puts the machine to sleep is not a test suite.
+  {
+    eq(power.commandFor('sleep', 'darwin').cmd, 'pmset', 'macOS sleeps with pmset');
+    eq(power.commandFor('sleep', 'darwin').args, ['sleepnow'], 'and asks for it now');
+    eq(power.commandFor('sleep', 'win32').cmd, 'rundll32.exe', 'Windows sleeps through powrprof');
+    eq(power.commandFor('shutdown', 'win32').args, ['/s', '/t', '0'], 'and shuts down with no delay');
+    // Not `shutdown -h`, which needs root: this is the Apple-menu request, so
+    // an app with unsaved work can still refuse.
+    ok(/System Events/.test(power.commandFor('shutdown', 'darwin').args[1]),
+       'macOS shuts down through System Events, not as root');
+    eq(power.commandFor('none', 'darwin'), null, 'doing nothing has no command');
+    eq(power.commandFor('quit', 'darwin'), null, 'and quitting is the app is own business');
+    ok(!power.ACTIONS.includes('hibernate'),
+       'there is no hibernate action — macOS has no such command');
+  }
+
+  // (b) The action must NOT fire on a run whose result the user has to read.
+  //     The machine would take the summary down with it.
+  {
+    const clean = { errors: [], counters: { errors: 0 } };
+    const cases = [
+      [{ errors: [{ message: 'x' }], counters: { errors: 1 } }, 'an error'],
+      [{ errors: [], counters: { errors: 0 }, cancelled: true }, 'a cancellation'],
+      [{ errors: [], counters: { errors: 0 }, stopped: true }, 'a stop at the first error'],
+      [{ errors: [], counters: { errors: 0 }, lockLost: 'x' }, 'a lost folder lock'],
+    ];
+    // runWasClean lives in the renderer; the rule is asserted here on the same
+    // shape the renderer receives, so a change to the result shape breaks it.
+    const runWasClean = r => !r.cancelled && !r.stopped && !r.lockLost &&
+      !(r.errors && r.errors.length) && !(r.counters && r.counters.errors);
+    ok(runWasClean(clean), 'a clean run may trigger the action');
+    for (const [res, why] of cases) ok(!runWasClean(res), why + ' blocks the action');
+  }
+
+  // (c) Title, Tags and Priority are HTTP HEADER values. One accent or emoji
+  //     throws ERR_INVALID_CHAR and loses the WHOLE notification, body
+  //     included — the trap ingesto was bitten by.
+  {
+    eq(notify.headerSafe('Sauvegarde terminée ✓'), 'Sauvegarde termine', 'the title is stripped to ASCII');
+    eq(notify.tagsSafe('white_check_mark'), 'white_check_mark', 'a plain tag passes through');
+    eq(notify.tagsSafe('✅,warning'), 'warning', 'an emoji tag is dropped, the rest survives');
+    eq(notify.tagsSafe(',,x,,'), 'x', 'stray commas are trimmed');
+  }
+
+  // (d) The message built for a finished run.
+  {
+    const okRun = { counters: { files: 12, bytes: 3.4e9, deleted: 2 }, errors: [],
+                    durationMs: 95000, verified: 12 };
+    const m = notify.forRun(okRun, 'TNAS');
+    ok(/TNAS/.test(m.title) && /done/.test(m.title), 'a clean run is titled with the job name');
+    ok(/12 files/.test(m.message) && /3.40 GB/.test(m.message), 'with what was copied');
+    ok(/1m 35s/.test(m.message), 'and how long it took');
+    eq(m.tags, 'white_check_mark', 'tagged as a success');
+
+    const badRun = { counters: { files: 3, bytes: 100 },
+                     errors: [{ rel: 'a.mov', message: 'no recycle bin' }], durationMs: 1000 };
+    const b = notify.forRun(badRun, 'TNAS');
+    ok(/1 error/.test(b.title), 'a failed run says so in the title, where a phone shows it');
+    ok(/a.mov/.test(b.message), 'and names the first thing that failed');
+    eq(b.tags, 'warning', 'tagged as a problem');
+    eq(b.priority, 4, 'and raised in priority so the phone actually rings');
+
+    const cancelled = { counters: {}, errors: [], cancelled: true, durationMs: 0 };
+    ok(/cancelled/i.test(notify.forRun(cancelled, 'X').title), 'a cancelled run is not reported as done');
+  }
+
+  // (e) An empty topic must not produce a POST to the server root.
+  {
+    return notify.send({ server: 'https://ntfy.sh', topic: '' }).then(r => {
+      ok(!r.ok && /topic/i.test(r.error), 'no topic, no request');
+      return notify.send({ server: 'ftp://nope', topic: 't' });
+    }).then(r => {
+      ok(!r.ok && /http/i.test(r.error), 'and the server address must be http(s)');
+    });
+  }
+}
+
+function testNtfySecrets() {
+  console.log('\n\n21. ntfy token storage (0.4.0)');
+  const { Prefs } = require('../src/main/config');
+  const { dir } = scratch();
+  const p = new Prefs(dir);
+  p.load();
+
+  // The access token is a credential like any other: it goes through the OS
+  // credential store, never into the file in the clear.
+  p.saveNtfy({ enabled: true, server: 'https://ntfy.example', topic: 'syncto-abc', token: 'tk_secret_value' });
+  const onDisk = fs.readFileSync(path.join(dir, 'preferences.json'), 'utf8');
+  ok(!onDisk.includes('tk_secret_value'), 'the ntfy token never reaches the file in the clear');
+  ok(onDisk.includes('syncto-abc'), 'while the topic is stored normally');
+
+  const ui = p.ntfyForUi();
+  ok(!('token' in ui) && !('tokenEnc' in ui), 'and the settings panel is never handed the token');
+  eq(ui.topic, 'syncto-abc', 'it gets the topic');
+  eq(ui.enabled, true, 'and the switch state');
+
+  // Saving the panel again without retyping the token must not wipe it.
+  p.data.ntfy.tokenEnc = 'PRETEND-CIPHERTEXT';
+  p.saveNtfy({ topic: 'syncto-def' });
+  eq(p.data.ntfy.tokenEnc, 'PRETEND-CIPHERTEXT', 'an untouched token box leaves the stored token alone');
+  p.saveNtfy({ token: '' });
+  eq(p.data.ntfy.tokenEnc, '', 'and clearing it explicitly does clear it');
+}
+
 // ══ Run ════════════════════════════════════════════════════════════════════
 (async function main() {
   console.log('syncto engine tests');
@@ -1615,6 +1728,8 @@ async function testNasRegression() {
     await testOverviewAndShowEqual();
     testServers();
     await testNasRegression();
+    await testAfterAndNtfy();
+    testNtfySecrets();
   } catch (err) {
     failed++;
     failures.push('UNCAUGHT: ' + (err.stack || err.message));

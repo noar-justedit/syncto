@@ -191,6 +191,7 @@ function jobToUi() {
   $('st-retry').value      = j.sync.retryCount;
   $('st-retry-delay').value= Math.round((j.sync.retryDelayMs || 5000) / 1000);
   $('st-ignore').checked   = !!j.sync.ignoreErrors;
+  $('st-after').value     = j.sync.afterSync || 'none';
 
   $('st-rep').checked      = !!j.sync.report.enabled;
   $('st-rep-html').checked = !!j.sync.report.html;
@@ -238,6 +239,7 @@ function uiToJob() {
   j.sync.retryCount        = Math.max(0, parseInt($('st-retry').value, 10) || 0);
   j.sync.retryDelayMs      = Math.max(1, parseInt($('st-retry-delay').value, 10) || 5) * 1000;
   j.sync.ignoreErrors      = $('st-ignore').checked;
+  j.sync.afterSync         = $('st-after').value;
 
   j.sync.report.enabled = $('st-rep').checked;
   j.sync.report.html    = $('st-rep-html').checked;
@@ -708,6 +710,8 @@ async function doSync() {
   if (!res.ok) { showError('Synchronization failed', res.error); return; }
   showSummary(res);
   await doCompareQuiet();
+  // Last, so the summary is already on screen behind the countdown.
+  await afterRun(res);
 }
 
 // Re-compare after a run so the grid reflects reality without a full re-render
@@ -1196,6 +1200,8 @@ function bind() {
         // Closing this one drops the SSH connection — hiding the window and
         // leaving the session open would hold a slot on the server for nothing.
         'ov-server'  : 'srv-cancel',
+        // Escape is the safe direction here: it calls off the shutdown.
+        'ov-after'   : 'after-cancel',
       };
       for (const ov of document.querySelectorAll('.ov.open')) {
         const btn = ESC_CLOSE[ov.id] && document.getElementById(ESC_CLOSE[ov.id]);
@@ -1205,6 +1211,7 @@ function bind() {
   });
 
   bindServerDialog();
+  bindAfterAndNtfy();
   installTooltips();
 }
 
@@ -1517,6 +1524,7 @@ async function autoRun() {
     `auto-sync ${stamp()}: ${bits.length ? bits.join(', ') : 'done'}${res.errors.length ? ` — ${res.errors.length} ERROR(S)` : ''}`;
   if (res.errors.length) showSummary(res);   // errors deserve a face
   await doCompareQuiet();
+  await afterRun(res);
 }
 
 // ── Resizable panels ───────────────────────────────────────────────────────
@@ -1651,6 +1659,127 @@ function showUpdateNotice({ version, url }) {
   ov.querySelector('#upd-later').onclick = dismiss;
   ov.querySelector('#upd-go').onclick = () => { API.openExternal(url); dismiss(); };
   ov.onclick = e => { if (e.target === ov) dismiss(); };
+}
+
+// ── After the run ──────────────────────────────────────────────────────────
+// A machine that shuts itself down takes the summary with it, so the action
+// only fires on a run with nothing to read: no errors, not cancelled, lock
+// never lost. And even then, thirty seconds with a Cancel button in the way.
+const AFTER_SECONDS = 30;
+const afterState = { timer: null, left: 0, action: 'none' };
+
+function runWasClean(res) {
+  return !res.cancelled && !res.stopped && !res.lockLost &&
+         !(res.errors && res.errors.length) &&
+         !(res.counters && res.counters.errors);
+}
+
+function stopCountdown() {
+  if (afterState.timer) { clearInterval(afterState.timer); afterState.timer = null; }
+  $('ov-after').classList.remove('open');
+}
+
+async function fireAfterAction() {
+  stopCountdown();
+  const res = await API.afterSync(afterState.action);
+  if (res && !res.ok && res.error) showError('The machine did not respond', res.error);
+}
+
+function startAfterCountdown(action) {
+  const WHAT = {
+    quit    : ['syncto will quit',       'The synchronization finished with no errors.'],
+    sleep   : ['This machine will sleep', 'The synchronization finished with no errors.'],
+    shutdown: ['This machine will shut down', 'The synchronization finished with no errors.'],
+  };
+  const w = WHAT[action];
+  if (!w) return;
+  afterState.action = action;
+  afterState.left = AFTER_SECONDS;
+  $('after-what').textContent = w[0];
+  $('after-sub').textContent  = w[1];
+  $('after-count').textContent = String(afterState.left);
+  $('ov-after').classList.add('open');
+  afterState.timer = setInterval(() => {
+    afterState.left--;
+    $('after-count').textContent = String(Math.max(0, afterState.left));
+    if (afterState.left <= 0) fireAfterAction();
+  }, 1000);
+}
+
+// Called once a run is over, before anything else can grab attention.
+async function afterRun(res) {
+  // The notification goes out whatever happened — that is the point of being
+  // told on a phone. It never blocks and never fails the run.
+  API.ntfyRun(res, state.job.name).catch(() => {});
+
+  const action = (state.job.sync && state.job.sync.afterSync) || 'none';
+  if (action === 'none') return;
+  if (!runWasClean(res)) {
+    $('status-note').textContent =
+      `“${action === 'quit' ? 'Quit syncto' : action === 'sleep' ? 'Sleep' : 'Shut down'}” was skipped: ` +
+      `the run did not finish cleanly.`;
+    return;
+  }
+  // Auto-sync and shutting down cannot both be true. The machine wins.
+  if (isAutoOn()) autoStop();
+  startAfterCountdown(action);
+}
+
+// ntfy settings live in the preferences, not in the job: a phone belongs to a
+// person and a machine, not to a folder pair shared inside a .syncto file.
+async function loadNtfyUi() {
+  const n = await API.ntfyGet();
+  $('st-ntfy-en').checked      = n.enabled;
+  $('st-ntfy-server').value    = n.server;
+  $('st-ntfy-topic').value     = n.topic;
+  $('st-ntfy-problem').checked = n.onlyOnProblem;
+  // The token itself never comes back here. Only whether one is stored.
+  $('st-ntfy-token').value = '';
+  $('st-ntfy-token').placeholder = n.hasToken
+    ? 'stored — type a new one to replace it'
+    : 'only for a server that needs one';
+}
+
+function ntfyPatchFromUi(includeToken) {
+  const p = {
+    enabled: $('st-ntfy-en').checked,
+    server : $('st-ntfy-server').value.trim(),
+    topic  : $('st-ntfy-topic').value.trim(),
+    onlyOnProblem: $('st-ntfy-problem').checked,
+  };
+  // An empty box means "leave what is stored alone", not "erase it" — the
+  // panel never held the token in the first place.
+  const t = $('st-ntfy-token').value;
+  if (includeToken && t) p.token = t;
+  return p;
+}
+
+function bindAfterAndNtfy() {
+  $('after-cancel').addEventListener('click', () => {
+    stopCountdown();
+    $('status-note').textContent = 'Cancelled — the machine was left alone.';
+  });
+  $('after-now').addEventListener('click', fireAfterAction);
+
+  for (const id of ['st-ntfy-en', 'st-ntfy-server', 'st-ntfy-topic', 'st-ntfy-problem']) {
+    $(id).addEventListener('change', () => API.ntfySave(ntfyPatchFromUi(false)));
+  }
+  $('st-ntfy-token').addEventListener('change', () => {
+    if ($('st-ntfy-token').value) API.ntfySave(ntfyPatchFromUi(true));
+  });
+
+  $('ntfy-site').addEventListener('click', () => API.openExternal('https://ntfy.sh/'));
+
+  $('st-ntfy-test').addEventListener('click', async () => {
+    const res = $('st-ntfy-res');
+    const topic = $('st-ntfy-topic').value.trim();
+    if (!topic) { res.textContent = 'Enter a topic first.'; res.style.color = 'var(--orange)'; return; }
+    res.textContent = 'Sending…'; res.style.color = 'var(--text3)';
+    await API.ntfySave(ntfyPatchFromUi(true));
+    const r = await API.ntfyTest(ntfyPatchFromUi(true));
+    if (r && r.ok) { res.textContent = '✓ Sent — check your phone.'; res.style.color = 'var(--green)'; }
+    else { res.textContent = '✗ ' + ((r && r.error) || 'Failed'); res.style.color = 'var(--red)'; }
+  });
 }
 
 // ── Connect to a server ────────────────────────────────────────────────────
@@ -2018,6 +2147,7 @@ function installTooltips() {
   bind();
   installSplitters(prefs.ui || {});
   renderRecent();
+  await loadNtfyUi();
   onPathChanged();
   document.title = `syncto ${state.version}`;
   $('footer-ver').textContent = 'v' + state.version;

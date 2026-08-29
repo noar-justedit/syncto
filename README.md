@@ -232,6 +232,28 @@ local drive. SFTP has no trash and no inode information, so use permanent
 deletion there, and expect renamed files to be re-copied rather than detected
 as moves.
 
+### When it finishes
+
+**Settings › After the synchronization** offers *Do nothing*, *Quit syncto*,
+*Sleep* and *Shut down*. The choice is saved with the job.
+
+It only fires on a clean run — an error, a cancellation or a lost folder lock
+leaves the machine on, so you can read what happened. And a 30-second countdown
+with a **Cancel** button always comes first.
+
+There is no hibernate entry on purpose: macOS has no such command, and on
+Windows it only works when hibernation is enabled, which it usually is not.
+
+**Settings › Phone notifications** sends a message through
+[ntfy](https://ntfy.sh) when a run ends — the job name, what was copied, how
+long it took, and the first error if there was one. Set a server (the public
+one or your own), a topic, and scan the QR code to install the app. A problem
+raises the priority so the phone actually rings.
+
+On the public server the topic *is* the password: anyone who knows it can read
+your notifications, so make it long. An access token, for a server that needs
+one, is stored in the system credential store like every other secret here.
+
 ### When something fails
 
 **Ignore errors** (Settings) decides what happens after the first failure. Off

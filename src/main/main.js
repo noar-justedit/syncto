@@ -94,6 +94,8 @@ const { FsPool } = require('./fs/afs');
 const { Prefs, defaultJob, loadJob, saveJob, jobNameFromPath, JOB_EXT, credentialMap } = require('./config');
 const { RemoteBrowser } = require('./fs/browse');
 const secrets = require('./secrets');
+const power  = require('./power');
+const notify = require('./notify');
 
 const IS_MAC = process.platform === 'darwin';
 const DEV    = process.argv.includes('--dev');
@@ -365,6 +367,45 @@ ipcMain.handle('browse-key', async () => {
     defaultPath: path.join(app.getPath('home'), '.ssh'),
   });
   return (res.canceled || !res.filePaths.length) ? null : res.filePaths[0];
+});
+
+// ── IPC: after the run ─────────────────────────────────────────────────────
+// The renderer runs the countdown (it owns the Cancel button); this only
+// carries out the action once the countdown has expired.
+ipcMain.handle('after-sync', async (_, action) => {
+  const res = await power.run(action, { onQuit: () => setTimeout(() => app.quit(), 200) });
+  return res;
+});
+
+// ── IPC: phone notifications (ntfy) ────────────────────────────────────────
+ipcMain.handle('ntfy-get',  () => prefs.ntfyForUi());
+ipcMain.handle('ntfy-save', (_, patch) => prefs.saveNtfy(patch || {}));
+
+// The token comes from the stored config, not from the window — the panel
+// never holds it. A token being typed right now is passed in `patch.token`.
+ipcMain.handle('ntfy-test', async (_, patch) => {
+  const cfg = prefs.ntfyConfig();
+  return notify.send({
+    server: (patch && patch.server) || cfg.server,
+    topic : (patch && patch.topic)  || cfg.topic,
+    token : (patch && patch.token)  || cfg.token,
+    title : 'syncto test',
+    message: 'Test notification from syncto.',
+    tags  : 'bell',
+  });
+});
+
+// Sent after a run. Fire and forget, always resolves: a notification must
+// never be able to fail a synchronization.
+ipcMain.handle('ntfy-run', async (_, res, jobName) => {
+  const cfg = prefs.ntfyConfig();
+  if (!cfg.enabled || !cfg.topic) return { ok: false, skipped: true };
+  const clean = !res.cancelled && !res.lockLost && !(res.errors || []).length;
+  if (cfg.onlyOnProblem && clean) return { ok: false, skipped: true };
+  const msg = notify.forRun(res, jobName);
+  return notify.sendWithRetry(Object.assign({
+    server: cfg.server, topic: cfg.topic, token: cfg.token,
+  }, msg));
 });
 
 ipcMain.handle('reveal-path',  (_, p) => { try { shell.showItemInFolder(p); } catch (_) {} });

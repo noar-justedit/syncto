@@ -4,6 +4,74 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.4.0] — 2026-08-28
+
+Two ways of walking away from a long run: let the machine finish and switch
+itself off, and be told on your phone when it is done.
+
+Nothing in the synchronization engine changed. Jobs, databases and checksum
+lists carry over untouched.
+
+### Added — after the synchronization
+
+- **Do nothing · Quit syncto · Sleep · Shut down**, in Settings. The action is
+  saved with the job, so an overnight backup can be set once.
+- **It only fires on a clean run.** An error, a cancellation, a stop, or a lost
+  folder lock leaves the machine alone — otherwise the summary you need to read
+  disappears with it. When it is skipped, the status line says so.
+- **A 30-second countdown with a Cancel button** comes first, every time, with
+  a *Do it now* if you are watching and impatient. Escape cancels. This is the
+  part FreeFileSync does not have, and the reason its shutdown option is the
+  one people ask to turn off.
+- Auto-sync is disarmed when the action fires: a machine that shuts down is not
+  going to run the next cycle.
+- **There is no hibernate entry, on purpose.** macOS has no such command —
+  `hibernatemode` describes what the Mac does *during* sleep, it is not
+  something you can ask for — and on Windows `shutdown /h` only works when
+  hibernation is enabled, which it is not by default on machines with fast
+  startup. An entry that silently does something else on half the machines is
+  worse than no entry. FreeFileSync draws the same line.
+- Nothing here needs an administrator password, and nothing forces applications
+  to quit: on macOS the shutdown is the same request the Apple menu makes, so
+  another app with unsaved work can still stop it.
+
+### Added — phone notifications (ntfy)
+
+The same mechanism as ingesto, deliberately: a plain POST to
+`<server>/<topic>`. No account, no SDK, no dependency, and whatever is
+subscribed to that topic — the free ntfy app on a phone, a browser tab —
+receives it.
+
+- Settings carry the **server** (`https://ntfy.sh` by default, or your own),
+  the **topic**, an optional **access token** for a server that needs one, a
+  **Send a test** button, and a QR code to install the app.
+- A notification goes out **after every run**, with the job name in the title,
+  what was copied, how long it took, and the first error if there was one.
+  Failures are raised in priority so the phone actually rings, and tagged so
+  the app shows the right icon.
+- **Only when there is a problem** is a switch, for people who only want to
+  hear from a backup when it goes wrong.
+- Sending never blocks and never fails a run: one retry two seconds later, then
+  silence.
+- **The access token is stored like every other secret in syncto** — encrypted
+  through the OS credential store, never readable on disk, and never handed to
+  the window, which only learns that one exists.
+- Title, Tags and Priority are stripped to printable ASCII before they are
+  sent. They are HTTP *header* values, where a single accent or emoji throws
+  `ERR_INVALID_CHAR` and loses the entire notification, body included. The
+  message body keeps everything — it travels as UTF-8 in the request body.
+
+**Worth knowing about the public server:** on `ntfy.sh` the topic *is* the
+password. Anyone who guesses it can read your notifications, so make it long
+and unguessable. The settings panel says so.
+
+### Tests
+
+327 checks, up from 292. The platform commands are asserted rather than run —
+a test suite that puts the machine to sleep is not a test suite.
+
+---
+
 ## [0.3.1] — 2026-08-28
 
 A job that could not run at all against a NAS, and an overview panel nobody

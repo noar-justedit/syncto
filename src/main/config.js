@@ -89,6 +89,9 @@ function defaultJob() {
       // Untick it for a run you are watching and want stopped at the first
       // problem.
       ignoreErrors   : true,
+      // What to do once the run is over: none | quit | sleep | shutdown.
+      // Only ever fires on a clean run — see the renderer's countdown.
+      afterSync      : 'none',
       report: {
         enabled: false, html: true, csv: false, json: false,
         folder : '',                    // empty -> Documents/syncto reports
@@ -117,6 +120,9 @@ function defaultPrefs() {
     // readable password is ever written to this file.
     // { id, name, host, port, username, keyPath, savePassword, passwordEnc, passphraseEnc }
     servers: [],
+    // Phone notifications, same mechanism as ingesto. The access token is
+    // ciphertext from the OS credential store, like every other secret here.
+    ntfy: { enabled: false, server: 'https://ntfy.sh', topic: '', tokenEnc: '', onlyOnProblem: false },
   };
 }
 
@@ -342,11 +348,61 @@ class Prefs {
     this.save();
     return this.listServers();
   }
+
+  // ── ntfy ─────────────────────────────────────────────────────────────────
+  // What the settings panel is allowed to see: everything except the token,
+  // which it only ever learns the existence of.
+  ntfyForUi() {
+    const n = this.data.ntfy || {};
+    return {
+      enabled: !!n.enabled,
+      server : n.server || 'https://ntfy.sh',
+      topic  : n.topic || '',
+      hasToken: !!n.tokenEnc,
+      onlyOnProblem: !!n.onlyOnProblem,
+    };
+  }
+
+  // Decrypted, for an immediate send. Stays in the main process.
+  ntfyConfig() {
+    const n = this.data.ntfy || {};
+    return {
+      enabled: !!n.enabled,
+      server : n.server || 'https://ntfy.sh',
+      topic  : n.topic || '',
+      token  : secrets.decrypt(n.tokenEnc),
+      onlyOnProblem: !!n.onlyOnProblem,
+    };
+  }
+
+  // patch may carry `token`; it is encrypted here and never stored readable.
+  // An empty string clears it, `undefined` leaves it alone — so re-saving the
+  // panel without retyping the token does not wipe it.
+  saveNtfy(patch) {
+    const n = Object.assign({}, this.data.ntfy);
+    if (patch.enabled !== undefined) n.enabled = !!patch.enabled;
+    if (patch.server  !== undefined) n.server  = String(patch.server || '').trim() || 'https://ntfy.sh';
+    if (patch.topic   !== undefined) n.topic   = String(patch.topic || '').trim();
+    if (patch.onlyOnProblem !== undefined) n.onlyOnProblem = !!patch.onlyOnProblem;
+    if (patch.token !== undefined) {
+      n.tokenEnc = patch.token ? (secrets.encrypt(patch.token) || '') : '';
+    }
+    this.data.ntfy = n;
+    this.save();
+    return this.ntfyForUi();
+  }
 }
 
-// No `password` or `passphrase` key survives a write, whatever put it there.
+// No `password`, `passphrase` or ntfy `token` key survives a write, whatever
+// put it there.
 function scrubSecrets(data) {
-  if (!data || !Array.isArray(data.servers)) return;
+  if (!data) return;
+  if (data.ntfy && typeof data.ntfy === 'object' && data.ntfy.token) {
+    const enc = secrets.encrypt(data.ntfy.token);
+    if (enc) data.ntfy.tokenEnc = enc;
+    delete data.ntfy.token;
+  }
+  if (!Array.isArray(data.servers)) return;
   for (const s of data.servers) {
     if (!s || typeof s !== 'object') continue;
     if (s.password) {

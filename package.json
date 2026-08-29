@@ -1,6 +1,6 @@
 {
   "name": "syncto",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Folder comparison and synchronization for video professionals",
   "main": "src/main/main.js",
   "author": "Just Edit <contact@just-edit.fr>",

@@ -39,6 +39,14 @@ const api = {
   getOverview: (view)    => ipcRenderer.invoke('get-overview', view),
   preflight  : (job)     => ipcRenderer.invoke('preflight', job),
 
+  // After the run, and phone notifications. `ntfyGet` never returns the
+  // access token — only whether one is stored.
+  afterSync : (action)      => ipcRenderer.invoke('after-sync', action),
+  ntfyGet   : ()            => ipcRenderer.invoke('ntfy-get'),
+  ntfySave  : (patch)       => ipcRenderer.invoke('ntfy-save', patch),
+  ntfyTest  : (patch)       => ipcRenderer.invoke('ntfy-test', patch),
+  ntfyRun   : (res, name)   => ipcRenderer.invoke('ntfy-run', res, name),
+
   // Connect-to-a-server window. No method here ever returns a password: the
   // renderer learns that one is remembered, never what it is.
   serverListSaved : ()            => ipcRenderer.invoke('server-list-saved'),
