@@ -4,6 +4,264 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.5.3] — 2026-08-31
+
+One defect, reported from a real backup: every folder on an HFS+ backup volume
+refused to be removed, run after run, with `ENOTEMPTY: directory not empty` on a
+folder Finder showed as empty. Fixed, along with the two other situations that
+produced that same unreadable error.
+
+### Fixed
+
+- **A folder holding `System Volume Information` could never be removed.** That
+  name is on the list syncto always ignores, so the comparison did not see it
+  and the folder looked empty — but the routine that empties a folder before
+  removing it only ever unlinked **files**. A directory with that name was
+  therefore invisible to one half of the code and immovable by the other, for
+  ever. Same trap for `.Spotlight-V100`, `.fseventsd` and `.TemporaryItems`.
+  These folders are now taken with their parent: their contents belong to
+  Windows or to macOS, never to the user, and the volume recreates them on the
+  spot if it still wants them. Removal is recursive with a depth limit.
+- **`.Trashes` and `$RECYCLE.BIN` are deliberately not swept.** They hold files
+  somebody deleted and may want back, so a folder containing one is still
+  refused — with an explanation rather than an error code.
+- **`ENOTEMPTY: directory not empty` is gone from the interface.** What blocks a
+  removal is now named: *"The folder could not be removed: it still contains
+  "notes.bak". Those items are outside this synchronization — excluded by a
+  filter, a symbolic link, or the volume's own recycle bin — so syncto will not
+  delete them."* This covers the two other cases that produced the same opaque
+  message: a file hidden by an exclusion filter, and a symbolic link (excluded
+  from the comparison by default).
+
+### Changed
+
+- `.DocumentRevisions-V100` joins the always-ignored names. macOS version
+  history is not something a backup should carry.
+
+### Tests
+
+15 new assertions, 8 of which fail on 0.5.2. The engine suite goes from 399 to
+**414 checks**.
+
+---
+
+## [0.5.2] — 2026-08-31
+
+A full audit of the code, and the fixes it produced. No new feature: 32 defects
+found by reading every file, each one covered by a regression test that fails on
+0.5.1. The engine suite goes from 356 to **399 checks**.
+
+### Fixed — data safety
+
+- **A missing drive could still lead to a mass deletion.** The guard that
+  refuses a run when one side's root folder is gone ran *after* the folder
+  locks were taken — and taking a lock creates the folder if it is not there.
+  So the first attempt was refused, the mount point was created anyway, and the
+  *next* comparison saw a legitimately empty folder and planned to delete the
+  whole healthy side for real. The check now runs before anything is created.
+- **A retry could bury the only good version.** With versioning on, a failed
+  attempt archived the target, left a truncated fragment behind, and the retry
+  archived *that* fragment over the version it had just put aside — every
+  revision path in a run shares one timestamp. A file is now archived at most
+  once per run.
+- **A folder held back by a filtered file lost its checksum list.** Removing a
+  folder swept its leftovers first and called `rmdir` afterwards. When the
+  folder was not going away, `syncto-checksums.txt` had already been deleted
+  for nothing, outside any deletion policy. `rmdir` is tried first now, and the
+  sweep only runs when leftovers are all that stands in the way.
+- **A move deleted the source without checking the copy.** Every other copy
+  path verifies the size before committing; the one that then *unlinks* the
+  original did not.
+- **Two-way sync fell into a conflict it could never leave.** When the target
+  refused to take the source's date — an SFTP server without `SETSTAT`, a FAT
+  volume, or simply "preserve dates" off — the two recorded dates differed and
+  the next run called it "both sides have changed". Conflicts are skipped, a
+  skip leaves the database untouched, so the same conflict came back for ever.
+  Entries written by a run of syncto's own are now marked as such.
+- **A lost lock no longer writes its database over the new owner's.** Losing
+  the lock mid-run means another machine owns those folders and may already
+  have recorded its own state there.
+- **A frozen network share went unnoticed.** The heartbeat counted failed
+  writes, and a frozen mount does not fail — it blocks, for ever, so the
+  counter stayed at zero while the lock file stopped growing and another
+  machine legitimately took the folder. It now measures elapsed time since the
+  last beat that actually landed.
+- **A NAS with one stale empty folder to drop refused to run at all.** The
+  recycle-bin preflight demanded a working bin for folder removals, which never
+  use the bin.
+- **Beyond a million items in one pair, ticking a row changed another pair's
+  file.** The grid's global index wrapped. It now has a billion per pair, and
+  an index it cannot decode acts on nothing.
+- **Windows long paths were only protected at the root.** The root is usually
+  short (`D:\Backup`); it is the tree *under* it that runs past 260
+  characters. Every path built below the root now carries the prefix.
+
+### Fixed — secrets
+
+- **`sftp://user:password@host/folder` typed into a folder field is no longer
+  stored as typed.** It was a legal path, so people used it — and it landed in
+  `preferences.json`, in the `.syncto` file handed to a colleague, in reports,
+  and in the phone notification. The password is now moved into the OS
+  credential store on the way to disk and the path is redacted; the job keeps
+  working.
+- **The window no longer receives the encrypted blobs.** `load-prefs` handed
+  over `servers[].passwordEnc` and `ntfy.tokenEnc` — decryptable by anything
+  running as this user, which defeats the point of never sending the passwords
+  themselves.
+- **Migrating a machine with no credential store said nothing.** The old
+  plain-text block was deleted, correctly, but the passwords went with it in
+  silence. syncto now tells you, once, that they have to be typed again.
+- **Repointing a saved server at another machine carried the old password to
+  it.** The next Connect would have sent it to a host that never had it.
+- **A password that cannot be read is no longer shown as remembered.**
+  Preferences copied from another machine carry blobs this account cannot
+  decrypt; the window promised a password, and the resulting authentication
+  failure was blamed on the user's typing.
+- **Two servers on the same host and login but different ports shared one
+  password.** The credential key ignored the port, so only the last one
+  survived.
+- **"Saved" was announced even when nothing reached the disk.** A failed write
+  is now reported.
+- **An ntfy token with a non-ASCII character was silently mangled** into
+  something the server answered 401 to. It is refused with an explanation
+  instead.
+
+### Fixed — interface
+
+- **The countdown before shutting the machine down was invisible.** It sat
+  behind the summary card, unclickable, while it ran.
+- **A run that failed sent no phone notification** — the very run the person
+  away from the screen most needs to hear about.
+- **A failed notification was never mentioned**, so someone relying on it for
+  overnight backups read silence as success.
+- **The green "verified" shield from the previous run stayed under a red error
+  card**, certifying something unrelated.
+- **Shutting the machine down left the auto-sync switch on**, red frame and
+  all, over a scheduler that would never fire again.
+- **Editing a pair's folders did not invalidate the plan in memory.**
+- **Removing a pair left the ✕ on pair 1 in the wrong state**, and clicking it
+  emptied SOURCE and DESTINATION — and saved that.
+- **Enter pressed twice on a slow connection opened two SSH sessions**, only
+  the second of which was remembered; the first stayed open on the server until
+  syncto quit. Guarded in the window *and* in the main process, which now also
+  refuses to let a slow handshake overwrite a newer one.
+- **Editing the address of a saved server browsed the old machine** while
+  writing the new address into the job.
+- **The Synchronize button was live during the preflight**, so a quick click
+  started a run the check was about to refuse.
+- **Clearing the ntfy token and pressing Test passed** — with the old token
+  still attached.
+- **Two verifications at once** shared one cancel token and one progress
+  channel: closing the second cancelled the first, and the ring appeared to run
+  backwards. The second is refused.
+- **"Sleep" reported a failure on a machine that had slept exactly as asked.**
+  On Windows the command does not return until the machine wakes up.
+- **The checksum list used the canonical spelling of a name, not the one the
+  file really has on that side**, which made Verify Folder report an intact
+  accented file as missing on a byte-exact filesystem, and the manifest
+  unusable with `xxhsum -c`.
+
+### Changed
+
+- `README.md` no longer refers to a "Secure level" — there is one copy mode
+  since 0.5.0.
+
+---
+
+## [0.5.1] — 2026-08-31
+
+A build fix. Nothing in the application changed — the 350 engine checks pass
+identically.
+
+### Fixed
+
+- **`./build.sh` and `build-mac.command` failed on macOS** with
+  `Exit code: 1. Command failed: which python`, after the application itself
+  had already been built. electron-builder 24's `dmg-builder` shells out to
+  `python` to assemble the disk image, and macOS has not shipped a binary by
+  that name since 12.3 — only `python3`. Every recent Mac hit this.
+  The build toolchain is now the one ingesto already runs on the same
+  machines: **Electron 43.4.1 and electron-builder 26.15.3**. Version 26 of
+  `dmg-builder` contains no reference to `python` at all.
+- **A failed disk image no longer means an empty `dist/`.** The `.app` is built
+  first and the `.dmg` is wrapped around it afterwards, so a failure at the
+  second step used to throw away a finished application. Both build scripts now
+  notice, pack the `.app` as a zip, and say so.
+
+### Changed
+
+- Electron 34 → 43, nine major versions. syncto uses nothing that moved:
+  `safeStorage`, `shell.trashItem`, `powerSaveBlocker`, `webUtils`, the CSP and
+  navigation guards all behave the same. The packaged application was built and
+  launched under Electron 43 before this went out.
+- macOS 11 and Windows 10 remain the floor, as before.
+
+---
+
+## [0.5.0] — 2026-08-29
+
+One copy mode, and a verification you can see happening.
+
+Reported as "the verification phase is not clearly shown to the user". Looking
+into it turned up the reason: for two of the three copy levels there was no
+verification to show.
+
+### Changed — syncto has one copy mode
+
+**Fast, Verified and Secure are gone. Every run copies, then reads everything
+back and compares.**
+
+The three levels had stopped being three things. Since 0.2.5 the size check ran
+at every level — a fix for an SFTP hole where a truncated file could replace a
+good one — and that check was the only thing Verified had over Fast. Measured
+on 0.4.0, on the same file:
+
+```
+fast      copied: 1 · files read back and compared: 0 · work bytes: 5000
+verified  copied: 1 · files read back and compared: 0 · work bytes: 5000
+secure    copied: 1 · files read back and compared: 1 · work bytes: 10000
+```
+
+Two thirds of the choice was a choice between identical behaviours with
+different names, and anyone on **Verified** — the reassuring middle option —
+was getting a copy nothing had verified. A folder synchroniser for rushes has
+no business offering "copy and hope".
+
+**What this costs:** a run now moves twice the data, so it takes roughly twice
+as long as a copy alone, and over SFTP the read-back crosses the network too.
+Jobs already saved as `fast` or `verified` are pinned to the single mode when
+they load — running weaker than the window now claims would be the worse
+outcome. The copy-mode selector is replaced by a statement of what syncto does.
+
+### Added — the verification is visible
+
+- **The passes are shown as steps** — Copy → Verify · xxHash64 → Finish —
+  from the moment SYNCHRONIZE is pressed, *before* either starts. A pass that
+  only appears once it begins reads as a stall, which is exactly what was
+  reported.
+- The step that is running is lit in its own colour, the ones behind it are
+  ticked. Same colour code as ingesto: copying green, reading back blue.
+- **The summary states what was checked**, in a line at the top: *"128 files
+  read back and verified — every file was copied, then read from its final
+  location and compared with the xxHash64 fingerprint taken while writing. Not
+  one differed."* A verification failure turns that line red and says how many.
+- **The HTML report carries the same sentence**, since the report is the
+  artefact a DIT keeps and shows a client. It also carries the verified count
+  as a field.
+- **The phone notification says it too** — `✓ 128 read back and verified
+  (xxHash64)` rather than a bare "done". The whole point of the notification is
+  that nobody is at the screen.
+
+### Tests
+
+350 checks, up from 327. The new ones pin the single mode from every angle: an
+old `fast` or `verified` job is loaded as secure, every run reads back what it
+wrote whatever the file asks for, the work counter accounts for both passes so
+the ring cannot freeze at 50%, and the report states the verification without a
+trace of the old middle level.
+
+---
+
 ## [0.4.0] — 2026-08-28
 
 Two ways of walking away from a long run: let the machine finish and switch

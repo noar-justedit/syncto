@@ -27,6 +27,7 @@
 const fs   = require('fs');
 const path = require('path');
 const secrets = require('./secrets');
+const { redactLocation } = require('./fs/afs');
 
 const JOB_EXT    = '.syncto';
 const JOB_FORMAT = 'syncto-job';
@@ -67,7 +68,9 @@ function defaultJob() {
         left : { create: 'right', update: 'right', delete: 'right' },
         right: { create: 'left',  update: 'left',  delete: 'left'  },
       },
-      copyLevel        : 'verified',    // fast | verified | secure
+      // Kept in the file so older jobs still load, but there is only one
+      // mode now: copy, then read back and compare. migrateJob pins it.
+      copyLevel        : 'secure',
       writeChecksumList: false,
       deletion         : 'recycler',    // permanent | recycler | versioning
       permanentFallback: false,
@@ -140,12 +143,19 @@ function credentialMap(servers) {
     if (s.keyPath) {
       try { privateKey = fs.readFileSync(s.keyPath); } catch (_) { privateKey = null; }
     }
-    out[`${s.username}@${s.host}`] = {
+    // Keyed by user@host only, exactly like parseLocation looks it up. Two
+    // entries differing only by port therefore collapse — the last one wins —
+    // so the port is folded in when it is not the default, and the plain key
+    // is kept as the fallback parseLocation actually asks for.
+    const cred = {
       username  : s.username,
       password  : secrets.decrypt(s.passwordEnc),
       privateKey,
       passphrase: secrets.decrypt(s.passphraseEnc),
     };
+    const port = Number(s.port) || 22;
+    if (port !== 22) out[`${s.username}@${s.host}:${port}`] = cred;
+    if (!out[`${s.username}@${s.host}`] || port === 22) out[`${s.username}@${s.host}`] = cred;
   }
   return out;
 }
@@ -172,6 +182,7 @@ function migratePrefs(raw) {
     if (!Array.isArray(raw.servers)) raw.servers = [];
     const known = new Set(raw.servers.map(s => `${s.username}@${s.host}`));
     let n = raw.servers.length;
+    let had = 0;
     for (const key of Object.keys(raw.sftp || {})) {
       const m = /^([^@]*)@(.+)$/.exec(key);
       if (!m || known.has(key)) continue;
@@ -180,6 +191,7 @@ function migratePrefs(raw) {
       const host = m[2];
       if (!username || !host) continue;
       const enc = secrets.encrypt(c.password);
+      if (c.password) had++;
       raw.servers.push({
         id  : `srv-${++n}-${host}`,
         name: host,
@@ -191,8 +203,20 @@ function migratePrefs(raw) {
       });
       known.add(key);
     }
-    // Gone for good. If the machine has no usable credential store, the
-    // password is simply not kept — asking again beats leaving it readable.
+    // The old block goes, always: keeping it would mean syncto rewriting
+    // plain-text passwords into its own file at every save, which is the exact
+    // thing this release removed.
+    //
+    // But when there is no usable credential store they cannot be carried over
+    // either, and losing them without a word is what made this a bug. The user
+    // knows their own passwords — they just have to be told to type them again.
+    if (had && !secrets.available()) {
+      raw.migrationNotes = (raw.migrationNotes || []).concat(
+        `This machine has no usable credential store, so the ${had} saved SFTP ` +
+        `password${had > 1 ? 's' : ''} could not be carried over and ${had > 1 ? 'were' : 'was'} ` +
+        `removed rather than left readable on disk. Open the server window and enter ` +
+        `${had > 1 ? 'them' : 'it'} again.`);
+    }
     delete raw.sftp;
   }
 
@@ -266,6 +290,11 @@ class Prefs {
     } catch (_) { this.data = defaultPrefs(); }
     return this.data;
   }
+  // Returns true when the file really reached the disk. Every caller used to
+  // announce success regardless: "server saved, password remembered" while
+  // nothing was written, and the migration that deletes the old plain-text
+  // block ran in memory only — so those passwords stayed readable on disk for
+  // ever while the window showed migrated entries.
   save(patch) {
     if (patch) this.data = merge(this.data, patch);
     // The renderer can send arbitrary patches through save-prefs. This is the
@@ -273,12 +302,17 @@ class Prefs {
     // readable password is ever written to disk" is actually kept — not in the
     // callers, which would only have to forget once.
     scrubSecrets(this.data);
+    this.lastSaveError = null;
     try {
       fs.mkdirSync(path.dirname(this.file), { recursive: true });
       writeFileAtomic(this.file, JSON.stringify(this.data, null, 2));
-    } catch (_) {}
+    } catch (err) {
+      this.lastSaveError = err.message || String(err);
+    }
     return this.data;
   }
+
+  saved() { return !this.lastSaveError; }
 
   // ── Servers ──────────────────────────────────────────────────────────────
   // What the connection window shows. Never the secrets themselves: the window
@@ -287,7 +321,11 @@ class Prefs {
     return (this.data.servers || []).map(s => ({
       id: s.id, name: s.name, host: s.host, port: s.port || 22,
       username: s.username, keyPath: s.keyPath || '',
-      hasPassword: !!s.passwordEnc,
+      // Readable, not merely present. Preferences copied from another machine
+      // carry blobs this account cannot decrypt; showing them as "remembered"
+      // made the window promise a password that produced an authentication
+      // failure blamed on the user's typing.
+      hasPassword: !!s.passwordEnc && !!secrets.decrypt(s.passwordEnc),
       savePassword: !!s.savePassword,
     }));
   }
@@ -319,6 +357,13 @@ class Prefs {
       entry = { id: `srv-${Date.now().toString(36)}-${list.length + 1}` };
       list.push(entry);
     }
+    // Repointing an entry at another machine or another account must not carry
+    // the old password with it: the next Connect would decrypt it and send it
+    // to a host that never had it.
+    const moved = (entry.host && entry.host !== conn.host) ||
+                  (entry.username && entry.username !== conn.username);
+    if (moved) { entry.passwordEnc = ''; entry.passphraseEnc = ''; }
+
     entry.name     = String(conn.name || conn.host || '').trim() || conn.host;
     entry.host     = conn.host;
     entry.port     = Number(conn.port) || 22;
@@ -338,8 +383,10 @@ class Prefs {
     return {
       server: this.listServers().find(s => s.id === entry.id),
       // False means: asked to remember, could not. The caller tells the user.
-      remembered: !wants || !conn.password ? true : !!entry.passwordEnc,
+      remembered: (!wants || !conn.password ? true : !!entry.passwordEnc) && this.saved(),
       vaultAvailable: secrets.available(),
+      written: this.saved(),
+      writeError: this.lastSaveError || null,
     };
   }
 
@@ -395,8 +442,39 @@ class Prefs {
 
 // No `password`, `passphrase` or ntfy `token` key survives a write, whatever
 // put it there.
+// "sftp://user:secret@host/path" is a legal folder path — parseLocation
+// accepts it, so people type it. It is also persisted as a plain string, which
+// means the password lands in preferences.json, in the .syncto file handed to
+// a colleague, in reports, and in the phone notification's pair label.
+//
+// Take it out of the path, and put it where every other secret lives: the OS
+// credential store, keyed by user@host, so the job keeps working.
+function captureUrlPassword(data, phrase) {
+  const m = /^sftp:\/\/([^@/:]+):([^@/]*)@([^/:]+)(?::(\d+))?/i.exec(String(phrase || ''));
+  if (!m || !m[2]) return phrase;
+  const [, username, password, host, port] = m;
+  if (!Array.isArray(data.servers)) data.servers = [];
+  const p = Number(port) || 22;
+  let entry = data.servers.find(s => s.username === username && s.host === host && (s.port || 22) === p);
+  if (!entry) {
+    entry = { id: `srv-${Date.now().toString(36)}-${data.servers.length + 1}`,
+              name: host, host, port: p, username, keyPath: '' };
+    data.servers.push(entry);
+  }
+  const enc = secrets.encrypt(password);
+  if (enc) { entry.passwordEnc = enc; entry.savePassword = true; }
+  return redactLocation(phrase);
+}
+
 function scrubSecrets(data) {
   if (!data) return;
+  if (data.job && Array.isArray(data.job.pairs)) {
+    for (const pair of data.job.pairs) {
+      if (!pair || typeof pair !== 'object') continue;
+      if (typeof pair.left === 'string')  pair.left  = captureUrlPassword(data, pair.left);
+      if (typeof pair.right === 'string') pair.right = captureUrlPassword(data, pair.right);
+    }
+  }
   if (data.ntfy && typeof data.ntfy === 'object' && data.ntfy.token) {
     const enc = secrets.encrypt(data.ntfy.token);
     if (enc) data.ntfy.tokenEnc = enc;
@@ -442,7 +520,10 @@ function migrateJob(raw) {
     // The Pro level was removed: without this coercion algoFor('pro') returns
     // null and an old "pro" job silently degrades to a FAST copy — the exact
     // opposite of what its author chose.
-    if (raw.sync.copyLevel === 'pro') raw.sync.copyLevel = 'secure';
+    // A job written when syncto still offered three levels could ask for
+    // 'fast' or 'verified'. Neither exists any more, and silently running a
+    // job at a weaker level than it now claims would be the worst outcome.
+    raw.sync.copyLevel = 'secure';
     // Versioning has no interface. A job asking for it with no revision folder
     // configured could only ever fail; the trash is the honest equivalent.
     if (raw.sync.deletion === 'versioning') {
@@ -480,6 +561,15 @@ function loadJob(file) {
 function saveJob(file, job) {
   const out = merge(defaultJob(), job);
   out.format = JOB_FORMAT;
+  // A .syncto is the file you commit next to a project or hand to a colleague.
+  // A password typed into a folder field must not travel with it, ever.
+  if (Array.isArray(out.pairs)) {
+    for (const p of out.pairs) {
+      if (!p || typeof p !== 'object') continue;
+      if (typeof p.left === 'string')  p.left  = redactLocation(p.left);
+      if (typeof p.right === 'string') p.right = redactLocation(p.right);
+    }
+  }
   writeFileAtomic(file, JSON.stringify(out, null, 2));
   return out;
 }

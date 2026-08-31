@@ -283,7 +283,24 @@ async function trashItem(fsx, absPath) {
 
 // ── IPC: basics ────────────────────────────────────────────────────────────
 ipcMain.handle('get-version', () => appVersion());
-ipcMain.handle('load-prefs',  () => prefs.data);
+// NOT prefs.data: it carries servers[].passwordEnc and ntfy.tokenEnc. Those
+// blobs are decryptable by anything running as this user, so handing them to
+// the window is handing over the passwords — exactly what listServers() and
+// ntfyForUi() exist to prevent. The window gets everything else.
+ipcMain.handle('load-prefs',  () => {
+  const d = Object.assign({}, prefs.data);
+  d.servers = prefs.listServers();
+  d.ntfy = prefs.ntfyForUi();
+  return d;
+});
+
+// Shown once, then cleared: a migration that had to drop something has to say
+// so, and saying it every launch would train the user to ignore it.
+ipcMain.handle('take-migration-notes', () => {
+  const notes = prefs.data.migrationNotes || [];
+  if (notes.length) { prefs.data.migrationNotes = []; prefs.save(); }
+  return notes;
+});
 ipcMain.handle('save-prefs',  (_, p) => prefs.save(p));
 
 ipcMain.handle('browse-folder', async (_, title) => {
@@ -372,9 +389,12 @@ ipcMain.handle('browse-key', async () => {
 // ── IPC: after the run ─────────────────────────────────────────────────────
 // The renderer runs the countdown (it owns the Cancel button); this only
 // carries out the action once the countdown has expired.
-ipcMain.handle('after-sync', async (_, action) => {
-  const res = await power.run(action, { onQuit: () => setTimeout(() => app.quit(), 200) });
-  return res;
+// `clean` is asserted by the window, but the guard lives here too: this
+// handler switches a machine off, and it must not be one forgotten branch in
+// the renderer away from doing it after a run full of errors.
+ipcMain.handle('after-sync', async (_, action, clean) => {
+  if (clean !== true) return { ok: false, action, error: 'The run did not finish cleanly.' };
+  return power.run(action, { onQuit: () => setTimeout(() => app.quit(), 200) });
 });
 
 // ── IPC: phone notifications (ntfy) ────────────────────────────────────────
@@ -385,10 +405,16 @@ ipcMain.handle('ntfy-save', (_, patch) => prefs.saveNtfy(patch || {}));
 // never holds it. A token being typed right now is passed in `patch.token`.
 ipcMain.handle('ntfy-test', async (_, patch) => {
   const cfg = prefs.ntfyConfig();
+  const p = patch || {};
+  // `undefined` means "not on screen, use what is stored"; an EMPTY string
+  // means the user cleared the box and wants it tested empty. Treating the two
+  // the same made "Test" pass with the old token still attached, right after
+  // the user had removed it.
+  const pick = (a, b) => (a === undefined ? b : a);
   return notify.send({
-    server: (patch && patch.server) || cfg.server,
-    topic : (patch && patch.topic)  || cfg.topic,
-    token : (patch && patch.token)  || cfg.token,
+    server: pick(p.server, cfg.server) || cfg.server,
+    topic : pick(p.topic,  cfg.topic),
+    token : pick(p.token,  cfg.token),
     title : 'syncto test',
     message: 'Test notification from syncto.',
     tags  : 'bell',
@@ -581,7 +607,16 @@ ipcMain.handle('sync-pause',  () => { tokens.sync.paused = true;  return true; }
 ipcMain.handle('sync-resume', () => { tokens.sync.paused = false; return true; });
 
 // ── IPC: verification ──────────────────────────────────────────────────────
+// One verification at a time. Two of them shared a single cancel token and a
+// single progress channel: closing the second window cancelled the first, and
+// the two progress streams fought over the same ring — one run appearing to go
+// backwards. Refusing the second is honest and costs nothing; verifying two
+// folders at once was never offered by the interface anyway.
+let verifying = false;
+
 ipcMain.handle('verify-folder', async (_, folder) => {
+  if (verifying) return { ok: false, error: 'A verification is already running. Wait for it to finish.' };
+  verifying = true;
   tokens.verify.cancelled = false;
   const pool = new FsPool();
   try {
@@ -594,6 +629,7 @@ ipcMain.handle('verify-folder', async (_, folder) => {
   } catch (err) {
     return { ok: false, error: err.message || String(err) };
   } finally {
+    verifying = false;
     await pool.closeAll();
   }
 });

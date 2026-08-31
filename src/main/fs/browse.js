@@ -79,11 +79,19 @@ class RemoteBrowser {
   constructor() {
     this.fs = null;
     this.conn = null;
+    // Bumped by every connect and every close. A handshake can take twenty
+    // seconds against a sleeping NAS, and in that time the user can hit
+    // Connect again or close the window. Whoever holds the current number owns
+    // this.fs; a slower attempt that finishes afterwards closes its own
+    // connection instead of overwriting the newer one and leaking an SSH
+    // session on the server.
+    this._gen = 0;
   }
 
   // conn: { host, port, username, password, keyPath, passphrase }
   async connect(conn) {
     await this.close();
+    const gen = this._gen;
     const opts = {
       host      : String(conn.host || '').trim(),
       port      : Number(conn.port) || 22,
@@ -103,6 +111,11 @@ class RemoteBrowser {
       const e = new Error(err.friendly ? err.message : readable(err, conn));
       e.friendly = true;
       throw e;
+    }
+    if (gen !== this._gen) {
+      try { await backend.close(); } catch (_) {}
+      throw Object.assign(new Error('That connection was replaced by a newer one.'),
+                          { friendly: true, superseded: true });
     }
     this.fs = backend;
     this.conn = conn;
@@ -172,6 +185,7 @@ class RemoteBrowser {
   }
 
   async close() {
+    this._gen++;                 // invalidates any handshake still in flight
     if (this.fs) { try { await this.fs.close(); } catch (_) {} }
     this.fs = null;
     this.conn = null;

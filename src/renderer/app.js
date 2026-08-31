@@ -172,7 +172,6 @@ function jobToUi() {
 
   setSeg('seg-cmp', j.compare.compareVariant);
   setVariantBtn(j.sync.variant);
-  setCopyModeBtn(j.sync.copyLevel);
 
   $('st-moves').checked  = j.compare.detectMoves !== false;
   $('st-include').value  = j.compare.includeFilter;
@@ -263,12 +262,6 @@ function setSeg(id, value) {
 function setVariantBtn(v) {
   for (const b of document.querySelectorAll('#syncmodes .mbtn')) b.classList.toggle('on', b.dataset.v === v);
   $('custom-section').style.display = v === 'custom' ? '' : 'none';
-}
-
-function setCopyModeBtn(v) {
-  for (const b of document.querySelectorAll('#bottom-controls .modes-row .mbtn')) {
-    b.classList.toggle('on', b.dataset.v === v);
-  }
 }
 
 // ── Grid ───────────────────────────────────────────────────────────────────
@@ -635,7 +628,9 @@ async function doCompare() {
 // are still one click away. A NAS with no working recycle bin used to be
 // discovered file by file, mid-run, after the run had already given up.
 async function checkBeforeSync() {
-  const res = await API.preflight(state.job);
+  let res;
+  try { res = await API.preflight(state.job); }
+  catch (_) { return true; }          // the engine refuses again if need be
   if (!res.ok || !res.warnings.length) return true;
 
   $('cf-block').style.display = '';
@@ -653,10 +648,10 @@ function askConfirm() {
   const j = state.job;
   const VAR_LBL = { twoWay: 'Two way', mirror: 'Mirror →', update: 'Update →', custom: 'Custom' };
   const CMP_LBL = { timeSize: 'time & size', content: 'content', size: 'size' };
-  const LVL_LBL = { fast: 'Fast', verified: 'Verified', secure: 'Secure (xxHash64)' };
+
   const np = completePairs().length;
   $('cf-sub').textContent =
-    `${np} pair${np > 1 ? 's' : ''} · ${VAR_LBL[j.sync.variant] || j.sync.variant} · compared by ${CMP_LBL[j.compare.compareVariant]} · ${LVL_LBL[j.sync.copyLevel]} copy`;
+    `${np} pair${np > 1 ? 's' : ''} · ${VAR_LBL[j.sync.variant] || j.sync.variant} · compared by ${CMP_LBL[j.compare.compareVariant]} · verified copy (xxHash64)`;
   const cfCells = [
     ['Create', s.createLeft + s.createRight],
     ['Update', s.updateLeft + s.updateRight],
@@ -688,9 +683,13 @@ function askConfirm() {
   // Reset from a previous pass before the check runs again.
   $('cf-block').style.display = 'none';
   $('btn-cf-settings').style.display = 'none';
-  $('cf-ok').disabled = false;
+  // Disabled until the preflight answers. It runs a real probe against the
+  // destination — slow on a NAS or over SFTP — and the button used to be live
+  // for that whole round trip, so a quick click started a run the check was
+  // about to refuse.
+  $('cf-ok').disabled = true;
   $('ov-confirm').classList.add('open');
-  checkBeforeSync();
+  checkBeforeSync().then(okToRun => { if (okToRun) $('cf-ok').disabled = false; });
 }
 
 async function doSync() {
@@ -700,17 +699,24 @@ async function doSync() {
   state.busy = 'sync';
   state.paused = false;
   state.speeds = [];
-  setBusyUi(true, 'Synchronizing…');
+  setBusyUi(true, 'Synchronizing…', true);
   $('pb-title').textContent = 'Synchronizing…';
 
   const res = await API.sync(state.job);
 
   state.busy = null;
   setBusyUi(false);
-  if (!res.ok) { showError('Synchronization failed', res.error); return; }
+  if (!res.ok) {
+    // The phone still has to ring. A run that FAILED is the one the person
+    // away from the screen most needs to hear about, and this path used to
+    // return before the notification was ever sent.
+    notifyRunFailed(res.error);
+    showError('Synchronization failed', res.error);
+    return;
+  }
   showSummary(res);
   await doCompareQuiet();
-  // Last, so the summary is already on screen behind the countdown.
+  // Last, so the countdown is drawn over the summary.
   await afterRun(res);
 }
 
@@ -747,8 +753,12 @@ async function doCompareQuiet() {
 // ── Progress panel ─────────────────────────────────────────────────────────
 const RING_LEN = 182.2;
 
-function setBusyUi(on, title) {
+function setBusyUi(on, title, steps) {
   $('bottombar').classList.toggle('open', on);
+  // Only a synchronization has passes. A comparison is one sweep, and drawing
+  // a "Verify" step beside it would promise something that is not happening.
+  $('pb-steps').style.display = (on && steps) ? '' : 'none';
+  if (on && steps) renderSteps('copy');
   $('btn-compare').disabled = on;
   $('btn-sync').disabled = on || (isAutoOn() ? false : (!state.stats || state.stats.filesToProcess === 0));
   $('btn-abort').style.display = on ? '' : 'none';
@@ -802,34 +812,68 @@ API.onSyncProgress(p => {
   $('pb-file').textContent = (p.pairs > 1 ? `[${p.pair}/${p.pairs}] ` : '') + (p.current || '—');
 
   // The verification pass gets its own identity, like ingesto: blue everywhere
-  // — title, ring and top bar — so a read-back is never mistaken for a stall.
-  // The colour variables live on #bottombar because the top fill bar is a
-  // sibling of .pb-inner and would not inherit them otherwise.
+  // — title, ring, top bar and the step chips — so a read-back is never
+  // mistaken for a stall. The colour variables live on #bottombar because the
+  // top fill bar is a sibling of .pb-inner and would not inherit them otherwise.
   const verifying = p.pass === 'verify';
   const bar = $('bottombar');
   bar.style.setProperty('--pb-color',  verifying ? 'var(--blue)' : 'var(--green)');
   bar.style.setProperty('--pb-color2', verifying ? '#7bc8ff' : '#00ffaa');
   bar.style.setProperty('--pb-glow',   verifying ? 'rgba(77,144,240,.45)' : 'var(--green-g)');
+  renderSteps(p.pass);
   $('s-files').innerHTML   = `${p.filesDone}<span class="stot"> / ${p.filesTotal}</span>`;
   $('s-size').textContent  = fmtBytes(Math.max(0, p.bytesTotal - p.bytesDone));
   $('s-spd').textContent   = fmtSpeed(p.bytesPerSec);
   $('s-eta').textContent   = fmtEta(p.etaSec);
   $('s-del').textContent   = String(p.deleted || 0);
   $('s-err').textContent   = String(p.errors || 0);
-  const lvlName = { fast: 'FAST', verified: 'VERIFIED', secure: 'SECURE' }[state.job.sync.copyLevel] || '';
   const title = $('pb-title');
   // After the verification pass only folder deletions and pruning remain —
   // nothing is being copied, so the title must not claim it is.
   title.textContent = p.paused ? 'Paused'
-                    : verifying ? `VERIFYING · ${lvlName}`
+                    : verifying ? 'VERIFYING · xxHash64'
                     : p.pass === 'cleanup' ? 'FINISHING…'
-                    : `COPYING · ${lvlName}`;
+                    : 'COPYING';
   title.style.color = p.paused ? '' : (verifying ? 'var(--blue)' : 'var(--green)');
 
   state.speeds.push(p.bytesPerSec || 0);
   if (state.speeds.length > 70) state.speeds.shift();
   drawSpark(state.speeds);
 });
+
+// ── The passes of a run, drawn as steps ────────────────────────────────────
+// Announced before they happen. A verification pass that only appears once it
+// starts looks like the copy has stalled — which is exactly what people
+// reported. Shown from the moment SYNCHRONIZE is pressed, with the pass that
+// is running lit in its own colour.
+//
+// The list depends on the copy level, because it is not the same run: only
+// SECURE reads everything back. Claiming a verification step at a level that
+// does not perform one would be worse than showing none.
+const ICO_STEP_OK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+
+// Always the same three: syncto has one copy mode, and every run reads back
+// what it wrote. Announcing the verification before it starts is the point —
+// a pass that appears out of nowhere looks like the copy has stalled.
+const RUN_STEPS = [
+  { key: 'copy',    cls: 'copy',   label: 'Copy' },
+  { key: 'verify',  cls: 'verify', label: 'Verify · xxHash64' },
+  { key: 'cleanup', cls: 'tail',   label: 'Finish' },
+];
+
+// pass: 'copy' | 'verify' | 'cleanup' | null (nothing running yet)
+function renderSteps(pass) {
+  const box = $('pb-steps');
+  if (!box) return;
+  const steps = RUN_STEPS;
+  const at = steps.findIndex(s => s.key === pass);
+  box.innerHTML = steps.map((s, i) => {
+    const state_ = at < 0 ? '' : i < at ? 'done' : i === at ? 'on' : '';
+    const mark = state_ === 'done' ? ICO_STEP_OK : '<span class="dot"></span>';
+    return (i ? '<span class="pb-step-sep"></span>' : '') +
+      `<span class="pb-step ${s.cls} ${state_}">${mark}${esc(s.label)}</span>`;
+  }).join('');
+}
 
 function drawSpark(values) {
   const svg = $('pb-spark');
@@ -850,6 +894,46 @@ function drawSpark(values) {
 const ICO_OK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
 const ICO_ERR = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v5"/><path d="M12 17h.01"/><circle cx="12" cy="12" r="9"/></svg>';
 const ICO_CANCEL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg>';
+
+// The one line people look for after a two-hour backup: what was actually
+// checked. Written per level, because the three levels do genuinely different
+// amounts of work and claiming otherwise would be the same fault as a
+// verification that reads the RAM cache.
+function renderVerifyLine(res) {
+  const box = $('sum-verify');
+  const copied = (res.counters && res.counters.files) || 0;
+  const verified = res.verified || 0;
+
+  if (!copied && !verified) { box.style.display = 'none'; return; }
+  box.style.display = '';
+
+  const ICO_SHIELD = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg>';
+  const ICO_X = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
+
+  const verifyFailures = (res.errors || []).filter(e => /checksum mismatch/i.test(e.message || '')).length;
+  let kind, ico, head, sub;
+
+  if (verifyFailures) {
+    kind = 'bad'; ico = ICO_X;
+    head = `${verifyFailures} file${verifyFailures > 1 ? 's' : ''} failed verification`;
+    sub = 'They were read back and did not match what was written. They are listed below, left '
+        + 'out of the checksum list, and will be looked at again on the next run.';
+  } else if (verified) {
+    kind = 'good'; ico = ICO_SHIELD;
+    head = `${verified} file${verified > 1 ? 's' : ''} read back and verified`;
+    sub = 'Every file was copied, then read from its final location and compared with the '
+        + 'xxHash64 fingerprint taken while writing. Not one differed.';
+  } else {
+    kind = 'good'; ico = ICO_SHIELD;
+    head = 'Nothing needed copying';
+    sub = 'Both sides already matched, so there was nothing to verify.';
+  }
+
+  box.className = 'sum-verify ' + kind;
+  $('sum-verify-ico').innerHTML = ico;
+  $('sum-verify-h').textContent = head;
+  $('sum-verify-sub').textContent = sub;
+}
 
 function showSummary(res) {
   const failed = res.errors.length;
@@ -878,6 +962,8 @@ function showSummary(res) {
   if (res.verified) cells.splice(2, 0, ['Files verified', res.verified]);
   $('sum-grid').innerHTML = cells
     .map(([l, v]) => `<div class="srow"><div class="sr-lbl">${l}</div><div class="sr-val">${v}</div></div>`).join('');
+
+  renderVerifyLine(res);
 
   $('sum-errors').style.display = failed ? '' : 'none';
   $('sum-errors-body').innerHTML = res.errors.slice(0, 60)
@@ -908,6 +994,9 @@ $('sum-open-report').addEventListener('click', () => {
 });
 
 function showError(title, msg) {
+  // Not left over from the last successful run: a green "150 files verified"
+  // shield under a red error card certifies something unrelated.
+  { const v = $('sum-verify'); if (v) v.style.display = 'none'; }
   $('sum-ico').className = 'sum-ico err';
   $('sum-ico').innerHTML = ICO_ERR;
   $('sum-h1').textContent = title;
@@ -924,9 +1013,15 @@ function showError(title, msg) {
 // ── Verify ─────────────────────────────────────────────────────────────────
 const VF_LEN = 395.8;
 
+// The menu entry stays clickable while a verification runs; without this the
+// second click reset the panel of the run still in progress.
+let vfBusy = false;
+
 async function doVerify() {
+  if (vfBusy) { $('ov-verify').classList.add('open'); return; }
   const folder = await API.browseFolder('Choose a folder to verify');
   if (!folder) return;
+  vfBusy = true;
   $('vf-title').textContent = 'Verifying…';
   $('vf-pct').textContent = '0%';
   $('vf-ring').setAttribute('stroke-dashoffset', VF_LEN);
@@ -935,7 +1030,9 @@ async function doVerify() {
   $('vf-bad').style.display = 'none';
   $('ov-verify').classList.add('open');
 
-  const res = await API.verifyFolder(folder);
+  let res;
+  try { res = await API.verifyFolder(folder); }
+  finally { vfBusy = false; }
   if (!res.ok) {
     $('vf-title').textContent = 'Cannot verify';
     $('vf-line').textContent = res.error;
@@ -1052,7 +1149,9 @@ function bind() {
 
   // Pair rows: edit in place, browse per field, remove, add.
   $('pairrows').addEventListener('change', e => {
-    if (e.target.matches('.pr-left, .pr-right')) { uiToJob(); persist(); }
+    // onPathChanged, not just persist: editing a pair changes WHICH folders
+    // the job covers, and the plan in memory belongs to the old set.
+    if (e.target.matches('.pr-left, .pr-right')) onPathChanged();
   });
   $('pairrows').addEventListener('click', async e => {
     const row = e.target.closest('.prow');
@@ -1061,8 +1160,12 @@ function bind() {
     if (e.target.closest('.pr-rm')) {
       uiToJob();
       state.job.pairs.splice(i, 1);
-      renderPairRows();
-      persist();
+      // jobToUi, not just renderPairRows: the ✕ on pair 1 is shown or hidden
+      // by jobToUi alone. Skipping it left that button visible on a job down
+      // to a single pair, and clicking it emptied SOURCE and DESTINATION —
+      // and saved that.
+      jobToUi();
+      onPathChanged();
       return;
     }
     const bl = e.target.closest('.pr-browse-l'), br = e.target.closest('.pr-browse-r');
@@ -1077,7 +1180,9 @@ function bind() {
   $('ps-add').addEventListener('click', () => {
     uiToJob();
     state.job.pairs.push({ left: '', right: '' });
-    renderPairRows();
+    // jobToUi so the ✕ on pair 1 reappears: with only renderPairRows it stayed
+    // hidden, and pair 1 could not be removed until the job was reloaded.
+    jobToUi();
     persist();
     const last = document.querySelector('#pairrows .prow:last-child .pr-left');
     if (last) last.focus();
@@ -1096,14 +1201,6 @@ function bind() {
     if (!b) return;
     state.job.sync.variant = b.dataset.v;
     setVariantBtn(b.dataset.v);
-    persist();
-  });
-
-  document.querySelector('#bottom-controls .modes-row').addEventListener('click', e => {
-    const b = e.target.closest('.mbtn');
-    if (!b) return;
-    state.job.sync.copyLevel = b.dataset.v;
-    setCopyModeBtn(b.dataset.v);
     persist();
   });
 
@@ -1158,7 +1255,7 @@ function bind() {
       const n = state.job.autoSync.minutes || 30;
       const np = completePairs().length;
       $('auto-cf-sub').textContent =
-        `Every ${n} minute${n > 1 ? 's' : ''}: ${state.job.sync.variant} synchronization of ${np} pair${np > 1 ? 's' : ''}, ${state.job.sync.copyLevel} copy.`;
+        `Every ${n} minute${n > 1 ? 's' : ''}: ${state.job.sync.variant} synchronization of ${np} pair${np > 1 ? 's' : ''}, verified copy.`;
       $('ov-auto').classList.add('open');
     } else {
       state.job.autoSync.enabled = false;
@@ -1507,7 +1604,7 @@ async function autoRun() {
   }
 
   state.busy = 'sync';
-  setBusyUi(true, 'Auto-sync — synchronizing…');
+  setBusyUi(true, 'Auto-sync — synchronizing…', true);
   const res = await API.sync(state.job);
   state.busy = null;
   setBusyUi(false);
@@ -1661,6 +1758,14 @@ function showUpdateNotice({ version, url }) {
   ov.onclick = e => { if (e.target === ov) dismiss(); };
 }
 
+// A run that failed before producing a result still has to reach the phone.
+function notifyRunFailed(message) {
+  API.ntfyRun({
+    counters: {}, errors: [{ rel: '', message: String(message || 'The run failed.') }],
+    durationMs: 0,
+  }, state.job.name).catch(() => {});
+}
+
 // ── After the run ──────────────────────────────────────────────────────────
 // A machine that shuts itself down takes the summary with it, so the action
 // only fires on a run with nothing to read: no errors, not cancelled, lock
@@ -1681,7 +1786,7 @@ function stopCountdown() {
 
 async function fireAfterAction() {
   stopCountdown();
-  const res = await API.afterSync(afterState.action);
+  const res = await API.afterSync(afterState.action, afterState.clean === true);
   if (res && !res.ok && res.error) showError('The machine did not respond', res.error);
 }
 
@@ -1694,6 +1799,7 @@ function startAfterCountdown(action) {
   const w = WHAT[action];
   if (!w) return;
   afterState.action = action;
+  afterState.clean = true;      // only ever reached from a clean run
   afterState.left = AFTER_SECONDS;
   $('after-what').textContent = w[0];
   $('after-sub').textContent  = w[1];
@@ -1709,8 +1815,14 @@ function startAfterCountdown(action) {
 // Called once a run is over, before anything else can grab attention.
 async function afterRun(res) {
   // The notification goes out whatever happened — that is the point of being
-  // told on a phone. It never blocks and never fails the run.
-  API.ntfyRun(res, state.job.name).catch(() => {});
+  // told on a phone. It never blocks and never fails the run, but a failure to
+  // SEND is worth a line: someone who relies on it for overnight backups
+  // otherwise reads silence as success.
+  API.ntfyRun(res, state.job.name).then(r => {
+    if (r && !r.ok && !r.skipped) {
+      $('status-note').textContent = `The phone notification could not be sent: ${r.error}`;
+    }
+  }).catch(() => {});
 
   const action = (state.job.sync && state.job.sync.afterSync) || 'none';
   if (action === 'none') return;
@@ -1720,8 +1832,15 @@ async function afterRun(res) {
       `the run did not finish cleanly.`;
     return;
   }
-  // Auto-sync and shutting down cannot both be true. The machine wins.
-  if (isAutoOn()) autoStop();
+  // Auto-sync and shutting down cannot both be true. The machine wins — and
+  // the switch has to follow, or the window keeps its red frame and its
+  // "AUTO-SYNC ON" button over a scheduler that will never fire again.
+  if (isAutoOn()) {
+    state.job.autoSync.enabled = false;
+    autoStop();
+    renderAutoUi();
+    persist();
+  }
   startAfterCountdown(action);
 }
 
@@ -1860,6 +1979,8 @@ async function openServerDialog(target) {
 function srvFormConn() {
   return {
     savedId : srv.savedId,
+    // See srvForgetSaved: once the address or the login has been edited, this
+    // is no longer that saved entry.
     host    : $('srv-host').value.trim(),
     port    : Number($('srv-port').value) || 22,
     username: $('srv-user').value.trim(),
@@ -1871,14 +1992,20 @@ function srvFormConn() {
 }
 
 async function srvConnect() {
+  // Enter pressed twice while the connection is slow used to open two SSH
+  // sessions: only the second was remembered, and the first stayed open on the
+  // server until syncto quit.
+  if (srv.connecting) return;
   const conn = srvFormConn();
   if (!conn.host)     { srvStatus('bad', 'Enter the address of the server.'); $('srv-host').focus(); return; }
   if (!conn.username) { srvStatus('bad', 'Enter the login to use.'); $('srv-user').focus(); return; }
 
+  srv.connecting = true;
   $('srv-connect').disabled = true;
   srvStatus('busy', `Connecting to ${conn.host}…`);
-  const res = await API.serverConnect(conn);
-  $('srv-connect').disabled = false;
+  let res;
+  try { res = await API.serverConnect(conn); }
+  finally { srv.connecting = false; $('srv-connect').disabled = false; }
 
   if (!res.ok) {
     if (res.needsPassword) {
@@ -2019,6 +2146,14 @@ async function closeServerDialog() {
 function bindServerDialog() {
   $('left-server').addEventListener('click',  () => openServerDialog({ kind: 'main', side: 'left'  }));
   $('right-server').addEventListener('click', () => openServerDialog({ kind: 'main', side: 'right' }));
+
+  // Editing the address, the port or the login means this is a different
+  // server. Without dropping savedId, the main process reconnected to the
+  // SAVED entry while the window built the URL from the typed fields — you
+  // browsed one machine and wrote the address of another into the job.
+  for (const id of ['srv-host', 'srv-port', 'srv-user']) {
+    $(id).addEventListener('input', () => { srv.savedId = null; });
+  }
 
   $('srv-cancel').addEventListener('click', closeServerDialog);
   $('srv-back').addEventListener('click', () => { srvShowStep(1); $('srv-title').textContent = 'Connect to a server'; });

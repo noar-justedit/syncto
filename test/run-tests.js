@@ -908,20 +908,26 @@ async function testReviewRegressions() {
        'the sidecar keeps earlier entries when later runs add more');
   }
 
-  // (m) Errors are not counted twice by the multi-pair aggregation.
+  // (m) Errors are not counted twice by the multi-pair aggregation. The
+  //     failure has to be a per-FILE one: a configuration problem such as a
+  //     missing recycle bin is now settled for the whole job before the run
+  //     starts, so it never reaches the per-pair accounting.
   {
     const { dir } = scratch();
+    const made = [];
     const mk = name => {
       const l = path.join(dir, name + 'L'), r = path.join(dir, name + 'R');
       fs.mkdirSync(l, { recursive: true }); fs.mkdirSync(r, { recursive: true });
-      write(r, 'stray.txt', 'x');          // mirror wants to delete it…
+      write(l, 'gone.txt', 'x');
+      made.push(path.join(l, 'gone.txt'));
       return { left: l, right: r };
     };
-    const job = makeJob('', '', { sync: { deletion: 'recycler' } });   // …but no trash is available
+    const job = makeJob('', '', { sync: { deletion: 'permanent', retryCount: 0 } });
     job.pairs = [mk('p1'), mk('p2')];
     const ms = new MultiSession();
     await ms.compare(job, { token: {} });
-    const res = await ms.sync(job, { token: {}, appVersion: 'test' });   // no trashItem provided
+    for (const f of made) fs.rmSync(f);        // vanishes between compare and sync
+    const res = await ms.sync(job, { token: {}, appVersion: 'test' });
     eq(res.counters.errors, res.errors.length, 'counters.errors equals the error list length');
     eq(res.errors.length, 2, 'one error per pair, not two');
     await ms.close();
@@ -1440,7 +1446,12 @@ function testServers() {
       { host: '10.0.0.8', username: 'dit', port: 2222 },
       { host: '', username: 'nobody' },                      // incomplete: skipped
     ]);
-    eq(Object.keys(map).sort(), ['arnaud@nas.local', 'dit@10.0.0.8'], 'keys are user@host');
+    // A non-default port gets its own key as well: two servers on the same host
+    // and login but different ports have different passwords, and the port-less
+    // key can only hold one of them.
+    eq(Object.keys(map).sort(),
+       ['arnaud@nas.local', 'dit@10.0.0.8', 'dit@10.0.0.8:2222'],
+       'keys are user@host, plus user@host:port when the port is not 22');
     eq(map['arnaud@nas.local'].password, '', 'with no password to hand over on this machine');
   }
 
@@ -1704,6 +1715,442 @@ function testNtfySecrets() {
   eq(p.data.ntfy.tokenEnc, '', 'and clearing it explicitly does clear it');
 }
 
+
+// ══ 22. One copy mode — 0.5.0 ═════════════════════════════════════════════
+// syncto used to offer Fast / Verified / Secure. Fast and Verified ended up
+// doing exactly the same thing, so two thirds of the choice was between
+// identical behaviours with different names — and a user on "Verified" never
+// saw a verification phase, because there wasn't one.
+async function testSingleCopyMode() {
+  console.log('\n\n22. One copy mode (0.5.0)');
+  const { algoFor } = require('../src/main/core/hash');
+  const { migrateJob, defaultJob } = require('../src/main/config');
+
+  eq(algoFor(), 'xxh64', 'there is one algorithm and it is always used');
+  eq(algoFor('fast'), 'xxh64', 'even when an old caller still passes a level');
+  eq(defaultJob().sync.copyLevel, 'secure', 'a new job is secure');
+
+  // A job saved when the levels existed must NOT quietly run weaker than the
+  // interface now claims.
+  eq(migrateJob({ sync: { copyLevel: 'fast' } }).sync.copyLevel, 'secure',
+     "an old 'fast' job is pinned to secure on load");
+  eq(migrateJob({ sync: { copyLevel: 'verified' } }).sync.copyLevel, 'secure',
+     "so is an old 'verified' job");
+  eq(migrateJob({ sync: { copyLevel: 'pro' } }).sync.copyLevel, 'secure',
+     "and the even older 'pro'");
+
+  // Whatever the file asks for, every run reads back what it wrote.
+  for (const asked of ['fast', 'verified', 'secure', undefined]) {
+    const { L, R } = scratch();
+    write(L, 'a.mov', 'x'.repeat(4096));
+    const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+    if (asked) job.sync.copyLevel = asked;
+    const { run } = await runPair(job);
+    eq(run.counters.files, 1, `copyLevel=${asked}: the file is copied`);
+    eq(run.verified, 1, `copyLevel=${asked}: and read back and verified`);
+    // Written once, read once: the work counter has to see both, or the ring
+    // freezes at 50% while the verification runs.
+    eq(run.counters.workBytes, 8192, `copyLevel=${asked}: work counts the read-back too`);
+  }
+
+  // The checksum list no longer depends on a level that no longer exists.
+  {
+    const { L, R } = scratch();
+    write(L, 'a.mov', 'data');
+    const job = makeJob(L, R, { sync: { variant: 'mirror', writeChecksumList: true } });
+    delete job.sync.copyLevel;
+    await runPair(job);
+    ok(exists(R, 'syncto-checksums.txt'), 'the checksum list is written whenever it is asked for');
+  }
+
+  // And the report says what was checked, in words a client can read.
+  {
+    const { buildReport, toHtml } = require('../src/main/core/report');
+    const rep = buildReport({
+      appVersion: 't', pairName: 'j', leftPath: '/l', rightPath: '/r',
+      variant: 'mirror', compareVariant: 'timeSize', copyLevel: 'secure',
+      deletion: 'permanent', versioningStyle: '', filter: {},
+      startedAt: 0, endedAt: 1000,
+      run: { results: [], counters: { files: 3, bytes: 100, deleted: 0, folders: 0 },
+             notes: [], verified: 3, errors: [] },
+      stats: null, comparisonErrors: [],
+    });
+    eq(rep.totals.filesVerified, 3, 'the report carries the verified count');
+    const html = toHtml(rep);
+    ok(/read back and verified \(xxHash64\)/.test(html), 'and states it in the page');
+    ok(/every file read back and compared/.test(html), 'and in the settings block');
+    ok(!/size-checked/.test(html), 'with no trace of the old middle level');
+  }
+}
+
+
+// ══ 23. Audit 0.5.1 — corrections ═════════════════════════════════════════
+async function testAudit051() {
+  console.log('\n\n23. Audit fixes (0.5.2)');
+  const { redactLocation, parseLocation } = require('../src/main/fs/afs');
+  const { Prefs, saveJob, defaultJob, migratePrefs, credentialMap } = require('../src/main/config');
+  const notify = require('../src/main/notify');
+
+  // (a) A password typed into a folder field reached preferences.json, the
+  //     .syncto handed to a colleague, AND the body of the phone notification.
+  {
+    eq(redactLocation('sftp://arnaud:Hunter2!@nas.local/srv'), 'sftp://arnaud@nas.local/srv',
+       'the password is taken out of the address');
+    eq(redactLocation('/Volumes/RAID/Project'), '/Volumes/RAID/Project', 'a local path is untouched');
+    eq(redactLocation('sftp://arnaud@nas.local/srv'), 'sftp://arnaud@nas.local/srv',
+       'an address without one is untouched');
+
+    const { dir } = scratch();
+    const p = new Prefs(dir); p.load();
+    p.data.job.pairs = [{ left: '/Volumes/CARD', right: 'sftp://arnaud:Hunter2!@nas.local/srv' }];
+    p.save();
+    const onDisk = fs.readFileSync(path.join(dir, 'preferences.json'), 'utf8');
+    ok(!onDisk.includes('Hunter2!'), 'no password reaches preferences.json');
+    eq(JSON.parse(onDisk).job.pairs[0].right, 'sftp://arnaud@nas.local/srv',
+       'and the stored path keeps working without it');
+
+    const j = defaultJob();
+    j.pairs = [{ left: '/a', right: 'sftp://arnaud:Hunter2!@nas.local/srv' }];
+    const jf = path.join(dir, 'shared.syncto');
+    saveJob(jf, j);
+    ok(!fs.readFileSync(jf, 'utf8').includes('Hunter2!'), 'nor the job file meant to be shared');
+  }
+
+  // (b) The two sides of a pair with no path made split('/').pop() return
+  //     "user:secret@host" — a label that travels into errors and ntfy.
+  {
+    const { pairLabel } = require('../src/main/core/session');
+    const label = pairLabel({ left: 'sftp://arnaud:Hunter2!@nas.local', right: '/tmp/x' });
+    ok(!label.includes('Hunter2!'), 'the pair label carries no password');
+    ok(label.includes('nas.local'), 'but still names the machine');
+    eq(pairLabel({ left: '/Volumes/CARD/', right: '/tmp/x' }), 'CARD → x',
+       'a plain pair still reads as its two folder names');
+  }
+
+  // (c) Two servers on one host but different ports had one password between
+  //     them: the port-less key could only hold the last one.
+  {
+    const map = credentialMap([
+      { host: 'nas.local', username: 'a', port: 22 },
+      { host: 'nas.local', username: 'a', port: 2222 },
+    ]);
+    ok(map['a@nas.local:2222'], 'the non-default port gets its own entry');
+    const loc = parseLocation('sftp://a@nas.local:2222/data', map);
+    eq(loc.port, 2222, 'and the address on that port finds it');
+  }
+
+  // (d) Repointing a saved server at another machine must not carry the old
+  //     password to it.
+  {
+    const { dir } = scratch();
+    const p = new Prefs(dir); p.load();
+    const saved = p.saveServer({ name: 'NAS', host: 'nas.local', port: 22, username: 'arnaud' });
+    const id = saved.server.id;
+    p.data.servers[0].passwordEnc = 'CIPHERTEXT-FOR-nas.local';
+    p.saveServer({ id, name: 'Other', host: 'evil.example.com', port: 22, username: 'root' });
+    eq(p.data.servers[0].passwordEnc, '', 'moving an entry to another host clears its password');
+    eq(p.data.servers[0].host, 'evil.example.com', 'while the entry itself follows the edit');
+  }
+
+  // (e) A blob this account cannot read is not a remembered password.
+  {
+    const { dir } = scratch();
+    const p = new Prefs(dir); p.load();
+    p.saveServer({ name: 'NAS', host: 'nas.local', port: 22, username: 'arnaud' });
+    p.data.servers[0].passwordEnc = 'not-decryptable-here';
+    eq(p.listServers()[0].hasPassword, false,
+       'an unreadable blob is not reported as a stored password');
+  }
+
+  // (f) A migration that has to drop credentials says so instead of losing
+  //     them in silence.
+  {
+    const out = migratePrefs({ sftp: { 'arnaud@nas': { username: 'arnaud', password: 'p' } } });
+    ok(!JSON.stringify(out).includes('"p"'), 'the plain-text password is gone');
+    ok((out.migrationNotes || []).some(n => /credential store/i.test(n)),
+       'and the user is told it could not be carried over');
+  }
+
+  // (g) A write that never reached the disk must not be reported as saved.
+  {
+    const { dir } = scratch();
+    const p = new Prefs(path.join(dir, 'sub')); p.load();
+    fs.writeFileSync(path.join(dir, 'sub'), 'not a directory');   // mkdir will fail
+    const r = p.saveServer({ name: 'NAS', host: 'nas.local', port: 22, username: 'a', password: 'x' });
+    eq(r.written, false, 'the failed write is reported');
+    eq(r.remembered, false, 'and nothing claims the password was remembered');
+  }
+
+  // (h) An access token must travel intact or not at all — stripping it to
+  //     ASCII produced a 401 nobody could explain.
+  {
+    return notify.send({ server: 'https://ntfy.sh', topic: 't', token: 'tk_éàAB12' }).then(r => {
+      ok(!r.ok && /header/i.test(r.error), 'a token that cannot be a header is refused, not mangled');
+    });
+  }
+}
+
+async function testAudit051Engine() {
+  console.log('\n\n24. Audit fixes — engine (0.5.2)');
+
+  // (a) THE one: the lock created the missing base folder before the guard ran,
+  //     so the SECOND attempt saw an empty folder instead of a missing one and
+  //     planned to delete the whole backup.
+  {
+    const { dir, L, R } = scratch();
+    write(R, 'a.mov', 'keep'); write(R, 'b.mov', 'keep');
+    fs.rmSync(L, { recursive: true, force: true });
+    const job = makeJob(L, R, { sync: { variant: 'mirror', deletion: 'permanent' } });
+
+    const first = await stepped(job);
+    ok(first.error && /not there/i.test(first.error.message), 'attempt 1 refuses');
+    ok(!fs.existsSync(L), 'and the missing folder was NOT created by the lock');
+
+    const second = await stepped(job);
+    ok(second.error && /not there/i.test(second.error.message), 'attempt 2 refuses in the same way');
+    ok(exists(R, 'a.mov') && exists(R, 'b.mov'), 'the backup is still there after both attempts');
+  }
+
+  // (b) A folder held back by a filtered file kept its checksum list: the
+  //     sweep used to run before rmdir and destroyed the manifest anyway.
+  {
+    const { dir, L, R } = scratch();
+    write(R, 'A001/clip.mov', 'x');
+    write(R, 'A001/keep.bak', 'excluded');
+    write(R, 'A001/syncto-checksums.txt', 'xxh64\nabc  clip.mov\n');
+    const { run } = await stepped(makeJob(L, R, {
+      sync: { variant: 'mirror', deletion: 'permanent' },
+      compare: { excludeFilter: '*.bak' },
+    }));
+    ok(exists(R, 'A001/keep.bak'), 'the excluded file survives');
+    ok(exists(R, 'A001/syncto-checksums.txt'),
+       'and so does the checksum list, in a folder that is not going away');
+    ok(run.errors.length > 0, 'the folder removal still fails loudly');
+  }
+
+  // (c) An empty folder to remove needed no recycle bin, but the preflight
+  //     demanded one and refused the whole run.
+  {
+    const { L, R } = scratch();
+    write(L, 'new.mov', 'data');
+    fs.mkdirSync(path.join(R, 'stale'), { recursive: true });
+    const { run, error } = await stepped(
+      makeJob(L, R, { sync: { variant: 'mirror', deletion: 'recycler', permanentFallback: false } }),
+      null, { trashItem: async () => false });
+    ok(!error, 'a run whose only removal is a folder is not blocked');
+    ok(run && run.counters.files === 1, 'and the copy happens');
+  }
+
+  // (d) Two-way went into a permanent conflict as soon as the target refused
+  //     to take the source date.
+  {
+    const { L, R } = scratch();
+    write(L, 'a.mov', 'data', Date.now() - 7 * 86400000);
+    const job = makeJob(L, R, { sync: { variant: 'twoWay', preserveTimes: false } });
+    await runPair(job);
+    const second = await runPair(job);
+    eq(second.cmp.stats.conflicts, 0, 'the second run is not a conflict');
+    const third = await runPair(job);
+    eq(third.cmp.stats.conflicts, 0, 'nor the third');
+    eq(third.run.counters.files, 0, 'and nothing is copied back and forth');
+  }
+
+  // (e) A retry archived the target twice, and the second archive — the
+  //     fragment left by the failed attempt — overwrote the good version.
+  {
+    const { dir, L, R } = scratch();
+    const rev = path.join(dir, 'rev');
+    write(L, 'a.mov', 'NEW-CONTENT', Date.now());
+    write(R, 'a.mov', 'THE-ONLY-GOOD-OLD-VERSION', Date.now() - 86400000);
+    const s = new Session();
+    const job = makeJob(L, R, {
+      sync: { variant: 'mirror', deletion: 'versioning', retryCount: 1,
+              versioning: { leftFolder: '', rightFolder: rev, style: 'timestampFolder' } },
+    });
+    await s.compare(job, { token: { cancelled: false } });
+    // Archive twice in a row, exactly as a retry would.
+    const { SyncRunner } = require('../src/main/core/sync');
+    const runner = new SyncRunner({ left: s.left, right: s.right, nodes: s.nodes,
+                                    config: Object.assign({}, job.sync), token: { cancelled: false } });
+    const node = s.nodes.find(n => n.rel === 'a.mov');
+    await runner.archiveExisting('right', node);
+    write(R, 'a.mov', 'TRUNCATED-FRAGMENT');          // what a failed attempt leaves
+    await runner.archiveExisting('right', node);      // the retry archives again
+    const found = [];
+    (function walk(d) {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        const f = path.join(d, e.name);
+        if (e.isDirectory()) walk(f); else found.push(fs.readFileSync(f, 'utf8'));
+      }
+    })(rev);
+    ok(found.includes('THE-ONLY-GOOD-OLD-VERSION'), 'the good version is still in the revision store');
+    ok(!found.includes('TRUNCATED-FRAGMENT'), 'and the retry did not bury it under its fragment');
+    await s.close();
+  }
+
+  // (f) The checksum list has to name files the way the filesystem does.
+  {
+    const { L, R } = scratch();
+    const nfd = 'Cafe\u0301.txt';
+    write(L, nfd, 'data');
+    const job = makeJob(L, R, { sync: { variant: 'mirror', writeChecksumList: true } });
+    await runPair(job);
+    const list = read(R, 'syncto-checksums.txt') || '';
+    const onDisk = fs.readdirSync(R).find(n => n.normalize('NFC') === 'Café.txt');
+    ok(onDisk && list.includes(onDisk),
+       'the manifest names the file with the spelling the target really holds');
+  }
+
+  // (g) The heartbeat has to notice a share that stopped answering, not just
+  //     one that returns errors.
+  {
+    const { acquireOne } = require('../src/main/core/lock');
+    const { NativeFs } = require('../src/main/fs/native');
+    const { dir } = scratch();
+    const fsx = new NativeFs();
+    let lost = null;
+    const lock = await acquireOne(fsx, dir, { onLost: r => { lost = r; } });
+    // A frozen mount does not fail — it never returns. Simulate exactly that.
+    lock.fs = Object.assign(Object.create(Object.getPrototypeOf(fsx)), fsx, {
+      appendByte: () => new Promise(() => {}),
+      createReadStream: fsx.createReadStream.bind(fsx),
+    });
+    lock._lastBeat = Date.now() - 60000;          // 60 s of silence
+    lock.timer._onTimeout();                       // one tick
+    ok(lost && /not been refreshed/i.test(lost),
+       'a lock that has gone quiet for a minute is reported lost');
+    await lock.release();
+  }
+
+  // (h) A million rows in one pair collided with row 0 of the next pair: the
+  //     grid's global index wrapped and a tick landed on another pair's file.
+  {
+    const { MultiSession } = require('../src/main/core/session');
+    const m = new MultiSession();
+    m.sessions = [{ nodes: new Array(3) }, { nodes: new Array(3) }];
+    const a = m._split(1000001);
+    eq(a.p, 0, 'row 1 000 001 still belongs to the first pair');
+    eq(a.idx, -1, 'and is refused because that pair does not hold it');
+    const b = m._split(1000000000 + 2);
+    eq(b.p, 1, 'the second pair starts one billion higher');
+    eq(b.idx, 2, 'and keeps its own row number');
+    eq(m._split(-1).s, null, 'a negative index acts on nothing');
+    eq(m._split(1.5).s, null, 'and so does a non-integer one');
+    eq(m._split(1000000000 * 9).s, null, 'as does a pair that does not exist');
+  }
+
+  // (i) Windows long paths were only prefixed at the root, so a deep tree under
+  //     a short root still failed at 260 characters.
+  {
+    const { NativeFs } = require('../src/main/fs/native');
+    const nat = new NativeFs();
+    const seen = [];
+    nat.longPath = p => { seen.push(p); return p; };
+    nat.join('base', 'a', 'b.mov');
+    eq(seen.length, 1, 'every joined path goes through the long-path rule');
+    ok(seen[0].endsWith('b.mov'), 'and it sees the full path, not just the root');
+
+    const proto = Object.getPrototypeOf(nat);
+    const deep = 'C:\\B\\' + 'x'.repeat(250);
+    const orig = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    try {
+      ok(proto.longPath.call(nat, deep).startsWith('\\\\?\\'),
+         'a path past 240 characters gets the prefix');
+      ok(proto.longPath.call(nat, '\\\\nas\\share\\' + 'y'.repeat(250)).startsWith('\\\\?\\UNC\\'),
+         'and a UNC path gets the UNC form');
+    } finally {
+      Object.defineProperty(process, 'platform', { value: orig, configurable: true });
+    }
+  }
+
+  // (j) Two overlapping connections in the server window: the slower handshake
+  //     landed last and overwrote — and leaked — the newer one.
+  {
+    const { RemoteBrowser } = require('../src/main/fs/browse');
+    const b = new RemoteBrowser();
+    let closed = 0;
+    const fake = { close: async () => { closed++; } };
+    b.fs = fake;
+    const gen = b._gen;
+    await b.close();
+    eq(closed, 1, 'closing hangs up the live connection');
+    ok(b._gen > gen, 'and invalidates any handshake still in flight');
+    eq(b.fs, null, 'leaving nothing behind');
+  }
+}
+
+// ══ 25. Folders the OS keeps something in (0.5.3) ═════════════════════════
+async function testOsFolderLitter() {
+  console.log('\n\n25. OS folders that blocked a removal (0.5.3)');
+
+  // (a) THE one Noar hit: an HFS+ backup volume whose ingest folders each held
+  //     a "System Volume Information" directory. The comparison skips that
+  //     name, so the folder looked empty; the removal only ever unlinked
+  //     FILES, so the folder could never go — every run reported
+  //     "ENOTEMPTY: directory not empty" on a folder Finder showed as empty.
+  {
+    const { L, R } = scratch();
+    write(L, 'keep.mov', 'data');
+    write(R, 'keep.mov', 'data');
+    write(R, 'ZZZZZZ/001_NOAR_Panasonic/System Volume Information/WPSettings.dat', 'windows');
+    write(R, 'ZZZZZZ/001_NOAR_Panasonic/System Volume Information/IndexerVolumeGuid', 'guid');
+    write(R, 'ZZZZZZ/002_NOAR_Panasonic/.DS_Store', 'finder');
+    const { run, error } = await stepped(makeJob(L, R, { sync: { variant: 'mirror', deletion: 'permanent' } }));
+    ok(!error, 'the run is not refused');
+    eq(run.errors.length, 0, 'and reports no error at all');
+    ok(!fs.existsSync(path.join(R, 'ZZZZZZ', '001_NOAR_Panasonic')),
+       'the folder holding System Volume Information is removed');
+    ok(!fs.existsSync(path.join(R, 'ZZZZZZ', '002_NOAR_Panasonic')),
+       'and so is the one holding only a .DS_Store');
+    ok(!fs.existsSync(path.join(R, 'ZZZZZZ')), 'the empty parent goes with them');
+  }
+
+  // (b) The volume's recycle bin is NOT bookkeeping: it holds files somebody
+  //     deleted and may want back. That folder is refused — but the message
+  //     has to say why, which "ENOTEMPTY" never did.
+  {
+    const { L, R } = scratch();
+    write(R, 'A001/.Trashes/501/deleted-by-mistake.mov', 'precious');
+    const { run } = await stepped(makeJob(L, R, { sync: { variant: 'mirror', deletion: 'permanent' } }));
+    eq(run.errors.length, 1, 'the folder is refused');
+    const msg = run.errors[0].message;
+    ok(/still contains/.test(msg), 'and the message says the folder is not empty in plain words');
+    ok(/\.Trashes/.test(msg), 'names what is in the way');
+    ok(!/ENOTEMPTY/.test(msg), 'instead of a system error code');
+    ok(fs.existsSync(path.join(R, 'A001/.Trashes/501/deleted-by-mistake.mov')),
+       'and the file somebody may want back is untouched');
+  }
+
+  // (c) A file the filter hid still blocks the removal — correctly — and the
+  //     message names it instead of leaving the user in front of a folder that
+  //     looks empty.
+  {
+    const { R, L } = scratch();
+    write(R, 'A001/clip.mov', 'x');
+    write(R, 'A001/notes.bak', 'excluded');
+    const { run } = await stepped(makeJob(L, R, {
+      sync: { variant: 'mirror', deletion: 'permanent' },
+      compare: { excludeFilter: '*.bak' },
+    }));
+    eq(run.errors.length, 1, 'one error for the folder');
+    ok(/"notes\.bak"/.test(run.errors[0].message), 'and it names the file that is in the way');
+    ok(fs.existsSync(path.join(R, 'A001/notes.bak')), 'which is still there, as it should be');
+  }
+
+  // (d) A symbolic link is excluded from the comparison by default, so it too
+  //     could only show up as ENOTEMPTY.
+  {
+    const { L, R } = scratch();
+    fs.mkdirSync(path.join(R, 'A001'), { recursive: true });
+    try { fs.symlinkSync('/tmp', path.join(R, 'A001', 'shortcut')); }
+    catch (_) { return; }                       // no symlinks on this filesystem
+    const { run } = await stepped(makeJob(L, R, { sync: { variant: 'mirror', deletion: 'permanent' } }));
+    eq(run.errors.length, 1, 'the folder holding a link is refused');
+    ok(/"shortcut"/.test(run.errors[0].message), 'and the link is named');
+  }
+}
+
 // ══ Run ════════════════════════════════════════════════════════════════════
 (async function main() {
   console.log('syncto engine tests');
@@ -1730,6 +2177,10 @@ function testNtfySecrets() {
     await testNasRegression();
     await testAfterAndNtfy();
     testNtfySecrets();
+    await testSingleCopyMode();
+    await testAudit051();
+    await testAudit051Engine();
+    await testOsFolderLitter();
   } catch (err) {
     failed++;
     failures.push('UNCAUGHT: ' + (err.stack || err.message));

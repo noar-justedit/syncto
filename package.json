@@ -1,6 +1,6 @@
 {
   "name": "syncto",
-  "version": "0.4.0",
+  "version": "0.5.3",
   "description": "Folder comparison and synchronization for video professionals",
   "main": "src/main/main.js",
   "author": "Just Edit <contact@just-edit.fr>",
@@ -24,8 +24,8 @@
     "pack": "electron-builder --config electron-builder.yml --dir"
   },
   "devDependencies": {
-    "electron": "^34.0.0",
-    "electron-builder": "^24.13.3"
+    "electron": "^43.4.1",
+    "electron-builder": "^26.15.3"
   },
   "dependencies": {
     "hash-wasm": "^4.12.0",

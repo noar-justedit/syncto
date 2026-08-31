@@ -78,7 +78,27 @@ const CHECKSUM_FILE = 'syncto-checksums.txt';
 const ALWAYS_SKIP = new Set([
   CHECKSUM_FILE,
   '.DS_Store', '.Spotlight-V100', '.Trashes', '.fseventsd', '.TemporaryItems',
+  '.DocumentRevisions-V100',
   'Thumbs.db', 'desktop.ini', '$RECYCLE.BIN', 'System Volume Information',
+]);
+
+// The skipped names that are FOLDERS, and whose contents belong to the
+// operating system rather than to anyone: Windows indexing and restore data,
+// Spotlight's index, the FSEvents journal. When syncto is removing the folder
+// that holds one of them, it may take it whole — the volume recreates it on
+// the spot if it still wants it.
+//
+// This is the list that was missing. The comparison skipped these names, so a
+// folder holding one of them looked empty; the removal only ever unlinked
+// FILES, so it never could be. Every run reported "ENOTEMPTY: directory not
+// empty" on a folder Finder showed as empty, and no run could ever clear it.
+//
+// ".Trashes" and "$RECYCLE.BIN" are deliberately NOT here: they hold files
+// somebody deleted and may want back. A folder containing one of those is
+// refused, with an explanation.
+const OS_LITTER_FOLDERS = new Set([
+  'System Volume Information', '.Spotlight-V100', '.fseventsd',
+  '.TemporaryItems', '.DocumentRevisions-V100',
 ]);
 
 function isSyncToInternal(name) {
@@ -434,6 +454,7 @@ class Comparer {
 
 module.exports = {
   Comparer, CAT, OP, compareTime, sameTime, equalContent,
-  TEMP_EXT, OLD_EXT, DB_NAME, LOCK_NAME, CHECKSUM_FILE, ALWAYS_SKIP, isSyncToInternal,
+  TEMP_EXT, OLD_EXT, DB_NAME, LOCK_NAME, CHECKSUM_FILE, ALWAYS_SKIP, OS_LITTER_FOLDERS,
+  isSyncToInternal,
   DEFAULT_TOLERANCE_SEC,
 };

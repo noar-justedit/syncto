@@ -174,7 +174,12 @@ class DirLock {
     this.timer = null;
     this.released = false;
     this.lost = null;
-    this._misses = 0;
+    // WALL CLOCK, not a count of failed beats. A share that freezes does not
+    // make appendFile fail — it makes it block, for ever — so the previous
+    // counter stayed at zero while the file stopped growing and another
+    // machine legitimately took the folder. What matters is how long it has
+    // been since a beat actually landed.
+    this._lastBeat = Date.now();
   }
 
   _fail(reason) {
@@ -186,7 +191,16 @@ class DirLock {
 
   _startHeartbeat() {
     const beat = () => {
-      if (this.released || this.lost || this._beating) return;
+      if (this.released || this.lost) return;
+      // Checked on EVERY tick, including while a previous beat is still stuck
+      // in a blocked write. This is the only thing that notices a mount that
+      // has stopped answering.
+      const silent = Date.now() - this._lastBeat;
+      if (silent >= DETECT_ABANDONED_MS) {
+        return this._fail(`the lock file has not been refreshed for ${
+          Math.round(silent / 1000)} s — the folder may have been taken over`);
+      }
+      if (this._beating) return;
       this._beating = (async () => {
         // Still ours? A stat is not enough — the file may have been taken over
         // and recreated by someone else, at a similar size.
@@ -199,17 +213,13 @@ class DirLock {
         // A single space. Growing the file IS the life sign — nothing else
         // needs to be readable or parsed by the other side.
         await this.fs.appendByte(this.path, ' ');
-        this._misses = 0;
+        this._lastBeat = Date.now();
       })()
         .catch(err => {
-          // A hiccup is normal; silence for longer than the abandonment window
-          // is not, because by then another machine is entitled to the folder.
-          if (/taken over|disappeared/.test(err.message || '')) return this._fail(err.message);
-          this._misses++;
-          if (this._misses * EMIT_LIFE_SIGN_MS >= DETECT_ABANDONED_MS) {
-            this._fail(`the lock file could not be refreshed for ${
-              Math.round(this._misses * EMIT_LIFE_SIGN_MS / 1000)} s (${err.message})`);
-          }
+          // A hiccup is normal — the tick above is what decides when silence
+          // has lasted long enough for another machine to be entitled to the
+          // folder. Losing it outright is immediate, though.
+          if (/taken over|disappeared/.test(err.message || '')) this._fail(err.message);
         })
         .finally(() => { this._beating = null; });
     };

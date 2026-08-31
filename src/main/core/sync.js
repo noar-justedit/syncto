@@ -34,7 +34,7 @@
 // SECOND PASS, once every file has been copied — same order as ingesto: copy
 // everything, then read everything back.
 
-const { OP, TEMP_EXT, OLD_EXT, ALWAYS_SKIP, isSyncToInternal } = require('./compare');
+const { OP, TEMP_EXT, OLD_EXT, ALWAYS_SKIP, OS_LITTER_FOLDERS, isSyncToInternal } = require('./compare');
 const { createHasher, hashStream, algoFor } = require('./hash');
 const { Versioner, runTimestamp, streamCopy } = require('./versioning');
 
@@ -108,7 +108,6 @@ class SyncRunner {
    *   right: { fs, path },
    *   nodes,                        // categorized, with .op resolved
    *   config: {
-   *     copyLevel: 'fast'|'verified'|'secure',
    *     writeChecksumList: bool,
    *     deletion: 'permanent'|'recycler'|'versioning',
    *     versioning: { leftFolder, rightFolder, style, maxAgeDays, countMin, countMax },
@@ -136,15 +135,20 @@ class SyncRunner {
     this.notes     = [];
     this.checksums = { left: [], right: [] };
 
+    // One archive per file per run. Retries call archiveExisting again, and
+    // every revision path in a run shares the same timestamp — so the second
+    // attempt overwrote the good version put aside by the first with whatever
+    // fragment the failed attempt had left at the target.
+    this._archived = new Set();
+
     this.meter = new RateMeter();
     this.done  = { files: 0, bytes: 0, deleted: 0, folders: 0, moved: 0, errors: 0 };
     this.plan  = { files: 0, bytes: 0, deletions: 0, folders: 0, moves: 0 };
 
-    // At the secure level every byte written is also read back, so the real
-    // work is twice the data. Counting only the writes made the ring freeze
-    // during verification — the pass was invisible.
-    const lvl = (this.cfg.copyLevel || 'verified');
-    this.verifyFactor = lvl === 'secure' ? 2 : 1;
+    // Every byte written is also read back, so the real work is twice the
+    // data. Counting only the writes made the ring freeze during
+    // verification — the pass was invisible.
+    this.verifyFactor = 2;
     this.done.workBytes = 0;      // written + read back
     this.plan.workBytes = 0;
     this.phase = 'copy';          // 'copy' | 'verify' | 'cleanup' — drives the colours
@@ -337,16 +341,73 @@ class SyncRunner {
   // leftovers, so a folder that LOOKED empty can still contain them. Sweep
   // exactly those before removing; anything else still makes rmdir fail loudly.
   async rmdirClean(fsx, path) {
-    try {
-      const entries = await fsx.readdir(path);
-      for (const e of entries) {
-        if (e.type === 'file' &&
-            (ALWAYS_SKIP.has(e.name) || isSyncToInternal(e.name) ||
-             e.name.endsWith(TEMP_EXT) || e.name.endsWith(OLD_EXT))) {
-          try { await fsx.unlink(fsx.join(path, e.name)); } catch (_) {}
-        }
+    // Try the plain removal FIRST. The sweep below deletes real files — the
+    // checksum list among them — and it used to run unconditionally: a folder
+    // held back by one filtered file lost its syncto-checksums.txt and then
+    // survived anyway, so the manifest was destroyed for nothing, outside any
+    // deletion policy, with only an ENOTEMPTY to show for it.
+    try { await fsx.rmdir(path); return; } catch (_) { /* not empty */ }
+
+    let entries = [];
+    try { entries = await fsx.readdir(path); } catch (_) { await fsx.rmdir(path); return; }
+
+    // Only sweep when litter is ALL that stands in the way.
+    const files = [], folders = [], blockers = [];
+    for (const e of entries) {
+      if (e.type === 'folder') {
+        if (OS_LITTER_FOLDERS.has(e.name)) folders.push(e.name);
+        else blockers.push(e.name);
+        continue;
       }
-    } catch (_) { /* let rmdir report the real problem */ }
+      const isLitter = e.type === 'file' &&
+        (ALWAYS_SKIP.has(e.name) || isSyncToInternal(e.name) ||
+         e.name.endsWith(TEMP_EXT) || e.name.endsWith(OLD_EXT));
+      if (isLitter) files.push(e.name);
+      else blockers.push(e.name);
+    }
+
+    // Say WHAT is in the way. A bare "ENOTEMPTY: directory not empty" is a
+    // dead end for the user: the folder looks empty in Finder, because what
+    // holds it back is exactly what the comparison hides — an excluded file, a
+    // symlink (excluded by default), the volume's recycle bin.
+    if (blockers.length) {
+      const shown = blockers.slice(0, 3).map(n => `"${n}"`).join(', ');
+      const more  = blockers.length > 3 ? ` and ${blockers.length - 3} more` : '';
+      throw new Error(`The folder could not be removed: it still contains ${shown}${more}. ` +
+        `Those items are outside this synchronization — excluded by a filter, a symbolic link, ` +
+        `or the volume's own recycle bin — so syncto will not delete them. Remove the folder by hand ` +
+        `if you want it gone.`);
+    }
+
+    for (const name of files) {
+      try { await fsx.unlink(fsx.join(path, name)); } catch (_) {}
+    }
+    for (const name of folders) {
+      try { await this.rmTree(fsx, fsx.join(path, name), 0); } catch (_) {}
+    }
+    await fsx.rmdir(path);
+  }
+
+  // Removes an OS bookkeeping folder whole — "System Volume Information",
+  // ".Spotlight-V100" and friends. They are the ONLY folders this is ever
+  // called on: their contents belong to Windows or macOS, never to the user,
+  // and they are recreated on the spot if the volume still wants them. The
+  // volume's recycle bin is deliberately NOT in that list — it holds files
+  // someone deleted and may want back.
+  //
+  // This is what made the removal impossible before: the comparison skips
+  // those names, and the sweep only ever unlinked FILES, so a folder holding
+  // "System Volume Information" could never be emptied and every run reported
+  // ENOTEMPTY on it, for ever.
+  async rmTree(fsx, path, depth) {
+    if (depth > 12) throw new Error(`Too deep to sweep: ${path}`);
+    let entries = [];
+    try { entries = await fsx.readdir(path); } catch (_) { entries = []; }
+    for (const e of entries) {
+      const child = fsx.join(path, e.name);
+      if (e.type === 'folder') await this.rmTree(fsx, child, depth + 1);
+      else { try { await fsx.unlink(child); } catch (_) {} }
+    }
     await fsx.rmdir(path);
   }
 
@@ -356,8 +417,7 @@ class SyncRunner {
     const srcFs = this.side(from).fs, dstFs = this.side(to).fs;
     const src   = this.absNode(n, from);
     const dst   = this.absNode(n, to);
-    const level = this.cfg.copyLevel || 'verified';
-    const algo  = algoFor(level);
+    const algo  = algoFor();
     const failSafe = this.cfg.failSafe !== false;
     const tmp = failSafe ? dst + TEMP_EXT : dst;
 
@@ -464,6 +524,11 @@ class SyncRunner {
     if (algo) {
       this.toVerify.push({
         rel: n.rel, side: to, path: dst,
+        // What the checksum list must name: the spelling the file really has
+        // on THAT side. Writing the canonical NFC form made Verify Folder
+        // report an intact accented file as missing on a byte-exact
+        // filesystem, and made the manifest unusable with xxhsum -c.
+        listRel: this.relOn(n, to),
         digest: copied.digest, size: srcStat.size, algo,
       });
     }
@@ -519,6 +584,13 @@ class SyncRunner {
       const tmp = to + TEMP_EXT;
       try {
         await streamCopy(fsx, from, fsx, tmp);
+        // The source is about to be deleted, so this is the last moment the
+        // data exists twice. Every other copy path checks the size before
+        // committing; this one did not, and it is the one that then unlinks.
+        const out = await fsx.stat(tmp);
+        if (!out || out.size !== st.size) {
+          throw new Error(`Size mismatch while moving ${n.rel} (${out ? out.size : 0} of ${st.size}).`);
+        }
         await fsx.rename(tmp, to);
       } catch (err) {
         try { await fsx.unlink(tmp); } catch (_) {}
@@ -543,9 +615,15 @@ class SyncRunner {
   async archiveExisting(side, node) {
     const mode = this.cfg.deletion || 'recycler';
     if (mode === 'permanent') return;
+    // Already put aside earlier in this run — by a first attempt that then
+    // failed, most likely. What sits at the target now is that attempt's
+    // leftover, and archiving it again would bury the version we saved.
+    const once = side + '\u0000' + node.rel;
+    if (this._archived.has(once)) return;
     const fsx = this.side(side).fs;
     const p = this.absNode(node, side);
     if (!(await fsx.exists(p))) return;
+    this._archived.add(once);
 
     if (mode === 'versioning') {
       const v = this.versionerFor(side);
@@ -653,9 +731,12 @@ class SyncRunner {
 
     // Which sides will actually lose a file: deletions, and overwrites, which
     // put the replaced version aside the same way.
+    // Folder removals are NOT included: dispose(…, isFolder) goes through
+    // rmdirClean and never touches the recycle bin, so demanding one for them
+    // refused whole runs — a NAS with one stale empty folder to drop copied
+    // nothing at all.
     const sides = new Set();
     for (const d of plan.del)   sides.add(d.side);
-    for (const d of plan.rmdir) sides.add(d.side);
     for (const c of plan.copy) {
       const n = c.n;
       if (n.op === OP.OVERWRITE_LEFT || n.op === OP.OVERWRITE_RIGHT) sides.add(c.to);
@@ -798,7 +879,7 @@ class SyncRunner {
           if (back !== item.digest) throw new Error(`Checksum mismatch (${item.algo}).`);
           item.ok = true;
           if (this.cfg.writeChecksumList) {
-            this.checksums[item.side].push({ rel: item.rel, hash: item.digest, size: item.size });
+            this.checksums[item.side].push({ rel: item.listRel || item.rel, hash: item.digest, size: item.size });
           }
         } catch (err) {
           if (/cancelled/i.test(err.message || '')) break;

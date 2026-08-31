@@ -72,7 +72,20 @@ case "$1" in
     ;;
   *)
     echo "  Building macOS Apple Silicon (arm64)..."
-    npm run build:mac
+    # The .app is built before the .dmg is wrapped around it. If only the disk
+    # image failed, the application is finished — hand it over as a zip instead
+    # of reporting a failed build and leaving nothing behind.
+    if ! npm run build:mac; then
+      if [ -d "dist/mac-arm64/$APP.app" ]; then
+        echo "${YELLOW}  The disk image failed; packing the app as a zip instead.${NC}"
+        ( cd dist/mac-arm64 && ditto -c -k --sequesterRsrc --keepParent "$APP.app" "../$APP-$VERSION-mac-arm64.zip" )
+        echo "${GREEN}  Portable: dist/$APP-$VERSION-mac-arm64.zip${NC}"
+        echo ""
+        exit 0
+      fi
+      echo "${RED}  The build failed before the application was produced.${NC}"
+      exit 1
+    fi
     echo ""
     echo "${GREEN}  Installer: dist/$APP-$VERSION-mac-arm64.dmg${NC}"
     echo "  Open the .dmg, drag $APP into Applications."

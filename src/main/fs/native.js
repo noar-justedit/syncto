@@ -54,7 +54,11 @@ class NativeFs {
   async connect() { /* nothing to do */ }
   async close()   { /* nothing to do */ }
 
-  join(...parts)  { return path.join(...parts); }
+  // Every path the engine builds below the root goes through here, which is
+  // where the Windows long-path prefix has to be applied: the root itself is
+  // usually short (D:\Backup) and it is the tree UNDER it that runs past 260
+  // characters. Prefixing only in resolve() left every deep child unprotected.
+  join(...parts)  { return this.longPath(path.join(...parts)); }
   dirname(p)      { return path.dirname(p); }
   basename(p)     { return path.basename(p); }
   isAbsolute(p)   { return path.isAbsolute(p); }

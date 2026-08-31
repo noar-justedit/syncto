@@ -123,6 +123,7 @@ class SyncDb {
     return {
       type  : e.t === 'd' ? 'folder' : e.t === 'l' ? 'symlink' : 'file',
       cmpVar: e.v || 'timeSize',
+      synced: !!e.sy,
       left  : { mtime: e.lm || 0, size: e.ls || 0, id: e.li || null },
       right : { mtime: e.rm || 0, size: e.rs || 0, id: e.ri || null },
     };
@@ -202,6 +203,14 @@ function buildSession(nodes, applied, prevDb, cmpVariant, leftPath, rightPath, k
         t, v: cmpVariant,
         lm: res.mtimeL != null ? res.mtimeL : res.mtime, ls: res.size,
         rm: res.mtimeR != null ? res.mtimeR : res.mtime, rs: res.size,
+        // "syncto made these two identical, in this run." The two recorded
+        // dates can legitimately DIFFER — when the target refuses utimes (an
+        // SFTP server without SETSTAT, a FAT volume) or when preserving dates
+        // is off, the copy carries its own date and the database records what
+        // is really on disk. Without this flag, stillInSync compared the two
+        // stored dates, found them apart, and declared a conflict that no
+        // later run could ever clear.
+        sy: 1,
       };
       if (res.idL) e.li = res.idL;
       if (res.idR) e.ri = res.idR;

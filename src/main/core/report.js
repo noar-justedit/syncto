@@ -91,7 +91,7 @@ function buildReport(input) {
       syncVariant: variant,
       compareVariant,
       copyLevel,
-      checksumAlgorithm: copyLevel === 'secure' ? 'xxh64' : '',
+      checksumAlgorithm: 'xxh64',
       deletion, versioningStyle,
       includeFilter: filter ? filter.include : '*',
       excludeFilter: filter ? filter.exclude : '',
@@ -109,6 +109,9 @@ function buildReport(input) {
       itemsRemoved: run.counters ? run.counters.deleted : 0,
       bytesCopied: run.counters ? run.counters.bytes : 0,
       plannedBytes: run.plan ? run.plan.bytes : 0,
+      // Files that were read back from their final place and matched. The
+      // report is the artefact a DIT keeps; it has to say what was checked.
+      filesVerified: run.verified || 0,
     },
     comparison: stats || null,
     comparisonErrors: comparisonErrors || [],
@@ -143,6 +146,32 @@ function toHtml(rep) {
                    : 'Completed successfully';
   const statusColor = rep.cancelled ? '#f2a03d' : rep.totals.failed ? '#f2555a' : '#35c98b';
 
+  // What was actually checked, in one sentence, per level. A report that says
+  // "verified" for a level that never read anything back would be exactly the
+  // lie the engine takes such care to avoid.
+  const vFailed = (rep.errors || []).filter(e => /checksum mismatch/i.test(e.message || '')).length;
+  let verifyClass, verifyHead, verifySub;
+  if (vFailed) {
+    verifyClass = 'bad';
+    verifyHead = `${vFailed} file${vFailed > 1 ? 's' : ''} failed verification`;
+    verifySub = 'They were read back from their final location and did not match the fingerprint '
+      + 'taken while writing. They are excluded from the checksum list below.';
+  } else if (rep.totals.filesVerified) {
+    verifyClass = 'good';
+    verifyHead = `${rep.totals.filesVerified} file${rep.totals.filesVerified > 1 ? 's' : ''} read back and verified (xxHash64)`;
+    verifySub = 'Every file was copied, then read from its final location and compared with the '
+      + 'fingerprint taken while writing. Not one differed.';
+  } else if (rep.totals.filesCopied) {
+    verifyClass = 'plain';
+    verifyHead = `${rep.totals.filesCopied} file${rep.totals.filesCopied > 1 ? 's' : ''} copied and size-checked`;
+    verifySub = 'Each copy was written beside its target, checked for its full size, and only then '
+      + 'renamed into place. The Secure level additionally reads every file back and compares fingerprints.';
+  } else {
+    verifyClass = 'plain';
+    verifyHead = 'No file was copied';
+    verifySub = 'Nothing needed verifying on this run.';
+  }
+
   const row = i => `<tr class="${i.ok ? '' : 'bad'}">
     <td class="op ${i.op}">${esc(i.opText)}</td>
     <td class="p">${esc(i.rel)}</td>
@@ -171,6 +200,16 @@ h1 span{color:var(--accent)}
 border-radius:9px;border:1px solid ${statusColor}44;background:${statusColor}18;color:${statusColor};font-weight:700}
 .status .dot{width:9px;height:9px;border-radius:50%;background:${statusColor};box-shadow:0 0 9px ${statusColor}}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(178px,1fr));gap:9px;margin:22px 0}
+/* What was actually checked. Same colour code as the application: green for a
+   clean read-back, red for a mismatch, neutral for a size check. */
+.verify{display:block;padding:13px 16px;border-radius:11px;margin:0 0 22px;
+border:1px solid var(--border);background:var(--bg2)}
+.verify b{display:block;font-size:14px;margin-bottom:3px}
+.verify span{font-size:12.5px;color:var(--text3);line-height:1.55}
+.verify.good{border-color:#35c98b55;background:#35c98b14}
+.verify.good b{color:#35c98b}
+.verify.bad{border-color:#f2555a66;background:#f2555a16}
+.verify.bad b{color:#f2555a}
 .card{background:var(--bg2);border:1px solid var(--border);border-radius:11px;padding:12px 14px}
 .card .l{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--text3)}
 .card .v{font-size:21px;font-weight:700;font-family:var(--mono);margin-top:4px}
@@ -216,10 +255,12 @@ footer{margin-top:26px;color:var(--text3);font-size:11.5px;border-top:1px solid 
   <div class="card"><div class="l">Duration</div><div class="v">${esc(fmtDuration(rep.durationMs))}</div></div>
 </div>
 
+<div class="verify ${verifyClass}"><b>${esc(verifyHead)}</b><span>${esc(verifySub)}</span></div>
+
 <div class="panel"><h2>Settings</h2>
 ${kv('Synchronization', s.syncVariant)}
 ${kv('Comparison', s.compareVariant)}
-${kv('Copy level', s.copyLevel + (s.checksumAlgorithm ? ` (${s.checksumAlgorithm})` : ''))}
+${kv('Copy', `every file read back and compared (${s.checksumAlgorithm})`)}
 ${kv('Deletion', s.deletion + (s.deletion === 'versioning' ? ` (${s.versioningStyle})` : ''))}
 ${kv('Include filter', s.includeFilter || '*')}
 ${kv('Exclude filter', s.excludeFilter || '—')}

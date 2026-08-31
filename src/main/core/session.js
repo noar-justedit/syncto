@@ -26,7 +26,7 @@ const { applyDirections, computeStats, operationFor, applyFolderRules,
         detectMoves, dissolveMove, usesDatabase } = require('./direction');
 const { loadPairDb, savePairDb, buildSession, pairIdFor } = require('./db');
 const { SyncRunner } = require('./sync');
-const { FsPool, parseLocation } = require('../fs/afs');
+const { FsPool, parseLocation, redactLocation } = require('../fs/afs');
 const { buildReport, toHtml, toCsv, toJson } = require('./report');
 const { formatChecksumList, parseChecksumList, createHasher, hashStream } = require('./hash');
 const { acquireAll } = require('./lock');
@@ -288,11 +288,36 @@ class Session {
     return { rows, totalBytes: total === 1 ? 0 : total, identical: rows.length === 0 };
   }
 
+  // A base folder that is GONE reads as an empty side, and an empty side plus
+  // a mirror is a mass deletion of the healthy one. Returns the message to
+  // refuse with, or null.
+  //
+  // This MUST be answered before the folder locks are taken: acquireAll
+  // creates a base folder that is not there yet, so asking afterwards meant
+  // the missing mount point existed by then — and the NEXT comparison, finding
+  // an empty folder instead of a missing one, planned the mass deletion for
+  // real.
+  missingRootProblem() {
+    for (const e of this.errors) {
+      if (!e.missingRoot) continue;
+      const otherSide = e.missingRoot === 'left' ? 'right' : 'left';
+      const doomed = this.nodes.filter(n => n.active &&
+        n.op === (otherSide === 'left' ? OP.DELETE_LEFT : OP.DELETE_RIGHT));
+      if (!doomed.length) continue;
+      return `The ${e.missingRoot} folder is not there (${e.path}), which makes that side look empty — ` +
+        `and this job would delete ${doomed.length} item${doomed.length > 1 ? 's' : ''} from the ${otherSide} side because of it. ` +
+        `Reconnect the drive or fix the path, then compare again.`;
+    }
+    return null;
+  }
+
   // Everything that would make the run refuse, checked WITHOUT running it, so
   // the confirmation dialog can say it while the user still has a choice.
   // Returns [] when the job is good to go.
   async preflight(job, opts) {
     if (!this.nodes.length) return [];
+    const missing = this.missingRootProblem();
+    if (missing) return [{ message: missing, preflight: true }];
     const runner = new SyncRunner({
       left: this.left, right: this.right,
       nodes: this.nodes,
@@ -329,17 +354,8 @@ class Session {
     // the fatal-error guard above never saw it. Creating a missing TARGET is
     // legitimate — deleting the other side because of it is not, so the run is
     // refused only when the plan actually removes something over there.
-    for (const e of this.errors) {
-      if (!e.missingRoot) continue;
-      const otherSide = e.missingRoot === 'left' ? 'right' : 'left';
-      const doomed = this.nodes.filter(n => n.active &&
-        n.op === (otherSide === 'left' ? OP.DELETE_LEFT : OP.DELETE_RIGHT));
-      if (!doomed.length) continue;
-      throw new Error(
-        `The ${e.missingRoot} folder is not there (${e.path}), which makes that side look empty — ` +
-        `and this job would delete ${doomed.length} item${doomed.length > 1 ? 's' : ''} from the ${otherSide} side because of it. ` +
-        `Reconnect the drive or fix the path, then compare again.`);
-    }
+    const missing = this.missingRootProblem();
+    if (missing) throw new Error(missing);
 
     const startedAt = Date.now();
 
@@ -358,7 +374,7 @@ class Session {
     // copied, and a sidecar reduced to today's three files would silently stop
     // vouching for the thousand verified last month.
     const sidecars = [];
-    const wantList = job.sync.writeChecksumList && job.sync.copyLevel === 'secure';
+    const wantList = !!job.sync.writeChecksumList;
     if (wantList) {
       for (const side of ['left', 'right']) {
         const list = run.checksums[side];
@@ -394,7 +410,14 @@ class Session {
     // by two-way/update for their directions, and by every variant for move
     // detection (the ids recorded now are tomorrow's rename evidence).
     let dbStamp = null;
-    if (usesDatabase(job.sync.variant) || this.wantMoves) {
+    // A lock lost mid-run means another machine owns these folders now, and it
+    // may already have written its own database there. Merging ours on top
+    // would replace a real synchronous state with our partial one — the next
+    // run would then decide two-way directions from a state that never existed.
+    if (opts && typeof opts.lockLost === 'function' && opts.lockLost()) {
+      run.notes.push('The synchronization database was NOT updated: the folder lock was lost, ' +
+        'so another machine may already have written its own.');
+    } else if (usesDatabase(job.sync.variant) || this.wantMoves) {
       try {
         const pairId = this.pairId || pairIdFor(job.pairId, this.left.path, this.right.path);
         // Entries hidden by the current hard filter keep their history.
@@ -496,7 +519,14 @@ class Session {
 // list stays readable.
 // ═══════════════════════════════════════════════════════════════════════════
 
-const PAIR_BASE = 1_000_000;   // up to a million items per pair
+// Up to a billion items per pair. It used to be a million, which a single
+// backup of a card archive can genuinely exceed — and when it did, item
+// 1 000 000 of pair 0 got the same global index as item 0 of pair 1, so
+// ticking a row in one pair silently changed a row in another. A billion is
+// far past any real folder, and pair 0..9 000 000 still stays inside
+// Number.MAX_SAFE_INTEGER. _split also refuses an index it cannot decode
+// rather than acting on the wrong pair.
+const PAIR_BASE = 1_000_000_000;
 
 function mergeStats(list) {
   const out = {
@@ -520,7 +550,13 @@ function mergeStats(list) {
 }
 
 function pairLabel(p) {
-  const base = s => String(s || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || s;
+  // Redacted FIRST. An sftp:// address with no path made `split('/').pop()`
+  // return "user:secret@host", and that label travels into error rows, the
+  // report and the body of the phone notification.
+  const base = s => {
+    const r = redactLocation(s);
+    return r.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || r;
+  };
   return `${base(p.left)} → ${base(p.right)}`;
 }
 
@@ -540,8 +576,15 @@ class MultiSession {
   }
 
   _split(gidx) {
+    if (!Number.isSafeInteger(gidx) || gidx < 0) return { s: null, idx: -1, p: -1 };
     const p = Math.floor(gidx / PAIR_BASE);
-    return { s: this.sessions[p], idx: gidx % PAIR_BASE, p };
+    const idx = gidx % PAIR_BASE;
+    const s = this.sessions[p];
+    // A row index past the end of that pair means the caller is working from a
+    // stale grid (a comparison finished in between). Doing nothing is the only
+    // safe answer — the alternative is toggling whatever now sits there.
+    if (!s || !Array.isArray(s.nodes) || idx >= s.nodes.length) return { s: null, idx: -1, p };
+    return { s, idx, p };
   }
 
   async compare(job, opts) {
@@ -733,6 +776,15 @@ class MultiSession {
       throw new Error('The folders changed since the last comparison. Compare again before synchronizing.');
     }
 
+    // Before the locks, not after: acquireAll creates a base folder that does
+    // not exist yet, which would make a missing drive look like an empty one
+    // from the next comparison on.
+    const blocking = await this.preflight(job, opts);
+    if (blocking.length) {
+      const b = blocking[0];
+      throw new Error((b.label ? `[${b.label}] ` : '') + b.message);
+    }
+
     const startedAt = Date.now();
     const multi = this.sessions.length > 1;
 
@@ -763,8 +815,7 @@ class MultiSession {
     try {
 
     // Grand totals first, so the progress ring covers the whole job.
-    const lvl = job.sync.copyLevel || 'verified';
-    const verifyFactor = lvl === 'secure' ? 2 : 1;
+    const verifyFactor = 2;          // every byte is written, then read back
     let bytesTotal = 0, filesTotal = 0;
     for (const s of this.sessions) {
       const st = s.stats || {};
@@ -789,6 +840,7 @@ class MultiSession {
       try {
         res = await this.sessions[p].sync(pairJob, {
           token, trashItem, appVersion, defaultReportFolder,
+          lockLost: () => !!lockLost,
           skipReport: multi,             // one merged report at the end instead
           onProgress: prog => onProgress && onProgress(Object.assign({}, prog, {
             pair: p + 1, pairs: this.pairs.length, pairLabel: pairLabel(pr),
@@ -966,4 +1018,4 @@ async function readText(fsx, p) {
   });
 }
 
-module.exports = { Session, MultiSession, verifyFolder, CHECKSUM_FILE, writeText, readText };
+module.exports = { Session, MultiSession, verifyFolder, CHECKSUM_FILE, writeText, readText, pairLabel };

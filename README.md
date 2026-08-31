@@ -3,8 +3,8 @@
 
 Open-source folder sync for video and audio professionals. Same feature set as
 FreeFileSync, rebuilt from scratch with the ingesto interface: progress ring,
-live throughput graph, ETA, checksum-verified copy levels and an exportable
-copy report.
+live throughput graph, ETA, a checksum-verified copy that reads every file back,
+and an exportable copy report.
 
 Licensed under the **GNU General Public License v3.0** (see [`LICENSE`](./LICENSE)).
 
@@ -12,7 +12,7 @@ Licensed under the **GNU General Public License v3.0** (see [`LICENSE`](./LICENS
 
 ## Screenshots
 
-| Main window | Copying — Secure |
+| Main window | Copy pass |
 |---|---|
 | ![syncto main window](docs/screenshots/syncto-main.png) | ![copy phase](docs/screenshots/syncto-sync.png) |
 
@@ -38,7 +38,7 @@ Licensed under the **GNU General Public License v3.0** (see [`LICENSE`](./LICENS
 | **Synchronize** | 2 Ways, Mirror, Update, or a Custom rule per category |
 | **Multi-pair** | one job synchronizes any number of folder pairs, FreeFileSync-style |
 | **Moved files** | a rename is detected and replayed as a rename — no re-copy |
-| **Verified copy** | three levels, up to xxHash64 read-back with a checksum sidecar |
+| **Verified copy** | one mode: every file read back and compared (xxHash64), with an optional checksum sidecar |
 | **Deletion** | trash or permanent — always announced, never silent |
 | **Filter** | per-job include/exclude patterns, name- or path-anchored |
 | **Report** | HTML, CSV and JSON, with every checksum |
@@ -105,7 +105,7 @@ Install Node.js (Step 1), then double-click `scripts/dev.command`.
 
 - **Top**: the two folders. Type a path, click **Browse**, or drag a folder from
   the Finder onto the field. The line underneath shows the free space.
-- **Toolbar**: how to compare, what to synchronize, how carefully to copy.
+- **Toolbar**: how to compare and what to synchronize.
 - **Grid**: one row per item, left side on the left, right side on the right,
   the decided action in the middle.
 - **Bottom strip**: how many items will be created, updated or removed.
@@ -139,19 +139,22 @@ ids). When in doubt — the file changed as well as moved, ids are ambiguous
 because of hard links — syncto falls back to a plain copy, which is always
 safe. Switchable off in the settings.
 
-### Copy levels
+### How a copy is verified
 
-| Level | What it costs | What it catches |
-|---|---|---|
-| **Fast** | nothing | nothing — it trusts the filesystem |
-| **Verified** | nothing | truncated or interrupted copies (size check) |
-| **Secure** | reads everything twice | silent corruption (xxHash64 read-back) |
+**syncto has one copy mode.** There is no faster setting that skips the check,
+because the reason to run a folder synchroniser over rushes is to know the
+second copy is the same as the first.
 
-**Secure works in two passes, like ingesto**: everything is copied first, then
-everything is read back from the target and compared to the fingerprint taken
-while writing. The interface turns blue and reads `VERIFYING · SECURE` during
-the second pass, and the progress accounts for it — a secure run moves twice the
-data, and says so.
+Every run works in two passes, like ingesto: everything is copied first, then
+everything is read back from its final location and compared to the xxHash64
+fingerprint taken while writing. The window shows the two passes as steps
+before either starts, turns blue and reads `VERIFYING · xxHash64` during the
+second, and the progress accounts for it — a run moves twice the data, and says
+so.
+
+**What that costs you:** roughly twice the time of a copy alone, and over SFTP
+twice the network traffic, since the read-back crosses the wire too. That is the
+price of the summary line at the end saying every file was read back and matched.
 
 Because verification happens after the copy, a file that fails it has already
 replaced the previous version. syncto reports the error, keeps the file out of
@@ -227,8 +230,8 @@ password each time rather than storing it in the clear. Only the *path* of a
 private key is stored, never the key.
 
 Everything else works the same, including checksum verification — it just reads
-the data back over the network, so **Secure** is considerably slower than on a
-local drive. SFTP has no trash and no inode information, so use permanent
+the data back over the network, so a run over SFTP is considerably slower than
+on a local drive. SFTP has no trash and no inode information, so use permanent
 deletion there, and expect renamed files to be re-copied rather than detected
 as moves.
 
@@ -294,11 +297,29 @@ settings, compared and synchronized in one go.
 |---|---|---|
 | `.syncto.db` | root of both folders | the last synchronized state, for two-way sync and move detection. Hidden, gzipped. Delete it and two-way sync restarts from scratch. |
 | `.syncto.lock` | root of each folder, while running | who is synchronizing right now. Removed at the end; reclaimed automatically after a crash. |
-| `syncto-checksums.txt` | root of each target | the checksum list, at the Secure level (merged run after run) |
+| `syncto-checksums.txt` | root of each target | the checksum list, when **Write a checksum list** is on (merged run after run) |
 | `*.syncto_tmp` | next to a file being written | fail-safe copy. A leftover means a run was interrupted; the comparison ignores it and the next synchronization removes it, reporting how much space it reclaimed. |
 | `*.syncto_old` | next to a file being replaced, on SFTP | the previous version, parked for the instant it takes to rename its replacement into place. SFTP cannot replace a file atomically, and deleting the target first would lose it if the connection dropped. Swept like any leftover. |
 | `syncto_<job>_<date>.html` | `Documents/syncto reports` | the report. Written outside the synchronized folders on purpose. |
 | `install-id` | `~/.syncto/` | identifies this installation to the directory lock, so two machines sharing a hostname cannot mistake each other's lock for their own. Delete it and a new one is generated. |
+
+---
+
+## Files syncto never touches
+
+Neither side of a comparison ever shows these, and they are never copied:
+`.DS_Store`, `Thumbs.db`, `desktop.ini`, `.Spotlight-V100`, `.fseventsd`,
+`.TemporaryItems`, `.DocumentRevisions-V100`, `System Volume Information`,
+`$RECYCLE.BIN`, `.Trashes`, and syncto's own `.syncto.*` files.
+
+When a folder holding one of them has to be **removed**, the operating system's
+own bookkeeping folders go with it — `System Volume Information` and friends are
+recreated by the volume on the spot if it still wants them. **`.Trashes` and
+`$RECYCLE.BIN` are not**: they hold files somebody deleted and may want back, so
+a folder containing one is left alone and the reason is reported.
+
+Anything else still in the folder — a file your exclusion filter hides, a
+symbolic link — stops the removal, on purpose, and syncto names it.
 
 ---
 

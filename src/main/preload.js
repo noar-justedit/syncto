@@ -38,6 +38,7 @@ const api = {
   jobSave    : (job, as) => ipcRenderer.invoke('job-save', job, as),
   getOverview: (view)    => ipcRenderer.invoke('get-overview', view),
   preflight  : (job)     => ipcRenderer.invoke('preflight', job),
+  takeMigrationNotes: () => ipcRenderer.invoke('take-migration-notes'),
 
   // After the run, and phone notifications. `ntfyGet` never returns the
   // access token — only whether one is stored.

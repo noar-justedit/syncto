@@ -62,8 +62,29 @@ echo -e "${GREEN}✓ Dependencies ready${NC}"
 
 # ── 3. Build ────────────────────────────────────────────────────
 echo -e "${BLUE}[3/4]${NC} Building the macOS app (Apple Silicon)…"
-npm run build:mac
-echo -e "${GREEN}✓ Build finished${NC}"
+
+# The .app is built first, the .dmg is wrapped around it afterwards. Those are
+# two very different things to fail at: if only the packaging into a disk image
+# went wrong, the application itself is finished and sitting in dist/ — so hand
+# it over as a zip rather than reporting a failed build and leaving the user
+# with nothing.
+if npm run build:mac; then
+  echo -e "${GREEN}✓ Build finished${NC}"
+else
+  APP="dist/mac-arm64/syncto.app"
+  if [ -d "$APP" ]; then
+    echo ""
+    echo -e "${YELLOW}The disk image could not be assembled, but the application itself is built.${NC}"
+    echo -e "${YELLOW}Packing it as a zip instead.${NC}"
+    VER=$(node -e "console.log(require('./package.json').version)" 2>/dev/null || echo "0")
+    ( cd dist/mac-arm64 && ditto -c -k --sequesterRsrc --keepParent syncto.app "../syncto-${VER}-mac-arm64.zip" )
+    echo -e "${GREEN}✓ dist/syncto-${VER}-mac-arm64.zip${NC}"
+    echo "  Unzip it and drag syncto.app into Applications."
+  else
+    echo -e "${RED}✗ The build failed before the application was produced.${NC}"
+    exit 1
+  fi
+fi
 
 # ── 4. Result ───────────────────────────────────────────────────
 echo -e "${BLUE}[4/4]${NC} Result:"

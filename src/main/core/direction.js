@@ -101,6 +101,10 @@ function stillInSync(dbEntry, variant, tol, shifts) {
   if (variant === 'size') return true;
   if (variant === 'content') return dbEntry.cmpVar === 'content';
   if (dbEntry.cmpVar === 'content') return true;
+  // Written by a run of ours: the two sides were made identical then, whatever
+  // dates they ended up carrying. Comparing the two stored dates here is only
+  // meaningful for entries recorded from an observation, not from an action.
+  if (dbEntry.synced) return true;
   return sameTime(dbEntry.left.mtime, dbEntry.right.mtime, tol, shifts);
 }
 
@@ -127,6 +131,13 @@ function directionByChange(node, dirs, dbEntry, cfg) {
 
   if (cl === 'noChange' && cr === 'noChange') {
     if (node.cat === CAT.EQUAL) return { dir: 'none' };
+    // Neither side has moved since a state WE wrote. The two dates differ
+    // because the copy could not carry the source's date (SFTP without
+    // SETSTAT, a FAT volume, "preserve dates" off) — not because anything
+    // changed. Calling that a conflict is a trap: conflicts are skipped, a
+    // skip leaves the database untouched, and the same conflict comes back on
+    // every run for ever.
+    if (dbEntry && dbEntry.synced) return { dir: 'none' };
     return { dir: 'conflict', msg: 'Cannot determine a direction: no change since the last synchronization.' };
   }
   if (cr === 'noChange') return { dir: dirs.left[cl]  || 'none' };

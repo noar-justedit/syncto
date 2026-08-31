@@ -49,9 +49,17 @@ async function createHasher(algo) {
   }
 }
 
-function algoFor(level) {
-  return level === 'secure' ? 'xxh64' : null;
-}
+// syncto has ONE copy mode. Every file is copied, then read back from its
+// final location and compared with the fingerprint taken while writing.
+//
+// It used to offer three levels. Fast and Verified ended up doing exactly the
+// same thing — a size check before the rename — while only Secure read
+// anything back, so two thirds of the choice was a choice between identical
+// behaviours with different names. And a folder synchroniser for rushes has no
+// business offering "copy and hope": the whole reason to run one is to know
+// the second copy is the same as the first.
+const COPY_ALGO = 'xxh64';
+function algoFor() { return COPY_ALGO; }
 
 // Streams a file through a hasher. Returns the lowercase hex digest.
 function hashStream(fsx, filePath, hasher, onBytes, token) {

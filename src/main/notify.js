@@ -70,10 +70,17 @@ function send(opts) {
       if (tags) headers['Tags'] = tags;
       const p = parseInt(opts.priority, 10);
       if (Number.isFinite(p) && p >= 1 && p <= 5) headers['Priority'] = String(p);
-      // Self-hosted servers can require a token. It is sent, never logged, and
-      // never written to disk in the clear (see config.js).
-      const token = headerSafe(opts.token);
-      if (token) headers['Authorization'] = 'Bearer ' + token;
+      // Self-hosted servers can require a token. NOT passed through
+      // headerSafe: stripping a secret to printable ASCII silently mangles it
+      // and the server answers 401. A token that cannot travel as a header is
+      // reported, not quietly truncated.
+      const token = String(opts.token == null ? '' : opts.token).trim();
+      if (token) {
+        if (/[^\x20-\x7E]/.test(token)) {
+          return resolve({ ok: false, error: 'The access token contains characters that cannot be sent in an HTTP header.' });
+        }
+        headers['Authorization'] = 'Bearer ' + token;
+      }
 
       const mod = url.protocol === 'http:' ? http : https;
       const req = mod.request(url, { method: 'POST', headers, timeout: TIMEOUT_MS }, res => {
@@ -107,6 +114,8 @@ async function sendWithRetry(opts) {
 // so it can be tested without a window.
 //   res: what session.sync() returned
 //   jobName: the job's name
+// Says what was checked, not just that it ended: "done" tells a DIT waiting on
+// a two-hour backup nothing they can act on.
 function forRun(res, jobName) {
   const c = res.counters || {};
   const errors = (res.errors || []).length;
@@ -143,8 +152,15 @@ function forRun(res, jobName) {
     if (first) lines.push(`First: ${first.rel ? first.rel + ' — ' : ''}${first.message}`);
     tags = 'warning'; priority = 4;
   } else {
+    // The whole point of the notification is that nobody is at the screen. So
+    // it says what was checked, not just that it ended — "done" tells a DIT
+    // waiting on a two-hour backup nothing they can act on.
     title = `${name} — done`;
-    if (res.verified) lines.push(`${res.verified} verified`);
+    if (res.verified) {
+      lines.push(`✓ ${res.verified} read back and verified (xxHash64)`);
+    } else if (!files) {
+      lines.push('Both sides already matched');
+    }
     tags = 'white_check_mark'; priority = 3;
   }
   return { title, message: lines.join('\n'), tags, priority };

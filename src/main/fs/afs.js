@@ -84,7 +84,12 @@ function parseLocation(phrase, credentials) {
   const m = /^sftp:\/\/(?:([^@/:]+)(?::([^@/]*))?@)?([^/:]+)(?::(\d+))?(\/.*)?$/i.exec(raw);
   if (m) {
     const host = m[3];
-    const cred = (credentials && credentials[`${m[1] || ''}@${host}`]) || {};
+    const port = m[4] ? parseInt(m[4], 10) : 22;
+    // Look for the entry that names this port first: two servers on the same
+    // host and login but different ports have different passwords, and the
+    // port-less key can only hold one of them.
+    const cred = (credentials && (credentials[`${m[1] || ''}@${host}:${port}`] ||
+                                  credentials[`${m[1] || ''}@${host}`])) || {};
     return {
       kind      : 'sftp',
       username  : m[1] || cred.username || '',
@@ -92,7 +97,7 @@ function parseLocation(phrase, credentials) {
       privateKey: cred.privateKey || null,
       passphrase: cred.passphrase || '',
       host,
-      port      : m[4] ? parseInt(m[4], 10) : 22,
+      port,
       path      : m[5] || '/',
       phrase    : raw,
     };
@@ -142,4 +147,16 @@ class FsPool {
   }
 }
 
-module.exports = { FsPool, parseLocation, expandMacros };
+// The same address with any password taken out of it.
+//
+// "sftp://user:secret@host/path" is accepted by parseLocation, so people use
+// it — and that string is a folder path: it is saved into preferences.json,
+// written into the .syncto file people hand to a colleague, printed in
+// reports, and put in the label that ends up in a phone notification. It must
+// never carry a secret past this point.
+function redactLocation(phrase) {
+  const s = String(phrase == null ? '' : phrase);
+  return s.replace(/^(sftp:\/\/)([^@/:]+):([^@/]*)@/i, '$1$2@');
+}
+
+module.exports = { FsPool, parseLocation, expandMacros, redactLocation };

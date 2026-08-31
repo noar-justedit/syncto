@@ -46,6 +46,9 @@ function commandFor(action, platform) {
     // hibernation is enabled on the machine, and there is no way to force
     // plain sleep from a command line. Either way the machine goes to sleep
     // and wakes up where it was, which is what the setting promises.
+    // NOTE for the caller: this call does not return until the machine WAKES
+    // UP. Treating its exit as the result of the request reports a failure the
+    // next morning for a machine that slept perfectly. See run().
     if (p === 'win32')  return { cmd: 'rundll32.exe', args: ['powrprof.dll,SetSuspendState', '0,1,0'] };
     return { cmd: 'systemctl', args: ['suspend'] };
   }
@@ -77,6 +80,22 @@ function run(action, { onQuit } = {}) {
   if (!c) return Promise.resolve({ ok: false, action, error: 'Not supported on this system.' });
 
   return new Promise(resolve => {
+    // Sleeping is fire-and-forget. On Windows the command blocks until the
+    // machine wakes up, and on macOS `pmset sleepnow` returns while the
+    // display is already going dark; waiting on either and reporting the exit
+    // code showed "Sleep failed" on a machine that had slept exactly as asked.
+    // A command that cannot start still reports — that error arrives at once.
+    if (action === 'sleep') {
+      let settled = false;
+      const child = execFile(c.cmd, c.args, () => {});
+      child.on('error', e => {
+        if (settled) return;
+        settled = true;
+        resolve({ ok: false, action, error: `${label(action)} failed (${c.cmd}): ${e.message.split('\n')[0]}` });
+      });
+      setTimeout(() => { if (!settled) { settled = true; resolve({ ok: true, action }); } }, 2000);
+      return;
+    }
     execFile(c.cmd, c.args, { timeout: 15000 }, err => {
       if (!err) return resolve({ ok: true, action });
       // Say what was attempted. "Command failed" on its own tells the user
