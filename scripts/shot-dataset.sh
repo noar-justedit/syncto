@@ -31,4 +31,11 @@ cp "$P1L/A001_C003_260808AB.mov" "$P1R/"
 touch -r "$P1L/A001_C003_260808AB.mov" "$P1R/A001_C003_260808AB.mov"
 
 rm -rf /home/claude/shome/Library "$P1R/.syncto"* "$P2R/.syncto"* 2>/dev/null || true
+
+# The profile the camera sees: a saved job with two pairs, and a recent list
+# that is not empty. Written before the app starts, with the app's own config
+# module — no poking at a running window.
+HOME=/home/claude/shome node "$(dirname "$0")/shot-seed.js" \
+  /home/claude/shome/.config/syncto "/home/claude/shome/syncto jobs"
+
 echo "dataset ready"

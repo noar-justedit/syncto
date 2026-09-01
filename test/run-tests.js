@@ -2151,6 +2151,86 @@ async function testOsFolderLitter() {
   }
 }
 
+// ══ 26. The build scripts' Apple command lines (0.5.6) ════════════════════
+// A static check, and the reason it exists. A draft of the signing library
+// called
+//     xcrun notarytool history --keychain-profile X --limit 1
+// and `--limit` is not an option of `history`. notarytool rejected the command
+// line before it ever reached Apple, the output was thrown away, and the build
+// came out "signed but not notarized" whatever the credentials were.
+//
+// It got past a round of testing because those tests used a fake `xcrun` that
+// answered on the subcommand alone and never looked at the flags — so they
+// tested the stub, not the command. Reading the real command lines out of the
+// scripts and checking them against notarytool's documented options is the
+// check that catches it, and it needs no Mac to run.
+//
+// Options per subcommand, from notarytool(1).
+function testAppleCommandLines() {
+  console.log('\n\n26. Apple command lines in the build scripts (0.5.6)');
+
+  const AUTH = ['--apple-id', '--password', '--team-id', '--key', '--key-id',
+                '--issuer', '--keychain-profile', '--keychain', '-p', '-k', '-d'];
+  const COMMON = ['--output-format', '--verbose', '-v'];
+  const NOTARYTOOL = {
+    'submit'           : [...AUTH, ...COMMON, '--wait', '--timeout', '--webhook',
+                          '--no-progress', '--no-s3-acceleration'],
+    // Authentication only. No --limit. No --page.
+    'history'          : [...AUTH, ...COMMON],
+    'info'             : [...AUTH, ...COMMON],
+    'log'              : [...AUTH, ...COMMON],
+    'store-credentials': ['--apple-id', '--password', '--team-id', '--key',
+                          '--key-id', '--issuer', '--keychain', '--validate',
+                          ...COMMON],
+  };
+  const STAPLER = ['staple', 'validate'];
+
+  const files = ['scripts/notarize-lib.sh', 'scripts/build-mac.sh', 'build.sh'];
+  let calls = 0;
+
+  for (const rel of files) {
+    const file = path.join(__dirname, '..', rel);
+    if (!fs.existsSync(file)) continue;
+    // Join backslash-continued lines so a wrapped command is read whole.
+    const text = fs.readFileSync(file, 'utf8').replace(/\\\n\s*/g, ' ');
+
+    for (const line of text.split('\n')) {
+      // Skip comments — this file explains the bug in prose, and the prose
+      // mentions the flag that must never appear in a command.
+      if (/^\s*#/.test(line)) continue;
+
+      let m = /xcrun\s+notarytool\s+([a-z-]+)([^\n;|&]*)/.exec(line);
+      if (m) {
+        calls++;
+        const sub = m[1];
+        const allowed = NOTARYTOOL[sub];
+        ok(allowed, `notarytool "${sub}" is a real subcommand (${rel})`);
+        for (const flag of (m[2].match(/(^|\s)(--?[a-z][a-z0-9-]*)/g) || [])) {
+          const f = flag.trim();
+          ok(allowed && allowed.includes(f),
+             `notarytool ${sub} accepts ${f} (${rel})`);
+        }
+      }
+
+      m = /xcrun\s+stapler\s+([a-z-]+)/.exec(line);
+      if (m) {
+        calls++;
+        ok(STAPLER.includes(m[1]), `stapler "${m[1]}" is a real subcommand (${rel})`);
+      }
+    }
+  }
+
+  ok(calls >= 4, `the build scripts really do call Apple's tools (${calls} calls checked)`);
+
+  // The specific line that was wrong, pinned so it cannot come back.
+  const lib = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'notarize-lib.sh'), 'utf8');
+  const commands = lib.split('\n').filter(l => !/^\s*#/.test(l)).join('\n');
+  ok(!/notarytool\s+history[^\n]*--limit/.test(commands),
+     'notarytool history is never given --limit again');
+  ok(/store_notary_credentials[^\n]*&&\s*notary_profile_ready/.test(commands) === false,
+     'a successful store-credentials is not second-guessed by another check');
+}
+
 // ══ Run ════════════════════════════════════════════════════════════════════
 (async function main() {
   console.log('syncto engine tests');
@@ -2181,6 +2261,7 @@ async function testOsFolderLitter() {
     await testAudit051();
     await testAudit051Engine();
     await testOsFolderLitter();
+    testAppleCommandLines();
   } catch (err) {
     failed++;
     failures.push('UNCAUGHT: ' + (err.stack || err.message));

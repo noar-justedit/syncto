@@ -4,6 +4,195 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.5.6] — 2026-09-01
+
+**The macOS build now handles signing and notarization by itself.** Reported as
+"the build script should do the whole notarization thing for me — I want
+something simple for my future builds", and that is the right instinct: 0.5.5
+shipped a separate setup step to run first, which is one thing too many to
+remember.
+
+### Changed
+
+- **There is nothing to run before the build.** Double-clicking
+  `scripts/build-mac.command` — or `./build.sh` — is the whole procedure, now
+  and for every build after. The first signed build asks two questions (an Apple
+  ID and an app-specific password), stores them in the keychain, and never asks
+  again. `scripts/notarize-setup.sh` and its `.command` are gone; everything
+  they did happens during the build.
+- **A failed notarization no longer costs you the build.** Notarization is the
+  one step that depends on a company on the other side of the internet
+  answering. When the build fails with it switched on — Apple down, Wi-Fi
+  dropped, a submission rejected — it runs again without it and hands you a
+  signed application, instead of an empty `dist/` and a wasted evening.
+- **The build now checks Apple's command line tools too**, and reports the one
+  command that installs them. Without `notarytool` the failure looked like a
+  credentials problem, which sends you hunting in the wrong place.
+- `./build.sh --sign-setup` is replaced by `./build.sh --sign-check`: a pure
+  report of what you would get, asking and changing nothing. Use it to look
+  without building; you never need it to build.
+- **Credentials Apple has accepted are never second-guessed.**
+  `notarytool store-credentials` validates against Apple before it writes
+  anything, so its exit code is the verdict; re-checking afterwards can only
+  throw away something known to be good. And when the build does look up an
+  already-stored profile, a `notarytool` that will not answer no longer means
+  "not notarized" — the keychain is asked instead, the reason is printed, and
+  the submission itself remains the real test.
+- **Every option the build passes to `notarytool` and `stapler` is now checked
+  by the test suite**, against the list in `notarytool(1)`. `history` takes
+  authentication options and nothing else — no `--limit`, no `--page` — and one
+  invented flag there is enough to make notarytool reject the command line
+  before it reaches Apple, which reads exactly like a wrong password when the
+  output is discarded. A fake `xcrun` that answers on the subcommand alone
+  cannot catch that; reading the real command lines out of the scripts can, and
+  needs no Mac. 15 new assertions, taking the suite to **429**.
+
+### Unchanged
+
+Everything that 0.5.5 established stays exactly as it was: the credentials live
+in the keychain under `syncto-notarization` and never touch the project, the
+disk image gets its own trip to Apple so the first launch works offline, and
+`spctl` reports at the end what a stranger's Mac will do with the file.
+
+**The Windows build script is untouched**, deliberately. It never had anything
+to do with signing, and the fix that made the Windows cross-build work again
+lives in `electron-builder.yml`, not in the script.
+
+---
+
+## [0.5.5] — 2026-08-31
+
+Two build problems, both reported from a real Mac. Nothing in the engine
+changed; the 414 checks pass identically.
+
+### Fixed
+
+- **The Windows build from a Mac was impossible.** It stopped at
+  `⨯ node-gyp does not support cross-compiling native modules from source`,
+  before packaging anything.
+
+  syncto's own code compiles nothing — but **ssh2 declares two optional native
+  modules, `cpu-features` and `nan`**, and npm installs them on any machine that
+  happens to have a compiler, which every Mac with the Xcode command line tools
+  does. electron-builder then ran `@electron/rebuild` before packaging, found
+  `cpu-features`, and tried to rebuild it for `win32-x64`. node-gyp cannot
+  cross-compile, so the build died there.
+
+  `electron-builder.yml` now sets `npmRebuild: false` — nothing in syncto needs
+  rebuilding — and excludes both modules from the package, so a macOS `.node`
+  binary can no longer be shipped inside a Windows application. ssh2 works
+  without them: it wraps the require in a try/catch and falls back to its
+  JavaScript implementation, losing only a CPU-feature probe used to pick an
+  accelerated cipher.
+
+  Reproduced and fixed against a real cross-build, not reasoned about: the same
+  error first, then a Windows package that contains neither module.
+
+### Added — signed and notarized macOS builds
+
+With a **Developer ID Application** certificate in the keychain, `./build.sh`
+and `scripts/build-mac.command` now sign the application, send it to Apple for
+notarization, and attach the returned ticket to **both** the app and the disk
+image. It opens with a plain double-click on any Mac, with no internet
+connection needed on first launch.
+
+**Set it up once**, before the first signed build:
+
+```
+./build.sh --sign-setup      # or double-click scripts/notarize-setup.command
+```
+
+It checks the four things that have to be true and stops at the first that is
+not — macOS, Apple's command line tools, a *Developer ID Application*
+certificate, and credentials Apple actually accepts. Thirty seconds, instead of
+finding out five minutes into a build. It is also the diagnostic: run it any
+time, it changes nothing that already works.
+
+It is deliberately picky about the certificate. An *Apple Development* or *Mac
+App Distribution* certificate signs the application perfectly and is then
+refused by every other Mac, so when one of those is all that is installed the
+script lists what it found and says so. And when Apple rejects the credentials
+it names the three usual causes: an Apple ID password given instead of an
+app-specific one, an Apple ID that does not belong to the certificate's team,
+and a lapsed Developer Program membership — a certificate outlives it, and
+notarization stops working while signing still appears to.
+
+- The credentials go to the macOS keychain through
+  `xcrun notarytool store-credentials`, under the name `syncto-notarization`.
+  **Nothing is written into the project** — no file to add to `.gitignore`, no
+  secret to leak into a release zip.
+- The disk image gets its own trip to Apple. electron-builder notarizes the
+  `.app`; the `.dmg` around it is a separate file that Gatekeeper checks when it
+  is downloaded, and stapling it is what makes the first launch work with no
+  network — which is exactly the situation syncto is used in.
+- **Three outcomes, and the script says which one you got**: *notarized*,
+  *signed but not notarized*, or *unsigned*. It then runs `spctl` and reports
+  what a stranger's Mac will do with the file, because a build that is signed
+  but not notarized looks perfect on the machine that made it and is refused
+  everywhere else.
+- None of it is mandatory. No certificate → an unsigned build, exactly as
+  before. `SYNCTO_SKIP_SIGN=1 ./build.sh` forces one on purpose, and
+  `SYNCTO_NOTARY_PROFILE` picks a different keychain profile.
+
+The work lives in `scripts/notarize-lib.sh`, shared by both build entry points.
+
+### Added — what macOS asks the user
+
+The app now carries a usage description for removable volumes, network volumes,
+Desktop, Documents and Downloads. macOS shows that sentence in the permission
+prompt; without one it shows a blank, alarming dialog, and on some releases
+refuses outright. A folder synchronizer lives on cards and NAS shares, so every
+location it can legitimately be pointed at now explains itself.
+
+---
+
+## [0.5.4] — 2026-08-31
+
+The screenshots in this README were taken on 0.2.x. Regenerating them against
+the current build turned up three things that had gone stale in the interface
+itself — which is the argument for regenerating them at every release, and for
+doing it from the running application rather than by hand.
+
+### Fixed
+
+- **The connection window's boxes were white.** Login, Password, Private key and
+  Name fell back to the browser's default styling and looked nothing like the
+  rest of the application. The rule that styles a settings field was written
+  `input[type=text]`, and none of those inputs spell out a type — `type`
+  defaults to `text` when the attribute is absent, so the selector matched
+  nothing. Present since the window was introduced in 0.3.0, on every platform.
+- **"syncto-checksums.txt at the root of each target (SECURE only)"** — there
+  has been one copy mode since 0.5.0. The label now says what the file is for:
+  checkable months later.
+- **The auto-sync confirmation said "verified copy"**, another leftover of the
+  three-level era. It now says every file is read back and compared, which is
+  the only thing syncto does.
+
+### Screenshots
+
+Ten of them, regenerated from the running application: main window, copy pass,
+verification pass, run summary, the connection window, the filter, settings,
+the after-the-run and phone-notification panel, the auto-sync confirmation, and
+one machine waiting on another's lock. Two are new — the SFTP connection window
+(0.3.0) and the ntfy panel (0.4.0) had never been shown.
+
+`scripts/shots-linux.sh` produces them: it builds a demo dataset under
+`/Volumes`, seeds a profile, launches the real application under Xvfb and drives
+it through the DevTools protocol. Nothing is mocked up and nothing is drawn by
+hand — the verification frame is a real verification pass, and the "another
+machine is running" frame is a second process genuinely holding the lock, under
+its own user, its own install id and its own machine name.
+
+Two details that only matter to whoever runs the script next: the keyring has to
+be unlocked inside the session bus, or the connection window is photographed
+saying "this machine has no usable credential store" — true of a build
+container, false of every Mac; and the copy pass is over in seconds on a fast
+disk, so the capture loop polls the step strip rather than waiting politely.
+
+The files are also about 60 % smaller than the ones they replace.
+
+---
+
 ## [0.5.3] — 2026-08-31
 
 One defect, reported from a real backup: every folder on an HFS+ backup volume

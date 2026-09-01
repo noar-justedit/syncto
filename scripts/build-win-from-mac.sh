@@ -22,9 +22,18 @@
 # ║        Produces an NSIS 64-bit installer + a .zip            ║
 # ╚══════════════════════════════════════════════════════════════╝
 #
-# Cross-building syncto for Windows from a Mac is fully supported:
-# there is no compiled native module (hash-wasm is pure WebAssembly,
-# ssh2 is pure JavaScript), so nothing needs a Windows compiler.
+# Cross-building syncto for Windows from a Mac is fully supported: syncto's own
+# code compiles nothing (hash-wasm is WebAssembly, ssh2 is JavaScript), so
+# nothing needs a Windows compiler.
+#
+# One trap, and it stopped this build dead until 0.5.5: ssh2 declares two
+# OPTIONAL native modules, cpu-features and nan. npm installs them on any Mac
+# that has the Xcode command line tools, electron-builder then tries to rebuild
+# them for win32-x64 before packaging, and node-gyp cannot cross-compile:
+#     ⨯ node-gyp does not support cross-compiling native modules from source
+# electron-builder.yml sets npmRebuild: false and excludes both from the
+# package. ssh2 loads without them.
+#
 #   - the portable .zip needs nothing extra
 #   - the .exe installer is assembled by Wine:  brew install --cask wine-stable
 

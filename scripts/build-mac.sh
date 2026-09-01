@@ -38,6 +38,9 @@ cd "$PROJECT_DIR"
 
 VERSION=$(node -e "console.log(require('./package.json').version)" 2>/dev/null || echo "?")
 
+# shellcheck source=notarize-lib.sh
+. "$SCRIPT_DIR/notarize-lib.sh"
+
 echo ""
 echo -e "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${BOLD}${CYAN}         syncto v$VERSION — Build for macOS            ${NC}"
@@ -45,7 +48,7 @@ echo -e "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━
 echo ""
 
 # ── 1. Node.js ──────────────────────────────────────────────────
-echo -e "${BLUE}[1/4]${NC} Checking Node.js…"
+echo -e "${BLUE}[1/5]${NC} Checking Node.js…"
 if ! command -v node &>/dev/null; then
   echo -e "${RED}✗ Node.js not found. Install it from https://nodejs.org (the LTS button).${NC}"
   read -p "Press Enter to exit..."; exit 1
@@ -53,22 +56,32 @@ fi
 echo -e "${GREEN}✓ Node.js $(node --version)${NC}"
 
 # ── 2. Dependencies ─────────────────────────────────────────────
-echo -e "${BLUE}[2/4]${NC} Checking dependencies…"
+echo -e "${BLUE}[2/5]${NC} Checking dependencies…"
 if [ ! -d "node_modules" ]; then
   echo "      First run — downloading dependencies (2-3 minutes)…"
   npm install
 fi
 echo -e "${GREEN}✓ Dependencies ready${NC}"
 
-# ── 3. Build ────────────────────────────────────────────────────
-echo -e "${BLUE}[3/4]${NC} Building the macOS app (Apple Silicon)…"
+# ── 3. Signature and notarization ───────────────────────────────
+# Everything happens here, in the build. There is no separate step to remember:
+# the first time it asks for two things, and never again.
+echo -e "${BLUE}[3/5]${NC} Signature and notarization…"
+prepare_signing
+
+# ── 4. Build ────────────────────────────────────────────────────
+echo -e "${BLUE}[4/5]${NC} Building the macOS app (Apple Silicon)…"
+if [ "$SIGN_MODE" = "notarized" ]; then
+  echo "      Signed, sent to Apple, stapled. Apple's side usually takes one to"
+  echo "      five minutes; a first submission can take longer. Nothing to do."
+fi
 
 # The .app is built first, the .dmg is wrapped around it afterwards. Those are
 # two very different things to fail at: if only the packaging into a disk image
 # went wrong, the application itself is finished and sitting in dist/ — so hand
 # it over as a zip rather than reporting a failed build and leaving the user
 # with nothing.
-if npm run build:mac; then
+if build_mac_target build:mac; then
   echo -e "${GREEN}✓ Build finished${NC}"
 else
   APP="dist/mac-arm64/syncto.app"
@@ -86,13 +99,25 @@ else
   fi
 fi
 
-# ── 4. Result ───────────────────────────────────────────────────
-echo -e "${BLUE}[4/4]${NC} Result:"
+# ── 5. Notarize the disk image, then say what a stranger's Mac will do ──
+echo -e "${BLUE}[5/5]${NC} Result:"
+DMG="dist/syncto-$VERSION-mac-arm64.dmg"
+staple_dmg "$DMG"
+verify_result "dist/mac-arm64/syncto.app" "$DMG"
+
 echo ""
-echo -e "  ${BOLD}Installer:${NC}  dist/syncto-$VERSION-mac-arm64.dmg"
+echo -e "  ${BOLD}Installer:${NC}  $DMG"
 echo ""
 echo -e "  Open the .dmg and drag ${BOLD}syncto${NC} into Applications."
-echo -e "  ${YELLOW}First launch (unsigned build): right-click syncto → Open.${NC}"
+case "$SIGN_MODE" in
+  notarized)
+    echo -e "  ${GREEN}Signed and notarized: it opens with a double-click on any Mac.${NC}" ;;
+  signed)
+    echo -e "  ${YELLOW}Signed but not notarized: another Mac will say Apple could not${NC}"
+    echo -e "  ${YELLOW}check it for malware. Right-click → Open gets past it.${NC}" ;;
+  *)
+    echo -e "  ${YELLOW}First launch (unsigned build): right-click syncto → Open.${NC}" ;;
+esac
 echo ""
 
 if [ -t 0 ]; then

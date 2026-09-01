@@ -533,7 +533,12 @@ color:var(--text);margin-bottom:9px;}
 /* Only the leading text label gets the fixed width — NOT the .switch pill,
    which is itself a <label> and must keep its 28px. */
 .set-row > label:first-child{width:150px;flex-shrink:0;font-size:12.5px;color:var(--text2);}
-.set-row input[type=text],.set-row input[type=number],.set-row select{flex:1;min-width:0;
+/* Every input in a settings row, not only the ones that spell out their type.
+   `type` defaults to "text" when the attribute is absent, so the old
+   [type=text] selector silently missed the whole server window — its Login,
+   Password, Private key and Name boxes fell back to the browser's default
+   white-on-white and looked nothing like the rest of the application. */
+.set-row input:not([type=checkbox]),.set-row select{flex:1;min-width:0;
 background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:7px 10px;
 font-size:12.5px;color:var(--text);font-family:var(--mono);outline:none;}
 .set-row input:focus,.set-row select:focus{border-color:var(--accent-g);}
@@ -1150,7 +1155,7 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
       <div class="set-sec-title">Copying</div>
       <div class="set-row"><label>Write a checksum list</label>
         <label class="switch"><input type="checkbox" id="st-cksum"><span class="slider"></span></label>
-        <span style="font-size:11.5px;color:var(--text3)">syncto-checksums.txt at the root of each target (SECURE only)</span></div>
+        <span style="font-size:11.5px;color:var(--text3)">syncto-checksums.txt at the root of each target, checkable months later</span></div>
       <div class="set-row"><label>Lock folders</label>
         <label class="switch"><input type="checkbox" id="st-lock" checked><span class="slider"></span></label>
         <span style="font-size:11.5px;color:var(--text3)">one machine at a time per folder</span></div>

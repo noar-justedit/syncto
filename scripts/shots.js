@@ -53,7 +53,14 @@ class CDP {
 (async () => {
   fs.mkdirSync(OUT, { recursive: true });
   const electron = require('electron');
-  const child = spawn(electron, ['.', `--remote-debugging-port=${PORT}`, '--no-sandbox'], {
+  // On Linux, safeStorage only reports itself available when a libsecret
+  // provider is reachable. Without this the connection window is photographed
+  // wearing "this machine has no usable credential store", which is true of a
+  // build container and false of every Mac and Windows machine the screenshot
+  // is meant to describe. scripts/shots-linux.sh starts the keyring.
+  const args = ['.', `--remote-debugging-port=${PORT}`, '--no-sandbox'];
+  if (process.platform === 'linux') args.push('--password-store=gnome-libsecret');
+  const child = spawn(electron, args, {
     cwd: path.join(__dirname, '..'),
     env: { ...process.env, HOME: '/home/claude/shome', ELECTRON_DISABLE_SECURITY_WARNINGS: '1' },
     stdio: ['ignore', 'inherit', 'inherit'],

@@ -12,21 +12,30 @@ Licensed under the **GNU General Public License v3.0** (see [`LICENSE`](./LICENS
 
 ## Screenshots
 
-| Main window | Copy pass |
+| Main window — two folder pairs compared | Copy pass |
 |---|---|
 | ![syncto main window](docs/screenshots/syncto-main.png) | ![copy phase](docs/screenshots/syncto-sync.png) |
 
-| Verification pass | Run summary |
+| Verification pass — every file read back | Run summary |
 |---|---|
 | ![verification pass](docs/screenshots/syncto-verify.png) | ![summary](docs/screenshots/syncto-summary.png) |
 
-| Filter — per job | Settings |
+| Connect to a server (SFTP) | Filter — per job |
 |---|---|
-| ![filter](docs/screenshots/syncto-filter.png) | ![settings](docs/screenshots/syncto-settings.png) |
+| ![connect to a server](docs/screenshots/syncto-server.png) | ![filter](docs/screenshots/syncto-filter.png) |
+
+| Settings | After the run, and the phone |
+|---|---|
+| ![settings](docs/screenshots/syncto-settings.png) | ![after the run and ntfy](docs/screenshots/syncto-ntfy.png) |
 
 | Auto-sync confirmation | Another machine is running |
 |---|---|
 | ![auto-sync](docs/screenshots/syncto-autosync.png) | ![waiting on a lock](docs/screenshots/syncto-lock.png) |
+
+<sub>Taken from the running application, not mocked up: `scripts/shots-linux.sh`
+drives the real window through the DevTools protocol over a real dataset and
+writes these files. They are regenerated at every release, which is how the
+interface in them stays the interface you get.</sub>
 
 ---
 
@@ -74,20 +83,67 @@ FAT/exFAT stick, a sync from Windows, some unzip tools). Open Terminal in the
 `syncto` folder and run `chmod +x build.sh scripts/*.sh scripts/*.command`
 once — the launchers repair themselves after that.
 
-**Building the Windows version from a Mac works.** syncto has no compiled
-native module — hash-wasm is pure WebAssembly and ssh2 is pure JavaScript — so
-there is nothing to cross-compile. The portable `.zip` needs nothing extra; the
-`.exe` installer is assembled by Wine, so install it once with
-`brew install --cask wine-stable` if you want it.
+**Building the Windows version from a Mac works.** syncto's own code compiles
+nothing — hash-wasm is WebAssembly and ssh2 is JavaScript. ssh2 does declare two
+*optional* native modules, which npm installs on any Mac carrying the Xcode
+command line tools; `electron-builder.yml` skips the rebuild pass and leaves
+them out of the package, because nothing here needs them. The portable `.zip`
+needs nothing extra; the `.exe` installer is assembled by Wine, so install it
+once with `brew install --cask wine-stable` if you want it.
 
-Both builds are unsigned: macOS wants a right-click → **Open** on first launch,
-Windows shows a SmartScreen warning (**More info → Run anyway**).
+### Signing and notarization (macOS)
+
+**There is nothing to run first.** The macOS build does all of it — double-click
+`scripts/build-mac.command`, or run `./build.sh`, and that is the whole
+procedure, now and for every build after.
+
+With a **Developer ID Application** certificate in your keychain it signs the
+app, sends it to Apple, and attaches the returned ticket to both the app and the
+disk image. It then opens with a plain double-click on any Mac, with no internet
+connection needed on first launch.
+
+The **first** signed build asks two questions: your Apple ID, and an
+**app-specific password** — made at appleid.apple.com → *Sign-In and Security* →
+*App-Specific Passwords*, which is not the same thing as your Apple ID password.
+Both go into the macOS keychain through `xcrun notarytool store-credentials`,
+under the name `syncto-notarization`. They are never written into the project:
+no file to add to `.gitignore`, no secret that can travel inside a release
+archive. You are never asked again.
+
+Every later build prints two green lines and gets on with it.
+
+Nothing about this can cost you a build:
+
+- **No certificate** → an unsigned build, exactly as before. If the only
+  certificate you have is an *Apple Development* one — which signs the app
+  perfectly and is then refused by every other Mac — it says so by name rather
+  than reporting a vague failure.
+- **Apple's command line tools missing** → signed, not notarized, with the one
+  command that fixes it.
+- **Apple unreachable, or the submission rejected** → the build runs again
+  without notarization rather than leaving you with an empty `dist/`.
+- `SYNCTO_SKIP_SIGN=1 ./build.sh` forces an unsigned build on purpose, and
+  `./build.sh --sign-check` reports what you would get without building
+  anything.
+
+At the end it runs `spctl` and says what a *stranger's* Mac will do with the
+file — a build that is signed but not notarized looks perfect on the machine
+that made it and is refused everywhere else.
+
+Nothing about this is mandatory. No certificate → the build produces an unsigned
+app exactly as before, and `SYNCTO_SKIP_SIGN=1 ./build.sh` forces that on
+purpose. The script says which of the three you got, and runs `spctl` at the end
+to report what a *stranger's* Mac will do with the file — a build that is signed
+but not notarized looks perfect locally and is refused everywhere else.
+
+The Windows build is unsigned: SmartScreen warns on first launch
+(**More info → Run anyway**).
 
 From a terminal, `./build.sh` at the project root does the same:
 
 | Command | Result |
 |---|---|
-| `./build.sh` | macOS Apple Silicon `.dmg` |
+| `./build.sh` | macOS Apple Silicon `.dmg`, signed and notarized when it can be |
 | `./build.sh --universal` | macOS Universal (Intel + Apple Silicon) |
 | `./build.sh --win` | Windows x64 — portable `.zip` + NSIS `.exe` |
 | `./build.sh --all` | macOS arm64 and Windows x64 |
@@ -332,6 +388,40 @@ npm test
 Creates real folders in a temporary directory and runs the whole engine against
 them: filters, comparison categories, the four variants, the two-way database,
 checksum verification, versioning, fail-safe copy and the folder rules.
+
+It also reads the build scripts and checks every option they pass to Apple's
+`notarytool` and `stapler` against the documented ones. That is a strange thing
+for an engine test suite to do, and it earns its place: an invented flag makes
+notarytool reject the command line before it ever reaches Apple, which looks
+exactly like a wrong password, and no amount of mocking `xcrun` will catch it.
+
+---
+
+## Regenerating the screenshots
+
+```bash
+bash scripts/shots-linux.sh          # Linux, or a container: needs Xvfb,
+                                     # dbus and gnome-keyring
+```
+
+It builds a demo dataset under `/Volumes`, seeds a profile, launches the real
+application and drives it through the DevTools protocol, writing
+`docs/screenshots/*.png`. Nothing is mocked up: the verification frame is a real
+verification pass, and the "another machine is running" frame is a second
+process genuinely holding the lock, under its own user, install id and machine
+name.
+
+Worth knowing before running it:
+
+- **The keyring must be unlocked inside the session bus**, otherwise
+  `safeStorage` reports itself unavailable and the connection window gets
+  photographed saying "this machine has no usable credential store" — true of a
+  build container, false of every Mac. The script handles it; a manual run of
+  `scripts/shots.js` does not.
+- **These pictures are a test.** Regenerating them for 0.5.4 is what surfaced
+  the unstyled fields in the connection window and two labels left over from the
+  three-copy-mode era. A frame forces you to read a whole screen at once;
+  a code review reads one function at a time.
 
 ---
 

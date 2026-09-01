@@ -1255,7 +1255,8 @@ function bind() {
       const n = state.job.autoSync.minutes || 30;
       const np = completePairs().length;
       $('auto-cf-sub').textContent =
-        `Every ${n} minute${n > 1 ? 's' : ''}: ${state.job.sync.variant} synchronization of ${np} pair${np > 1 ? 's' : ''}, verified copy.`;
+        `Every ${n} minute${n > 1 ? 's' : ''}: ${state.job.sync.variant} synchronization of ${np} pair${np > 1 ? 's' : ''}, ` +
+        `every file read back and compared.`;
       $('ov-auto').classList.add('open');
     } else {
       state.job.autoSync.enabled = false;
