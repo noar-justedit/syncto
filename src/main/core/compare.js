@@ -196,6 +196,15 @@ class Comparer {
     this.leftovers = [];      // stray .syncto_tmp files from an interrupted run
     this.stats  = { scanned: 0, comparedBytes: 0 };
     this.symlinks = this.cfg.symlinks || 'exclude';   // exclude | asLink
+    // How many items these two folders held at the end of the last run, read
+    // from the database before the scan started. Zero on a first comparison.
+    //
+    // Walking a tree has no total you can know in advance — you find out how
+    // big it is by finishing — so this is the only honest source of a
+    // percentage, and it is an ESTIMATE: the tree has changed since, which is
+    // the whole reason for comparing. The interface says "about".
+    this.expected = Math.max(0, ctx.expected || 0);
+    this.startedAt = Date.now();
   }
 
   _emit(current) {
@@ -203,6 +212,8 @@ class Comparer {
       phase  : 'compare',
       scanned: this.stats.scanned,
       bytes  : this.stats.comparedBytes,
+      expected: this.expected,
+      elapsedMs: Date.now() - this.startedAt,
       current,
     });
   }
@@ -226,7 +237,15 @@ class Comparer {
     if (!lRoot) this.errors.push({ path: this.left.path,  message: 'Left folder not found — it will be created.',  missingRoot: 'left'  });
     if (!rRoot) this.errors.push({ path: this.right.path, message: 'Right folder not found — it will be created.', missingRoot: 'right' });
 
+    // One event before anything is walked, and one after. Without the first,
+    // nothing reaches the window until the 200th item — on a slow share or a
+    // deep tree that is a long stare at an empty progress panel. Without the
+    // last, the final count the window was shown is whatever the 200-item
+    // boundary happened to land on, and the running total across pairs starts
+    // the next pair from a stale number.
+    this._emit('');
     await this._walk({ c: '', l: '', r: '' }, -1, 0, !!lRoot, !!rRoot);
+    this._emit('');
     return {
       nodes: this.nodes, errors: this.errors, stats: this.stats,
       leftovers: this.leftovers,

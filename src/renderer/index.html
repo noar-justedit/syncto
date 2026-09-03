@@ -110,12 +110,18 @@ border-bottom:1px solid var(--border);}
 letter-spacing:.13em;text-transform:uppercase;color:var(--text3);}
 /* Zone 1 — jobs (height adjustable with the splitter below it) */
 #sb-jobs{flex-shrink:0;height:296px;min-height:120px;}
-.job-actions{display:flex;gap:5px;padding:9px 10px;}
-.job-actions button{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;
-padding:8px 2px 6px;border-radius:7px;border:1px solid var(--border);background:var(--bg3);
-color:var(--text3);font-family:var(--font);font-size:9.5px;font-weight:700;letter-spacing:.03em;
-cursor:pointer;transition:all .13s;}
+/* Five buttons now, not four: 1fr each so they stay equal whatever the label,
+   and a hair less padding and tracking so "SAVE AS" still fits on one line. */
+.job-actions{display:grid;grid-template-columns:repeat(5,1fr);gap:4px;padding:9px 10px;}
+.job-actions button{min-width:0;display:flex;flex-direction:column;align-items:center;gap:4px;
+padding:8px 1px 6px;border-radius:7px;border:1px solid var(--border);background:var(--bg3);
+color:var(--text3);font-family:var(--font);font-size:9px;font-weight:700;letter-spacing:0;
+white-space:nowrap;cursor:pointer;transition:all .13s;}
 .job-actions button:hover{color:var(--text);border-color:var(--border2);}
+/* CLOSE only means something while a job file is open. Greyed rather than
+   hidden: five buttons that become four move everything under them. */
+.job-actions button:disabled{opacity:.32;cursor:default;}
+.job-actions button:disabled:hover{color:var(--text3);border-color:var(--border);}
 .job-actions button svg{width:16px;height:16px;}
 .recent-list{flex:1;min-height:0;overflow-y:auto;padding:4px 6px 8px;}
 .recent-list::-webkit-scrollbar{width:5px;}
@@ -183,20 +189,6 @@ font-size:11.5px;font-weight:600;padding:4px 10px;cursor:pointer;}
 
 /* ── Folder pair ──────────────────────────────── */
 #pairwrap{flex-shrink:0;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--bg2);}
-#pairbar{display:flex;align-items:center;gap:10px;}
-.fld{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;}
-.fld-lbl{font-size:14px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;
-font-family:var(--font-display);display:flex;align-items:center;gap:8px;}
-.fld.l .fld-lbl{color:var(--blue);}
-.fld.r .fld-lbl{color:var(--green);}
-.fld-lbl .dot{width:6px;height:6px;border-radius:50%;}
-.fld.l .dot{background:var(--blue);box-shadow:0 0 7px var(--blue);}
-.fld.r .dot{background:var(--green);box-shadow:0 0 7px var(--green);}
-.fld-in{display:flex;gap:6px;}
-.fld-in input{flex:1;min-width:0;background:var(--bg);border:1px solid var(--border);border-radius:var(--rs);
-padding:9px 11px;font-size:13px;color:var(--text);font-family:var(--mono);outline:none;transition:border-color .15s;}
-.fld-in input:focus{border-color:var(--accent-g);}
-.fld-free{font-size:11px;color:var(--text3);font-family:var(--mono);height:13px;}
 .br-btn{flex-shrink:0;padding:0 12px;border-radius:var(--rs);border:1px solid var(--border);
 background:var(--bg3);color:var(--text3);font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font);}
 .br-btn:hover{color:var(--text);border-color:var(--border2);}
@@ -213,19 +205,6 @@ border-radius:50%;background:var(--green);box-shadow:0 0 6px var(--green);
 border:1.5px solid var(--bg);}
 .prow .srv-btn{width:30px;}
 .prow .srv-btn svg{width:14px;height:14px;}
-#swap-btn{flex-shrink:0;align-self:flex-end;margin-bottom:17px;width:38px;height:38px;border-radius:50%;
-border:1px solid var(--border2);background:var(--bg3);color:var(--text3);cursor:pointer;
-display:flex;align-items:center;justify-content:center;transition:all .18s;}
-#swap-btn:hover{color:var(--accent);border-color:var(--accent-g);transform:rotate(180deg);}
-#swap-btn svg{width:17px;height:17px;}
-/* Same remove affordance as every other pair (.pr-rm below) — pair 1 is not
-   special-cased, it is only drawn bigger because it is always present. */
-#pair0-rm{flex-shrink:0;align-self:flex-end;margin-bottom:17px;width:26px;height:26px;
-border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--text3);
-cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;}
-#pair0-rm:hover{border-color:rgba(242,85,90,.5);color:var(--red);background:var(--red-d);}
-#pair0-rm svg{width:13px;height:13px;}
-
 /* ── Mode buttons — ingesto design (.mbtn) ────── */
 .cc-label{font-size:12px;font-weight:700;letter-spacing:.1em;color:var(--text3);
 text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:7px;
@@ -267,12 +246,17 @@ width:34px;height:34px;border-radius:8px;}
 #var-update.on .msel{color:var(--blue);}
 #var-custom.on .msel{color:var(--orange);}
 /* Sync modes strip — top of the page */
-#syncmodes{flex-shrink:0;padding:11px 16px 12px;border-bottom:1px solid var(--border);}
+#syncmodes{flex-shrink:0;padding:11px 16px 12px;border-bottom:1px solid var(--border);
+background:var(--bg2);}
 #syncmodes .mbtn{align-items:center;padding:8px 12px;}
 #syncmodes .minfo{gap:0;}
 /* Bottom strip — copy modes + big action buttons, like ingesto's control strip */
+/* Just the two big buttons now: the copy-mode box that used to sit above them
+   described the one and only copy mode, which is not a choice and so not worth
+   a permanent panel. It is explained in the settings and in the run summary,
+   where it is actually being used. */
 #bottom-controls{flex-shrink:0;border-top:1px solid var(--border);padding:12px 16px 14px;
-display:flex;flex-direction:column;gap:12px;background:var(--bg2);}
+display:flex;flex-direction:column;background:var(--bg2);}
 /* Big action buttons — ingesto's START INGEST design */
 #actionrow{display:flex;gap:10px;}
 .bigbtn{flex:1;padding:15px;border-radius:var(--r);border:1px solid transparent;
@@ -295,22 +279,43 @@ box-shadow:inset 0 1px 0 rgba(255,255,255,.06);}
 /* ── Additional folder pairs — stacked rows, FreeFileSync style ──
    Pair 1 lives in the big SOURCE/DESTINATION fields above; every further pair
    is a slimmer row with the same two fields, aligned on the same columns. */
+/* THE grid. The header row and every pair row use it, which is the whole
+   reason the columns line up: remove · number · source · swap · destination.
+   Change a track here and both move together — that cannot drift apart. */
 #pairrows{display:flex;flex-direction:column;gap:6px;}
-#pairrows:not(:empty){padding-top:8px;}
-.prow{display:flex;align-items:center;gap:10px;}
-.prow .pr-num{width:24px;flex-shrink:0;text-align:center;font-family:var(--mono);
+.prow{display:grid;align-items:center;gap:10px;
+grid-template-columns:26px 26px minmax(0,1fr) 38px minmax(0,1fr);}
+.prow-hdr{margin-bottom:8px;}
+.prow-hdr .fld-lbl{font-size:14px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;
+font-family:var(--font-display);display:flex;align-items:center;gap:8px;color:var(--green);}
+.prow-hdr .fld-lbl .dot{width:6px;height:6px;border-radius:50%;
+background:var(--green);box-shadow:0 0 7px var(--green);}
+.prow-hdr .fld-lbl:has(.dot.src){color:var(--blue);}
+.prow-hdr .dot.src{background:var(--blue);box-shadow:0 0 7px var(--blue);}
+.prow .pr-num{text-align:center;font-family:var(--mono);
 font-size:10px;font-weight:800;color:var(--text3);background:var(--bg3);
 border:1px solid var(--border);border-radius:5px;padding:3px 0;}
-.prow .pr-field{flex:1;min-width:0;display:flex;gap:6px;}
+.prow .pr-field{min-width:0;display:flex;gap:6px;}
 .prow input{flex:1;min-width:0;background:var(--bg);border:1px solid var(--border);border-radius:var(--rs);
 padding:7px 11px;font-size:12.5px;color:var(--text);font-family:var(--mono);outline:none;transition:border-color .15s;}
 .prow input:focus{border-color:var(--accent-g);}
-.prow .pr-gap{width:38px;flex-shrink:0;display:flex;align-items:center;justify-content:center;color:var(--text3);}
-.prow .pr-gap svg{width:14px;height:14px;}
+/* Every pair gets its own swap, and it swaps THAT pair. */
+.prow .pr-swap{width:30px;height:30px;justify-self:center;border-radius:50%;
+border:1px solid var(--border2);background:var(--bg3);color:var(--text3);cursor:pointer;
+display:flex;align-items:center;justify-content:center;transition:all .18s;padding:0;}
+.prow .pr-swap:hover{color:var(--accent);border-color:var(--accent-g);transform:rotate(180deg);}
+.prow .pr-swap svg{width:14px;height:14px;}
 .prow .br-btn{padding:0 10px;font-size:11px;}
-.prow .pr-rm{width:26px;height:26px;flex-shrink:0;border:1px solid var(--border);border-radius:6px;
-background:transparent;color:var(--text3);cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;}
-.prow .pr-rm:hover{border-color:rgba(242,85,90,.5);color:var(--red);background:var(--red-d);}
+/* Remove sits FIRST, and is red on sight: it is the one destructive control in
+   this strip, and it was previously last in the row and the same grey as
+   Browse. Disabled rather than hidden on the last remaining pair, so the
+   columns do not shift when a job is down to one. */
+.prow .pr-rm{width:26px;height:26px;border:1px solid rgba(242,85,90,.35);border-radius:6px;
+background:var(--red-d);color:var(--red);cursor:pointer;display:flex;align-items:center;
+justify-content:center;padding:0;transition:all .13s;}
+.prow .pr-rm:hover{border-color:var(--red);background:rgba(242,85,90,.2);}
+.prow .pr-rm:disabled{opacity:.3;cursor:default;background:transparent;
+border-color:var(--border);color:var(--text3);}
 .prow .pr-rm svg{width:13px;height:13px;}
 #pair-add-row{display:flex;padding-top:8px;}
 .ps-add{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:7px;
@@ -378,7 +383,12 @@ font-size:9.5px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;co
 #gridhead .side-r{color:var(--green);}
 #gridhead .num-h{text-align:right;}
 #gridhead .hd-big{font-size:12px;letter-spacing:.13em;font-family:var(--font-display);}
-#gridscroll{flex:1;overflow-y:auto;overflow-x:hidden;position:relative;}
+/* min-height:0 is not optional on a scrolling flex child: without it the box
+   refuses to shrink below its content, the column keeps growing, and whatever
+   sits below is pushed off the bottom of the window. Here that was the whole
+   progress panel during a comparison — ring, counters, elapsed time, Cancel —
+   which is exactly what you are looking at while a comparison runs. */
+#gridscroll{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;position:relative;}
 #gridscroll::-webkit-scrollbar{width:9px;}
 #gridscroll::-webkit-scrollbar-thumb{background:var(--bg4);border-radius:5px;}
 #gridspacer{position:relative;width:100%;}
@@ -426,10 +436,27 @@ border-radius:4px;padding:0 6px;height:100%;}
 .arr-mov{color:var(--violet);}
 .arr-mov.dimmed{opacity:.55;}
 .arr-cfl{color:var(--red);}
-#gridempty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;
+/* min-height:0 is what lets this shrink. Without it the empty-grid message
+   keeps its content height, the column below it is pushed past the bottom of
+   the window, and the progress panel — the thing you are watching — is cut off
+   for the whole comparison. It only showed up during a COMPARISON, because
+   that is the one phase where the grid is still empty while the panel is up. */
+#gridempty{flex:1;min-height:0;overflow:hidden;
+display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;
 color:var(--text3);font-size:14px;text-align:center;padding:30px;}
 #gridempty svg{width:46px;height:46px;opacity:.35;}
 #gridempty b{color:var(--text2);font-weight:600;}
+/* "Everything is in sync" is a result, not an absence of one: it gets the
+   green ring the run summary uses, a headline, and the figures underneath. */
+#gridempty.ok svg{opacity:1;color:var(--green);width:52px;height:52px;}
+#ge-title{font-size:17px;font-weight:650;color:var(--text1);}
+#gridempty.ok #ge-title{color:var(--green);}
+#gridempty:not(.ok) #ge-title{display:none;}
+#ge-sub{max-width:520px;line-height:1.55;}
+#ge-act{display:none;margin-top:2px;font-size:12px;font-weight:600;color:var(--text2);
+background:var(--bg3);border:1px solid var(--border);border-radius:6px;
+padding:6px 12px;cursor:pointer;font-family:inherit;}
+#ge-act:hover{color:var(--text1);border-color:var(--text3);}
 
 /* ── Status strip ─────────────────────────────── */
 #statusbar{flex-shrink:0;display:flex;align-items:center;gap:7px;padding:8px 16px;
@@ -462,15 +489,6 @@ transition:width .4s ease,background .3s ease;box-shadow:0 0 8px var(--pb-glow,v
 /* The passes of this run, in order. Same colour code as ingesto: copying is
    green, reading back is blue, the tail is neutral. A step that is done keeps
    its colour but goes quiet; the one running is filled. */
-/* One copy mode, so this is a statement, not a control. It still has to look
-   deliberate rather than like a disabled button. */
-.mode-fixed{display:flex;align-items:center;gap:13px;padding:11px 14px;border-radius:11px;
-border:1px solid var(--green-g);background:var(--green-d);}
-.mf-badge{flex-shrink:0;font-family:var(--font-display);font-size:11px;font-weight:800;
-letter-spacing:.11em;color:var(--green);border:1px solid var(--green-g);
-background:rgba(53,201,139,.12);border-radius:6px;padding:4px 9px;}
-.mf-text b{display:block;font-size:13px;font-weight:700;color:var(--text);margin-bottom:2px;}
-.mf-text span{font-size:11.5px;color:var(--text3);line-height:1.5;}
 .pb-steps{display:flex;align-items:center;gap:6px;margin:5px 0 4px;}
 .pb-step{display:flex;align-items:center;gap:5px;padding:2px 8px;border-radius:20px;
 border:1px solid var(--border);background:var(--bg3);color:var(--text3);
@@ -697,8 +715,20 @@ flex-shrink:0;border:1px solid transparent;}
 .sr-lbl{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.09em;}
 .sr-val{font-size:17px;font-weight:600;margin-top:3px;font-family:var(--mono);}
 .err-block{background:rgba(242,85,90,.06);border:1px solid rgba(242,85,90,.18);
-border-radius:var(--rs);padding:9px 11px;margin-bottom:12px;max-height:150px;overflow-y:auto;}
-.err-title{font-size:12px;font-weight:700;color:var(--red);margin-bottom:5px;}
+border-radius:var(--rs);padding:9px 11px;margin-bottom:12px;}
+/* The list scrolls, the title does NOT: the copy button has to stay reachable
+   when there are sixty lines, and it used to scroll away with the heading. */
+.err-body{max-height:150px;overflow-y:auto;}
+.err-title{font-size:12px;font-weight:700;color:var(--red);margin-bottom:5px;
+display:flex;align-items:center;justify-content:space-between;gap:10px;}
+.err-copy{display:inline-flex;align-items:center;gap:5px;flex:0 0 auto;
+font-size:10.5px;font-weight:600;letter-spacing:.02em;color:var(--text3);
+background:var(--bg3);border:1px solid var(--border);border-radius:5px;
+padding:3px 7px;cursor:pointer;font-family:inherit;}
+.err-copy:hover{color:var(--text1);border-color:var(--text3);}
+.err-copy svg{width:12px;height:12px;stroke:currentColor;stroke-width:2;fill:none;
+stroke-linecap:round;stroke-linejoin:round;}
+.err-copy.done{color:var(--green);border-color:rgba(74,199,124,.4);}
 .err-item{font-size:11.5px;font-family:var(--mono);color:var(--text3);padding:2px 0;overflow-wrap:anywhere;}
 .file-links{display:flex;flex-direction:column;gap:4px;margin-bottom:12px;}
 .file-link{font-size:11.5px;font-family:var(--mono);color:var(--blue);cursor:pointer;
@@ -744,6 +774,16 @@ box-shadow:0 14px 44px rgba(0,0,0,.55);animation:tipIn .1s ease;user-select:none
 .ctx-it{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:6px;
 font-size:12.5px;color:var(--text);cursor:pointer;position:relative;white-space:nowrap;}
 .ctx-it:hover{background:var(--accent-d);}
+/* A side the item is not on. Shown rather than hidden: a menu that changes
+   shape from one row to the next is harder to use than one where the missing
+   half is visible and inert. */
+/* A comparison with no previous run to estimate against. The arc turns to say
+   "working"; it deliberately does not fill, because filling would claim a
+   progress nobody can compute while still walking the tree. */
+@keyframes ringspin{from{transform:rotate(-90deg)}to{transform:rotate(270deg)}}
+.ring-fill.spin{animation:ringspin 1.1s linear infinite;transform-origin:50% 50%;}
+.ctx-it.off{opacity:.38;cursor:default;}
+.ctx-it.off:hover{background:none;}
 .ctx-it svg{width:14px;height:14px;flex-shrink:0;}
 .ctx-it .ok{color:var(--green);} .ctx-it .ko{color:var(--red);}
 .ctx-it .lbl{flex:1;}
@@ -814,6 +854,10 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h10.2a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V13"/><path d="M7 3v4a1 1 0 0 0 1 1h6"/><path d="M18 15v6"/><path d="M15 18h6"/></svg>
         SAVE AS
       </button>
+      <button id="job-close-btn" data-tip="Close the open job — the file stays on disk">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="m9.5 12.5 5 5"/><path d="m14.5 12.5-5 5"/></svg>
+        CLOSE
+      </button>
     </div>
     <div class="recent-list" id="recent-list">
       <div class="recent-empty">No recent jobs yet — save one and it will appear here.</div>
@@ -835,49 +879,7 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
 <div class="split-v" id="split-sb" data-tip="Drag to resize"></div>
 <div id="content">
 
-<!-- ── Folder pairs ─────────────────────────────────────────────── -->
-<div id="pairwrap">
-<div id="pairbar">
-  <div class="fld l">
-    <div class="fld-lbl"><span class="dot"></span>Source</div>
-    <div class="fld-in">
-      <input id="left-path" placeholder="/Volumes/Card — or connect to a server" spellcheck="false">
-      <button class="br-btn" id="left-browse">Browse</button>
-      <button class="srv-btn" id="left-server" data-tip="Connect to a server (SFTP)" aria-label="Connect to a server">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 6h.01"/><path d="M6 18h.01"/></svg>
-      </button>
-    </div>
-    <div class="fld-free" id="left-free"></div>
-  </div>
-  <button id="swap-btn" data-tip="Swap source and destination (⌘T)">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 3 4 4-4 4"/><path d="M20 7H4"/><path d="m8 21-4-4 4-4"/><path d="M4 17h16"/></svg>
-  </button>
-  <div class="fld r">
-    <div class="fld-lbl"><span class="dot"></span>Destination</div>
-    <div class="fld-in">
-      <input id="right-path" placeholder="/Volumes/RAID/Project — or connect to a server" spellcheck="false">
-      <button class="br-btn" id="right-browse">Browse</button>
-      <button class="srv-btn" id="right-server" data-tip="Connect to a server (SFTP)" aria-label="Connect to a server">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 6h.01"/><path d="M6 18h.01"/></svg>
-      </button>
-    </div>
-    <div class="fld-free" id="right-free"></div>
-  </div>
-  <button id="pair0-rm" data-tip="Remove this pair" style="display:none">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
-  </button>
-</div>
-
-<div id="pairrows"></div>
-<div id="pair-add-row">
-  <button class="ps-add" id="ps-add" data-tip="Add a folder pair — every pair shares this job's settings and runs in the same synchronization">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
-    ADD PAIR
-  </button>
-</div>
-</div><!-- /#pairwrap -->
-
-<!-- ── Zone modes de synchro — en haut, design ingesto ──────────── -->
+<!-- ── Synchronization mode — first thing on screen ─────────────── -->
 <div id="syncmodes">
   <div class="cc-label">Synchronization Mode</div>
   <div class="modes-row">
@@ -907,6 +909,30 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
     </button>
   </div>
 </div>
+
+<!-- ── Folder pairs ─────────────────────────────────────────────── -->
+<div id="pairwrap">
+<!-- One header row, then one identical row per pair. Everything lines up
+     because the header and the rows share the same grid: remove · number ·
+     source · swap · destination. Pair 1 used to be a different shape entirely,
+     with the only swap button and the only free-space readouts, so nothing
+     below it lined up with anything. -->
+<div class="prow prow-hdr">
+  <span></span>
+  <span></span>
+  <div class="fld-lbl"><span class="dot src"></span>Source</div>
+  <span></span>
+  <div class="fld-lbl"><span class="dot"></span>Destination</div>
+</div>
+
+<div id="pairrows"></div>
+<div id="pair-add-row">
+  <button class="ps-add" id="ps-add" data-tip="Add a folder pair — every pair shares this job's settings and runs in the same synchronization">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+    ADD PAIR
+  </button>
+</div>
+</div><!-- /#pairwrap -->
 
 <!-- ── Toolbar ──────────────────────────────────────────────────── -->
 <div id="toolbar">
@@ -963,8 +989,10 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
     <div id="gridspacer"><div id="gridbody"></div></div>
   </div>
   <div id="gridempty">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v.5"/><path d="M12 10v4h4"/><path d="m12 14 1.535-1.605a5 5 0 0 1 8 1.5"/><path d="M22 22v-4h-4"/><path d="m22 18-1.535 1.605a5 5 0 0 1-8-1.5"/></svg>
-    <div id="grid-empty-msg">Pick two folders, then press <b>Compare</b>.</div>
+    <div id="ge-ico"></div>
+    <div id="ge-title"></div>
+    <div id="ge-sub">Pick two folders, then press <b>Compare</b>.</div>
+    <button id="ge-act"></button>
   </div>
 </div>
 
@@ -978,20 +1006,6 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
 
 <!-- ── Bottom controls — copy modes (ingesto design) + big actions ── -->
 <div id="bottom-controls">
-  <div>
-    <div class="cc-label">Copy</div>
-    <div class="modes-row">
-      <div class="mode-fixed">
-        <div class="mf-badge">SECURE</div>
-        <div class="mf-text">
-          <b>Every file is read back and compared</b>
-          <span>Copied first, then re-read from its final location and checked against the
-          xxHash64 fingerprint taken while writing. syncto has one copy mode — there is no
-          faster setting that skips this.</span>
-        </div>
-      </div>
-    </div>
-  </div>
   <div id="actionrow">
     <button class="bigbtn" id="btn-compare">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="m16 21 4-4-4-4"/><path d="M20 17H4"/></svg>
@@ -1037,14 +1051,14 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
       </div>
     </div>
     <div class="pb-stats">
-      <div class="sbox"><div class="slabel">Files</div><div class="sval" id="s-files">—</div></div>
-      <div class="sbox"><div class="slabel">Data remaining</div><div class="sval" id="s-size">—</div></div>
+      <div class="sbox"><div class="slabel" id="s-files-lbl">Files</div><div class="sval" id="s-files">—</div></div>
+      <div class="sbox"><div class="slabel" id="s-size-lbl">Data remaining</div><div class="sval" id="s-size">—</div></div>
       <div class="sbox">
         <svg class="pb-spark" id="pb-spark" viewBox="0 0 100 28" preserveAspectRatio="none"></svg>
-        <div class="slabel">Speed</div><div class="sval" id="s-spd">—</div>
+        <div class="slabel" id="s-spd-lbl">Speed</div><div class="sval" id="s-spd">—</div>
       </div>
-      <div class="sbox"><div class="slabel">ETA</div><div class="sval" id="s-eta">—</div></div>
-      <div class="sbox"><div class="slabel">Removed</div><div class="sval" id="s-del">0</div></div>
+      <div class="sbox"><div class="slabel" id="s-eta-lbl">ETA</div><div class="sval" id="s-eta">—</div></div>
+      <div class="sbox" id="s-del-box"><div class="slabel">Removed</div><div class="sval" id="s-del">0</div></div>
       <div class="sbox"><div class="slabel">Errors</div><div class="sval serr" id="s-err">0</div></div>
     </div>
   </div>
@@ -1393,10 +1407,14 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
     </div>
     <div class="sum-grid" id="sum-grid"></div>
     <div class="err-block" id="sum-errors" style="display:none">
-      <div class="err-title">Errors</div><div id="sum-errors-body"></div>
+      <div class="err-title"><span>Errors</span>
+        <button class="err-copy" data-copy="sum-errors-body">COPY</button></div>
+      <div class="err-body" id="sum-errors-body"></div>
     </div>
     <div class="err-block" id="sum-notes" style="display:none;background:rgba(77,144,240,.05);border-color:rgba(77,144,240,.18)">
-      <div class="err-title" style="color:var(--blue)">Notes</div><div id="sum-notes-body"></div>
+      <div class="err-title" style="color:var(--blue)"><span>Notes</span>
+        <button class="err-copy" data-copy="sum-notes-body">COPY</button></div>
+      <div class="err-body" id="sum-notes-body"></div>
     </div>
     <div class="file-links" id="sum-files"></div>
     <div class="m-btns">
@@ -1421,7 +1439,9 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
     <div class="vf-line" id="vf-line">—</div>
     <div class="sum-grid" id="vf-grid" style="margin-top:16px"></div>
     <div class="err-block" id="vf-bad" style="display:none;text-align:left">
-      <div class="err-title">Problems</div><div id="vf-bad-body"></div>
+      <div class="err-title"><span>Problems</span>
+        <button class="err-copy" data-copy="vf-bad-body">COPY</button></div>
+      <div class="err-body" id="vf-bad-body"></div>
     </div>
     <div class="m-btns"><button class="m-btn" id="vf-close">Close</button></div>
   </div>

@@ -4,6 +4,239 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.5.11] — 2026-09-03
+
+Interface only. The engine is untouched.
+
+### Added
+
+- **A CLOSE button, next to NEW, OPEN, SAVE and SAVE AS.** It closes the open
+  job and takes it out of the JOBS list. It is greyed out while no job file is
+  open — NEW is what clears an untitled one — so CLOSE can never lose work that
+  is not already on disk.
+- **Right-click on a job in the list**: *Open*, *Reveal in Finder* (*Show in
+  Explorer* on Windows), and *Close*.
+- **Close job** in the File menu. Deliberately without a keyboard shortcut:
+  ⌘W already belongs to the window's own Close and to the Window menu, and two
+  menu items claiming one key is a coin toss.
+
+### Notes
+
+- **Closing never deletes anything.** It removes the entry from the list; the
+  `.syncto` file stays where it is, and the status strip says so with the full
+  path. A job file is often the only record of which two folders belong
+  together, and a right-click menu that deletes one is a trap.
+- **Closing the open job also clears the last-opened path**, so the next launch
+  starts on an untitled job instead of reopening the one just closed.
+
+### Changed
+
+- The recent-jobs list moved out of the window process into `config.js`
+  (`pushRecent` / `removeRecent`). Opening a job and closing one now share one
+  definition of what that list is, and it is covered by the test suite without
+  needing Electron.
+
+## [0.5.10] — 2026-09-01
+
+Interface only. The engine is untouched; the same checks pass, plus 25 new ones.
+
+### Fixed
+
+- **A job whose pairs are all in sync no longer lists them.** A multi-pair job
+  drew one heading per pair unconditionally, so a backup that is up to date —
+  the ordinary state of a backup — produced a column of headings with nothing
+  underneath: five rows that look like work. Worse, it kept the grid from ever
+  being empty, so the "nothing to do" message the window already had could not
+  be reached in a multi-pair job at all. A pair now appears only when it has
+  something to show.
+- **A pair that has work still appears in full**, heading included. With three
+  pairs and one of them behind, the list holds that one pair and the status
+  strip says `2 of 3 pairs already in sync` — in words, not as empty rows.
+
+### Changed
+
+- **The empty grid answers the question that was actually asked.** One hedging
+  sentence — "everything is in sync, or the view filters are hiding it" — is
+  replaced by four states that know which one they are:
+  - every pair identical → a green check, **All pairs are in sync**, the figures
+    underneath, and a button to list the identical files anyway;
+  - work exists but the current view hides all of it → how many items need
+    attention, and a button that clears the filters;
+  - nothing was compared at all → the folders are empty, or the filter removes
+    everything in them;
+  - nothing compared yet → pick two folders and press Compare.
+
+## [0.5.9] — 2026-09-01
+
+Application bundles, and a log you can send to somebody.
+
+### Fixed
+
+- **A macOS `.app` could be destroyed a little more at every run.** A
+  `.framework` is built on symbolic links — `Resources` points at
+  `Versions/Current/Resources`, `Current` points at `A`. syncto recreates
+  links as links, but only while it believes the item is a link. When the two
+  sides disagreed about an item's type — a link here, a real file or folder
+  there, which is what a bundle copied by another tool leaves behind — the
+  comparison filed the row as a plain file so it could be shown and resolved in
+  the grid, and the copy took that at face value. Resolving the conflict then
+  read the link as if it were a file: `EISDIR: illegal operation on a
+  directory, read` on a link pointing at a folder, and a size mismatch on a
+  link pointing at a file, whose own length is 26 bytes where its target holds
+  a megabyte. The copy now decides from what `lstat` says at that instant, not
+  from what the comparison recorded — the stat was already being made, so it
+  costs nothing. Present since symbolic links arrived.
+- **A real folder standing where the source has a link is now replaced**, so a
+  flattened bundle is repaired instead of reported for ever. The removal goes
+  through the configured deletion policy — recycle bin, revision folder or
+  permanent — and a folder that still holds files refuses and names them,
+  rather than being wiped behind the user's back.
+- **A folder facing a file is explained in words** instead of failing with an
+  errno.
+
+### Added
+
+- **A Copy button on the Errors, Notes and Problems panels.** It puts the whole
+  list on the clipboard — all of it, not the sixty lines the panel shows —
+  behind a header naming the version, the job and the date. The heading no
+  longer scrolls with the list, so the button stays reachable at the sixtieth
+  line.
+
+## [0.5.8] — 2026-09-01
+
+Interface only. The engine is untouched and the same 447 checks pass.
+
+### Changed — the top of the window
+
+- **The synchronization mode is now the first thing on screen**, above the
+  folders. It is the decision that governs everything below it, and it was
+  sitting underneath — the comment in the source even claimed it was at the top.
+- **The copy-mode box is gone.** It described the one and only copy mode, at
+  length, permanently. That is not a choice, so it does not need a panel: it is
+  in the settings, and in the run summary where it is actually being used. The
+  grid gains about 140 px — eight rows visible where five fitted before, which
+  the progress panel also benefits from.
+
+### Changed — the folder pairs
+
+**Pair 1 is no longer a special case.** It had its own markup up in the header,
+with the only swap button and the only free-space readouts, so nothing below it
+lined up with anything.
+
+- **Every pair is numbered**, from 1.
+- **The header row and every pair row share one CSS grid** — remove · number ·
+  source · swap · destination. That is what makes the columns line up, and it
+  cannot drift: changing a track moves both together.
+- **Every pair has its own swap button**, and it swaps that pair. ⌘T still
+  swaps them all at once.
+- **The free-space readouts are gone.** "27.8 GB free of 252 GB" is a fact about
+  the machine, not about the job — and it was the main reason pair 1 was taller
+  than the rest. A pair is a source and a destination.
+- **Remove moved to the left, is red, and uses Lucide's `trash-2`.** It is the
+  one destructive control in that strip and it was last in the row, in the same
+  grey as Browse. On the last remaining pair it is disabled rather than hidden,
+  so the columns do not shift when a job is down to one.
+
+### Fixed
+
+- **The server button stopped lighting up** when an `sftp://` address was typed
+  by hand. The old code only did that for pair 1, in the function that
+  free-space removal emptied. It now updates in place as you type — in place
+  rather than by redrawing the rows, because redrawing takes the focus away
+  from someone tabbing between fields.
+
+---
+
+## [0.5.7] — 2026-09-01
+
+Reported as "on a multi-pair comparison over a large volume, the circle fills,
+empties, fills again — I have no idea of the progress or the time". Three
+separate things were wrong, and the third is the one that mattered most.
+
+### Fixed — you could not see the progress panel at all
+
+**During a comparison the whole progress panel was cut off below the bottom of
+the window.** The ring, the counters, the elapsed time, the Cancel button — all
+of it, on a default-sized window. `#gridscroll` is a scrolling flex child and
+had no `min-height: 0`, so it refused to shrink below its content, the column
+kept growing, and everything under it was pushed off screen.
+
+It only showed up during a **comparison**, because that is the one phase where
+the grid is still filling while the panel is up. A synchronization, running
+against an already-drawn grid, fitted. That is why it had gone unnoticed —
+including by the screenshots, which had never photographed a comparison in
+progress.
+
+### Fixed — a ring that filled, emptied and filled again
+
+The ring was driven by `(scanned % 500) / 500`: it filled once per 500 items
+scanned and started over. On a large job that cycles for minutes. It was meant
+to read as "working", and it reads as a progress bar that has lost its mind.
+
+**And every pair restarted its own counter from zero**, so at each pair boundary
+the numbers fell back and the ring emptied for real.
+
+Two honest answers now, depending on what is actually known:
+
+- **The pair has been synchronized before.** The database remembers how many
+  items these two folders held last time, which for a backup that runs
+  regularly is a good estimate. It is read *before* the scan now rather than
+  after, and the ring shows a real percentage — written `≈62%`, because the
+  tree has changed since, which is the entire reason you are comparing. Capped
+  at 99 %: the run is over when it says it is.
+- **First comparison of this pair.** No percentage at all — inventing one is
+  what caused this. The arc spins, and the count of items scanned sits in the
+  middle where the percentage would be. A number that only ever grows.
+
+Across pairs everything is a running total, and the ring's own progress is
+(finished pairs + fraction of the current one) / pairs. **Nothing goes
+backwards**, at a pair boundary or anywhere else.
+
+### Fixed — no idea of the time
+
+The four tiles kept their copy-phase labels during a comparison, so "ETA" was
+sitting over a number that was not an ETA. They now say what they are showing:
+**Items scanned · Data read · Scan rate · Elapsed**, and "Removed" — which a
+comparison never does — is hidden.
+
+Elapsed time and scan rate need no total to be true, which is the point: they
+answer "is this thing moving?" even on a first run with nothing to estimate
+against. The rate is computed from milliseconds, so it is there in the first
+second rather than blank for the exact moment you are wondering.
+
+The window also gets its first progress event **before** the walk starts
+instead of at the 200th item — on a deep tree or a slow share, that was a long
+stare at an empty panel — and one at the end of each pair, so the running total
+handed to the next pair is the same number you were last shown.
+
+### Added — Reveal, on right-click
+
+Right-clicking a row in the grid or in the overview now offers **Reveal in
+Finder** (Show in Explorer on Windows) for **both sides** — a row is two places
+on disk, not one. The side the item is not on is greyed rather than hidden: a
+menu that changes shape from row to row is harder to use than one where the
+missing half is visible and inert.
+
+Right-clicking a folder field — SOURCE, DESTINATION, or any extra pair — offers
+the same thing for the folder itself.
+
+The path is resolved in the main process, not in the window, because that is
+where the pairs, the two roots and each side's own spelling of the name live: a
+Mac stores accents decomposed and a Linux share composed, and handing the wrong
+spelling to the Finder reveals nothing. A side that is on a server says so
+instead of doing nothing. And when the item is gone, the containing folder
+opens — more useful than an error, and where you were heading anyway.
+
+### Tests
+
+18 new assertions, to **447**: the running total never falls (including across
+a pair boundary), the estimate appears on the second comparison and not the
+first, elapsed time is always reported, and Reveal resolves both sides,
+falls back to the containing folder, refuses a stale row index and refuses a
+server.
+
+---
+
 ## [0.5.6] — 2026-09-01
 
 **The macOS build now handles signing and notarization by itself.** Reported as

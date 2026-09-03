@@ -51,6 +51,7 @@ interface in them stays the interface you get.</sub>
 | **Deletion** | trash or permanent — always announced, never silent |
 | **Filter** | per-job include/exclude patterns, name- or path-anchored |
 | **Report** | HTML, CSV and JSON, with every checksum |
+| **Reveal** | right-click any row or folder field → open it in Finder / Explorer, either side |
 | **Locking** | one machine at a time per folder, safe over any network share |
 | **Remote** | local disks, mounted network shares, and SFTP |
 

@@ -2231,7 +2231,471 @@ function testAppleCommandLines() {
      'a successful store-credentials is not second-guessed by another check');
 }
 
+// ══ 27. Comparison progress, and Reveal (0.5.7) ═══════════════════════════
+async function testProgressAndReveal() {
+  console.log('\n\n27. Comparison progress and Reveal (0.5.7)');
+
+  // (a) A multi-pair comparison used to report each pair's own counter, which
+  //     falls back to zero at every pair — the ring emptied and refilled, and
+  //     nothing on screen said how far along the whole thing was. The window
+  //     now gets a running total that never goes down.
+  {
+    const { L, R } = scratch();
+    const L2 = path.join(path.dirname(L), 'L2'), R2 = path.join(path.dirname(R), 'R2');
+    for (const d of [L2, R2]) fs.mkdirSync(d, { recursive: true });
+    for (let i = 0; i < 6; i++) write(L,  `a${i}.mov`, 'x');
+    for (let i = 0; i < 6; i++) write(L2, `b${i}.mov`, 'y');
+
+    const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+    job.pairs = [{ left: L, right: R }, { left: L2, right: R2 }];
+
+    const m = new MultiSession();
+    const seen = [];
+    await m.compare(job, { token: { cancelled: false }, onProgress: p => seen.push(p) });
+    await m.close();
+
+    ok(seen.length > 0, 'the comparison reports progress');
+    ok(seen.every(p => p.scannedTotal != null), 'every event carries a running total');
+    let worst = 0, fell = false;
+    for (const p of seen) { if (p.scannedTotal < worst) fell = true; worst = Math.max(worst, p.scannedTotal); }
+    ok(!fell, 'the running total never goes backwards, not even between pairs');
+    ok(seen.some(p => p.pair === 2), 'the second pair is reported as pair 2');
+    ok(seen.every(p => p.pairs === 2), 'and the number of pairs is on every event');
+    ok(seen.every(p => p.elapsedMs != null), 'elapsed time is reported, which needs no total to be true');
+    const last = seen[seen.length - 1];
+    ok(last.scannedTotal >= 12, `the total covers both pairs (${last.scannedTotal})`);
+  }
+
+  // (b) The estimate that makes an honest percentage possible: how many items
+  //     the pair held at the end of the last run. It has to be read BEFORE the
+  //     scan, or it arrives too late to be of any use.
+  {
+    const { L, R } = scratch();
+    for (let i = 0; i < 5; i++) write(L, `c${i}.mov`, 'data');
+    const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+
+    const first = [];
+    const s1 = new Session();
+    await s1.compare(job, { token: { cancelled: false }, onProgress: p => first.push(p) });
+    ok(first.every(p => !p.expected), 'a first comparison has nothing to estimate against');
+    await s1.sync(job, { token: { cancelled: false }, appVersion: 'test' });
+    await s1.close();
+
+    const second = [];
+    const s2 = new Session();
+    await s2.compare(job, { token: { cancelled: false }, onProgress: p => second.push(p) });
+    await s2.close();
+    ok(second.length && second.every(p => p.expected > 0),
+       `the next comparison knows roughly how many items to expect (${second[0] && second[0].expected})`);
+  }
+
+  // (c) Reveal: the window sends a row index and a side, and the path comes
+  //     back resolved — including the spelling that side really uses.
+  {
+    const { L, R } = scratch();
+    write(L, 'A001/clip.mov', 'data');
+    const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+    job.pairs = [{ left: L, right: R }];
+    const m = new MultiSession();
+    await m.compare(job, { token: { cancelled: false } });
+
+    const rows = m.rows(0, 50, { showEqual: true });
+    const row = rows.rows.find(r => r.rel === 'A001/clip.mov');
+    ok(row, 'the file is in the grid');
+
+    const left = m.locate(row.idx, 'left');
+    ok(left.ok, 'the source side resolves');
+    eq(left.path, path.join(L, 'A001', 'clip.mov'), 'to the real path on disk');
+    ok(fs.existsSync(left.path), 'which exists');
+
+    // Not on the destination yet: opening the containing folder beats an error.
+    const right = m.locate(row.idx, 'right');
+    ok(!right.ok, 'the destination side has nothing to reveal');
+    eq(right.fallback, R, 'so the containing folder is offered instead');
+
+    eq(m.locate(999999, 'left').ok, false, 'a stale row index reveals nothing');
+    await m.close();
+  }
+
+  // (d) A server has no Finder window. Say so, rather than silently doing
+  //     nothing or handing a remote path to the operating system.
+  {
+    const { L, R } = scratch();
+    write(L, 'x.mov', 'data');
+    const m = new MultiSession();
+    const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+    job.pairs = [{ left: L, right: R }];
+    await m.compare(job, { token: { cancelled: false } });
+    m.sessions[0].right.kind = 'sftp';           // as pool.open tags a server
+    const r = m.locate(m.rows(0, 10, {}).rows[0].idx, 'right');
+    eq(r.ok, false, 'a remote side is refused');
+    ok(/server/i.test(r.error), 'and the message says why');
+    await m.close();
+  }
+}
+
 // ══ Run ════════════════════════════════════════════════════════════════════
+// ══ 28. Application bundles, and the copy-the-log button (0.5.9) ═══════════
+// A macOS .framework is built on symbolic links: `Resources` points at
+// `Versions/Current/Resources`, `Current` points at `A`. syncto recreates
+// links as links — but only as long as it BELIEVES the item is a link. On a
+// type clash (a link here, a real file or folder there) the comparison files
+// the row as a "file" so it can be shown and resolved in the grid, and the
+// copy used to take that at face value: it read the link as a file, which is
+// EISDIR on a link to a directory, and measured 26 bytes where it wrote a
+// megabyte on a link to a file.
+async function testBundlesAndCopyLog() {
+  console.log('\n\n28. Application bundles and the copy button (0.5.9)');
+
+  // A framework the way macOS really builds one.
+  function framework(base, rel, size) {
+    const f = path.join(base, rel);
+    fs.mkdirSync(path.join(f, 'Versions/A/Resources'), { recursive: true });
+    fs.writeFileSync(path.join(f, 'Versions/A/Bin'), Buffer.alloc(size, 7));
+    fs.writeFileSync(path.join(f, 'Versions/A/Resources/Info.plist'), 'plist');
+    fs.symlinkSync('A', path.join(f, 'Versions/Current'));
+    fs.symlinkSync('Versions/Current/Bin', path.join(f, 'Bin'));
+    fs.symlinkSync('Versions/Current/Resources', path.join(f, 'Resources'));
+    return f;
+  }
+  // The same bundle after a tool that followed the links: the shortcuts have
+  // become real files and real folders.
+  function flattened(base, rel, size, fillResources) {
+    const f = path.join(base, rel);
+    fs.mkdirSync(path.join(f, 'Versions/A/Resources'), { recursive: true });
+    fs.writeFileSync(path.join(f, 'Versions/A/Bin'), Buffer.alloc(size, 7));
+    fs.writeFileSync(path.join(f, 'Versions/A/Resources/Info.plist'), 'plist');
+    fs.mkdirSync(path.join(f, 'Versions/Current'), { recursive: true });
+    fs.writeFileSync(path.join(f, 'Bin'), Buffer.alloc(size, 7));
+    fs.mkdirSync(path.join(f, 'Resources'), { recursive: true });
+    if (fillResources) fs.writeFileSync(path.join(f, 'Resources/Info.plist'), 'plist');
+    return f;
+  }
+  function linkTarget(p) {
+    try { return fs.readlinkSync(p); } catch (_) { return null; }
+  }
+
+  // (a) A clean copy of a bundle, which already worked and must keep working.
+  {
+    const { L, R } = scratch();
+    framework(L, 'App.app/Contents/Frameworks/F.framework', 4096);
+    const job = makeJob(L, R, { sync: { variant: 'mirror' }, compare: { symlinks: 'asLink' } });
+    const { run } = await runPair(job);
+    const f = path.join(R, 'App.app/Contents/Frameworks/F.framework');
+    eq(run.errors.length, 0, 'a bundle copies to an empty target without an error');
+    eq(linkTarget(path.join(f, 'Bin')), 'Versions/Current/Bin', 'the binary stays a link');
+    eq(linkTarget(path.join(f, 'Resources')), 'Versions/Current/Resources', 'Resources stays a link');
+    eq(linkTarget(path.join(f, 'Versions/Current')), 'A', 'Versions/Current stays a link');
+  }
+
+  // (b) The Luminar Neo case: the target already holds a flattened copy, and
+  //     the user resolves the clashes in the grid by forcing left → right.
+  {
+    const { L, R } = scratch();
+    framework(L, 'F.framework', 997472);
+    flattened(R, 'F.framework', 997472, false);
+
+    const job = makeJob(L, R, { sync: { variant: 'mirror' }, compare: { symlinks: 'asLink' } });
+    const s = new Session();
+    const token = { cancelled: false };
+    await s.compare(job, { token });
+
+    const clashes = s.nodes.filter(n => n.cat === 'conflict').map(n => n.rel).sort();
+    eq(clashes, ['F.framework/Bin', 'F.framework/Resources', 'F.framework/Versions/Current'],
+       'a link facing a real file or folder is reported as a conflict');
+    // What the comparison hands the grid, and what used to be taken literally.
+    ok(s.nodes.filter(n => n.cat === 'conflict').every(n => n.type === 'file'),
+       'the grid still shows a clash as a single file row');
+
+    s.setDirection(s.nodes.filter(n => n.cat === 'conflict').map(n => n.idx), 'right');
+    const run = await s.sync(job, { token, appVersion: 'test' });
+    await s.close();
+
+    const msgs = run.errors.map(e => e.message).join(' | ');
+    ok(!/EISDIR/.test(msgs), 'no EISDIR: a link to a directory is no longer read as a file');
+    ok(!/Size mismatch/.test(msgs), 'no size mismatch: the link is not measured against its target');
+    eq(run.errors.length, 0, 'the flattened bundle is repaired without an error');
+    eq(linkTarget(path.join(R, 'F.framework/Bin')), 'Versions/Current/Bin',
+       'the real file is replaced by the link it should have been');
+    eq(linkTarget(path.join(R, 'F.framework/Resources')), 'Versions/Current/Resources',
+       'the real folder is replaced by the link it should have been');
+    eq(linkTarget(path.join(R, 'F.framework/Versions/Current')), 'A',
+       'and the version link too');
+  }
+
+  // (c) The same, except the folder in the way still holds a real file. It is
+  //     NOT wiped: deleting it goes through the ordinary deletion policy, and
+  //     that policy refuses a folder with content in it — naming the content.
+  {
+    const { L, R } = scratch();
+    framework(L, 'F.framework', 4096);
+    flattened(R, 'F.framework', 4096, true);
+
+    const job = makeJob(L, R, { sync: { variant: 'mirror' }, compare: { symlinks: 'asLink' } });
+    const s = new Session();
+    const token = { cancelled: false };
+    await s.compare(job, { token });
+    s.setDirection(s.nodes.filter(n => n.cat === 'conflict').map(n => n.idx), 'right');
+    const run = await s.sync(job, { token, appVersion: 'test' });
+    await s.close();
+
+    const msg = run.errors.map(e => e.message).join(' | ');
+    ok(/symbolic link/.test(msg), 'the refusal says a link is facing a real folder');
+    ok(/Info\.plist/.test(msg), 'and names what is inside it');
+    ok(!/EISDIR/.test(msg), 'and it is not an errno');
+    ok(fs.existsSync(path.join(R, 'F.framework/Resources/Info.plist')),
+       'nothing inside the folder was destroyed');
+    // The other two rows have no content in the way and are repaired anyway.
+    eq(linkTarget(path.join(R, 'F.framework/Bin')), 'Versions/Current/Bin',
+       'one bad row does not stop the others');
+  }
+
+  // (d) A folder facing a file, no symbolic link anywhere: the same clash from
+  //     the other side. It must refuse in words, not stream a directory.
+  {
+    const { L, R } = scratch();
+    fs.mkdirSync(path.join(L, 'thing'), { recursive: true });
+    write(L, 'thing/inside.txt', 'x');
+    write(R, 'thing', 'I am a file');
+    const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+    const s = new Session();
+    const token = { cancelled: false };
+    await s.compare(job, { token });
+    s.setDirection(s.nodes.filter(n => n.cat === 'conflict').map(n => n.idx), 'right');
+    const run = await s.sync(job, { token, appVersion: 'test' });
+    await s.close();
+    const msg = run.errors.map(e => e.message).join(' | ');
+    ok(/folder/.test(msg) && !/EISDIR/.test(msg),
+       'a folder facing a file is explained, not reported as an errno');
+  }
+
+  // (e) The copy button. Nothing here launches Electron — what is checked is
+  //     the wiring, which is exactly what silently breaks: a button pointing
+  //     at an id that does not exist copies nothing and says nothing.
+  {
+    const html   = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/index.html'), 'utf8');
+    const appjs  = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.js'), 'utf8');
+    const pre    = fs.readFileSync(path.join(__dirname, '..', 'src/main/preload.js'), 'utf8');
+    const main   = fs.readFileSync(path.join(__dirname, '..', 'src/main/main.js'), 'utf8');
+
+    const buttons = [...html.matchAll(/class="err-copy" data-copy="([^"]+)"/g)].map(m => m[1]);
+    eq(buttons.sort(), ['sum-errors-body', 'sum-notes-body', 'vf-bad-body'],
+       'every error panel carries a copy button');
+    for (const id of buttons) {
+      ok(html.includes(`id="${id}"`), `the button for ${id} points at an element that exists`);
+      ok(new RegExp(`setCopyBlock\\('${id}'`).test(appjs), `${id} is given something to copy`);
+    }
+    // The whole chain, end to end: renderer → preload → main → clipboard.
+    ok(/API\.copyText\(/.test(appjs), 'the handler calls the exposed API');
+    ok(/copyText\s*:.*invoke\('copy-text'/.test(pre), 'preload exposes it on the channel');
+    ok(/ipcMain\.handle\('copy-text'/.test(main), 'and main answers on that channel');
+    ok(/clipboard\.writeText/.test(main), 'through Electron clipboard');
+    // navigator.clipboard is unusable from file:// under this CSP — it is not
+    // a secure context — and reaching for it is the obvious wrong move.
+    ok(!/navigator\.clipboard/.test(appjs), 'and never through navigator.clipboard');
+    // The panels show 60 lines at most; the copy must carry the whole list.
+    ok(/setCopyBlock\('sum-errors-body', res\.errors\.map/.test(appjs),
+       'the copy takes every error, not the 60 that are displayed');
+    // The heading holds the button, so it must not scroll away with the list.
+    ok(/\.err-body\{max-height:150px;overflow-y:auto;\}/.test(html),
+       'the list scrolls inside the block, not the block itself');
+    ok(!/\.err-block\{[^}]*overflow-y:auto/.test(html),
+       'so the title and its button stay put');
+  }
+}
+
+// ══ 29. Pairs that are in sync leave the list ═════════════════════════════
+// A multi-pair job emitted one heading per pair unconditionally. A backup that
+// is up to date — every pair identical, the ordinary case — therefore produced
+// a list of headings with nothing under them, which looks like work and, worse,
+// kept the grid from ever being empty: the "nothing to do" message the window
+// has for exactly this case could not be reached in a multi-pair job.
+async function testInSyncPairs() {
+  console.log('\n\n29. Pairs in sync leave the list');
+
+  function pairDirs(n, extraOn) {
+    const { dir } = scratch();
+    const pairs = [];
+    for (let p = 0; p < n; p++) {
+      const L = path.join(dir, 'L' + p), R = path.join(dir, 'R' + p);
+      for (let i = 0; i < 4; i++) {
+        write(L, `clip${i}.mov`, 'x'.repeat(100 + i), 1700000000000);
+        write(R, `clip${i}.mov`, 'x'.repeat(100 + i), 1700000000000);
+      }
+      if (extraOn === p) write(L, 'new/EXTRA.mov', 'yyy');
+      pairs.push({ left: L, right: R });
+    }
+    return pairs;
+  }
+
+  // (a) Every pair identical: nothing at all in the list.
+  {
+    const pairs = pairDirs(3, -1);
+    const job = makeJob(pairs[0].left, pairs[0].right, { sync: { variant: 'mirror' } });
+    job.pairs = pairs;
+    const m = new MultiSession();
+    await m.compare(job, { token: { cancelled: false } });
+    const view = { showEqual: false, showExcluded: false };
+    const r = m.rows(0, 200, view);
+    eq(r.total, 0, 'three synchronized pairs put nothing in the list');
+    eq(r.pairsShown, 0, 'and no pair claims to be showing something');
+    eq(r.pairs, 3, 'while the number of pairs is still reported');
+    eq(r.rows.filter(x => x.hdr).length, 0, 'no heading is left behind');
+    // The figures the window puts under "All pairs are in sync".
+    ok(m.stats.rows > 0, 'the comparison did compare something');
+    eq(m.stats.filesToProcess, 0, 'and found nothing to do');
+    await m.close();
+  }
+
+  // (b) One pair out of three has work: only that one appears, heading included.
+  {
+    const pairs = pairDirs(3, 1);
+    const job = makeJob(pairs[0].left, pairs[0].right, { sync: { variant: 'mirror' } });
+    job.pairs = pairs;
+    const m = new MultiSession();
+    await m.compare(job, { token: { cancelled: false } });
+    const r = m.rows(0, 200, { showEqual: false, showExcluded: false });
+    eq(r.pairsShown, 1, 'one pair shows something');
+    const hdrs = r.rows.filter(x => x.hdr);
+    eq(hdrs.length, 1, 'and exactly one heading is drawn');
+    eq(hdrs[0].pair, 2, 'the heading is the pair that has work, not the first one');
+    ok(r.total > 1, 'its rows are there under it');
+    ok(r.rows.filter(x => !x.hdr).every(x => x.rel.startsWith('new')),
+       'and nothing from the two synchronized pairs');
+    await m.close();
+  }
+
+  // (c) "Show identical" is the way back: every pair comes back, headings too.
+  {
+    const pairs = pairDirs(3, -1);
+    const job = makeJob(pairs[0].left, pairs[0].right, { sync: { variant: 'mirror' } });
+    job.pairs = pairs;
+    const m = new MultiSession();
+    await m.compare(job, { token: { cancelled: false } });
+    const r = m.rows(0, 200, { showEqual: true, showExcluded: false });
+    eq(r.pairsShown, 3, 'ticking "show identical" brings all three back');
+    eq(r.rows.filter(x => x.hdr).length, 3, 'with their headings');
+    await m.close();
+  }
+
+  // (d) A single pair reports the same shape, so the window has one code path.
+  {
+    const { L, R } = scratch();
+    write(L, 'a.mov', 'x', 1700000000000);
+    write(R, 'a.mov', 'x', 1700000000000);
+    const s = new Session();
+    await s.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: {} });
+    const r = s.rows(0, 200, { showEqual: false, showExcluded: false });
+    eq(r.total, 0, 'a single synchronized pair shows nothing');
+    eq(r.pairs, 1, 'and reports one pair');
+    eq(r.pairsShown, 0, 'showing nothing');
+    await s.close();
+  }
+
+  // (e) The window's four empty states. Checked statically — what breaks here
+  //     is a message that no longer matches the branch that reaches it.
+  {
+    const html  = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/index.html'), 'utf8');
+    const appjs = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.js'), 'utf8');
+    for (const id of ['ge-ico', 'ge-title', 'ge-sub', 'ge-act']) {
+      ok(html.includes(`id="${id}"`), `the empty grid has its ${id}`);
+    }
+    ok(/All pairs are in sync/.test(appjs), 'the multi-pair wording exists');
+    ok(/Everything is in sync/.test(appjs), 'and the single-pair one');
+    ok(/pairs already in sync/.test(appjs),
+       'pairs that dropped out are counted in the status strip');
+    // display:'' would fall back to the stylesheet, which hides the button —
+    // the rule sits on #ge-act itself. That mistake makes the way back out of
+    // the empty state invisible.
+    ok(!/ge-act[\s\S]{0,400}?style\.display = act \? '' :/.test(appjs),
+       "the action button is not shown with display:''");
+    ok(/#ge-act\{display:none/.test(html), 'and it is hidden by default in CSS');
+  }
+}
+
+// ══ 30. Closing a job (0.5.11) ════════════════════════════════════════════
+// "Close" removes a job from the JOBS list. The thing that must never happen
+// is the one a right-click menu invites: deleting the file. The list is a
+// convenience; the .syncto file is what the user owns, and it is often the
+// only record of which two folders belong together.
+function testCloseJob() {
+  console.log('\n\n30. Closing a job (0.5.11)');
+
+  const { pushRecent, removeRecent, RECENT_MAX, saveJob, loadJob } =
+    require('../src/main/config');
+
+  // (a) The list itself.
+  {
+    let l = [];
+    l = pushRecent(l, 'A', '/jobs/a.syncto');
+    l = pushRecent(l, 'B', '/jobs/b.syncto');
+    eq(l.map(r => r.name), ['B', 'A'], 'the newest entry comes first');
+    l = pushRecent(l, 'A again', '/jobs/a.syncto');
+    eq(l.length, 2, 'reopening a job does not duplicate its entry');
+    eq(l[0].name, 'A again', 'it moves back to the top under its current name');
+
+    eq(removeRecent(l, '/jobs/a.syncto').map(r => r.name), ['B'], 'closing removes that entry');
+    eq(removeRecent(l, '/jobs/nope').length, 2, 'closing an unknown path changes nothing');
+    eq(removeRecent(null, '/jobs/a.syncto'), [], 'and an empty list survives it');
+    // A malformed entry used to slip through the filter and reach the window,
+    // where `r.path` on undefined took the whole list down.
+    eq(removeRecent([null, { name: 'x' }, { name: 'B', path: '/b' }], '/a').length, 1,
+       'entries with no path are dropped rather than rendered');
+
+    let big = [];
+    for (let i = 0; i < RECENT_MAX + 5; i++) big = pushRecent(big, 'J' + i, '/jobs/' + i);
+    eq(big.length, RECENT_MAX, 'the list is capped');
+    eq(big[0].name, 'J' + (RECENT_MAX + 4), 'and keeps the most recent end');
+  }
+
+  // (b) Closing never touches the file. Checked for real, on a real file.
+  {
+    const { dir } = scratch();
+    const file = path.join(dir, 'MONTAGE.syncto');
+    const j = defaultJob();
+    j.name = 'MONTAGE';
+    j.pairs = [{ left: path.join(dir, 'L'), right: path.join(dir, 'R') }];
+    saveJob(file, j);
+
+    let list = pushRecent([], 'MONTAGE', file);
+    list = removeRecent(list, file);
+    eq(list.length, 0, 'the entry is gone from the list');
+    ok(fs.existsSync(file), 'and the job file is still there');
+    const back = loadJob(file);
+    eq(back.pairs.length, 1, 'still readable, with its pairs intact');
+  }
+
+  // (c) The wiring, end to end: button → renderer → preload → main.
+  {
+    const html  = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/index.html'), 'utf8');
+    const appjs = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.js'), 'utf8');
+    const pre   = fs.readFileSync(path.join(__dirname, '..', 'src/main/preload.js'), 'utf8');
+    const main  = fs.readFileSync(path.join(__dirname, '..', 'src/main/main.js'), 'utf8');
+
+    ok(/id="job-close-btn"/.test(html), 'the CLOSE button is in the markup');
+    ok(/repeat\(5,\s*1fr\)/.test(html), 'and the row is laid out for five buttons');
+    ok(/job-close-btn'\)\.addEventListener\('click'/.test(appjs), 'it is wired');
+    ok(/openJobCtx/.test(appjs) && /closest\('\.recent-item'\)/.test(appjs),
+       'a right-click on a job in the list opens a menu');
+    ok(/data-k="close"/.test(appjs), 'that menu offers Close');
+    ok(/jobClose\s*:.*invoke\('job-close'/.test(pre), 'preload exposes the channel');
+    ok(/ipcMain\.handle\('job-close'/.test(main), 'and main answers on it');
+    ok(/lastJobPath = ''/.test(main),
+       'closing the open job clears lastJobPath, so the next launch does not reopen it');
+
+    // The handler must not delete anything. Read the handler's own body.
+    const body = main.slice(main.indexOf("ipcMain.handle('job-close'"));
+    const handler = body.slice(0, body.indexOf('});') + 3);
+    ok(!/unlink|rmSync|rmdir|trash/i.test(handler), 'and it deletes nothing on disk');
+
+    // ⌘W already belongs to role:'close' and to the Window menu. Two menu
+    // items claiming one key is a coin toss.
+    const menuLine = (main.match(/\{ label: 'Close job'.*\}/) || [''])[0];
+    ok(!/accelerator/.test(menuLine), 'the Close job menu entry claims no accelerator');
+    ok(/label: 'Close job'/.test(main), 'but it is in the File menu');
+  }
+}
+
 (async function main() {
   console.log('syncto engine tests');
   console.log('scratch: ' + ROOT);
@@ -2262,6 +2726,10 @@ function testAppleCommandLines() {
     await testAudit051Engine();
     await testOsFolderLitter();
     testAppleCommandLines();
+    await testProgressAndReveal();
+    await testBundlesAndCopyLog();
+    await testInSyncPairs();
+    testCloseJob();
   } catch (err) {
     failed++;
     failures.push('UNCAUGHT: ' + (err.stack || err.message));

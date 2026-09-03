@@ -16,7 +16,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu, powerSaveBlocker } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, powerSaveBlocker, clipboard } = require('electron');
 const path  = require('path');
 const fs    = require('fs');
 const https = require('https');
@@ -91,7 +91,8 @@ function checkForUpdate() {
 
 const { MultiSession, verifyFolder } = require('./core/session');
 const { FsPool } = require('./fs/afs');
-const { Prefs, defaultJob, loadJob, saveJob, jobNameFromPath, JOB_EXT, credentialMap } = require('./config');
+const { Prefs, defaultJob, loadJob, saveJob, jobNameFromPath, JOB_EXT, credentialMap,
+        pushRecent: addRecent, removeRecent } = require('./config');
 const { RemoteBrowser } = require('./fs/browse');
 const secrets = require('./secrets');
 const power  = require('./power');
@@ -217,6 +218,12 @@ function buildMenu() {
         { label: 'Open job…',    accelerator: 'CmdOrCtrl+O', click: send('job-open') },
         { label: 'Save job',     accelerator: 'CmdOrCtrl+S', click: send('job-save') },
         { label: 'Save job as…', accelerator: 'CmdOrCtrl+Shift+S', click: send('job-save-as') },
+        { type: 'separator' },
+        // No accelerator on purpose: ⌘W already belongs to `role: 'close'`
+        // just below, and to the Window menu. Two menu items claiming the
+        // same key is a coin toss, and the one people expect ⌘W to do is
+        // close the window.
+        { label: 'Close job',    click: send('job-close') },
         { type: 'separator' },
         IS_MAC ? { role: 'close' } : { role: 'quit' },
       ],
@@ -438,6 +445,15 @@ ipcMain.handle('reveal-path',  (_, p) => { try { shell.showItemInFolder(p); } ca
 ipcMain.handle('open-path',    (_, p) => shell.openPath(p));
 ipcMain.handle('open-external',(_, u) => openExternalSafely(u));
 
+// Electron's own clipboard, deliberately, and not navigator.clipboard: the
+// renderer is loaded from file:// under a strict CSP, which is not a secure
+// context, so the web API is either missing or silently refuses. A cap so a
+// runaway list cannot hand the system clipboard a hundred megabytes.
+ipcMain.handle('copy-text', (_, text) => {
+  const s = String(text == null ? '' : text).slice(0, 2 * 1024 * 1024);
+  try { clipboard.writeText(s); return true; } catch (_) { return false; }
+});
+
 ipcMain.handle('folder-exists', async (_, p) => {
   try { return fs.statSync(p).isDirectory(); } catch (_) { return false; }
 });
@@ -448,11 +464,10 @@ ipcMain.handle('disk-free', async (_, p) => {
 });
 
 // ── IPC: jobs ──────────────────────────────────────────────────────────────
-// The recent list drives Zone 1: most recent first, unique by path, capped.
+// The list itself lives in config.js — both callers, opening and closing, use
+// the same definition of it.
 function pushRecent(name, p) {
-  const list = (prefs.data.recent || []).filter(r => r && r.path !== p);
-  list.unshift({ name: name || path.basename(p), path: p });
-  prefs.data.recent = list.slice(0, 10);
+  prefs.data.recent = addRecent(prefs.data.recent, name, p);
   prefs.save();
   return prefs.data.recent;
 }
@@ -471,6 +486,23 @@ function openJobFile(p) {
 }
 
 ipcMain.handle('job-new', () => { currentJobPath = ''; return defaultJob(); });
+
+// Closing a job takes it OUT of the list. It never touches the file on disk:
+// a right-click menu that deletes something is a trap, and a .syncto file is
+// often the only record of which two folders belong together. Reopening it is
+// one OPEN away, which is exactly why removing the entry is safe.
+ipcMain.handle('job-close', (_, p) => {
+  const target = p || currentJobPath;
+  const wasCurrent = !target || target === currentJobPath;
+  if (target) prefs.data.recent = removeRecent(prefs.data.recent, target);
+  if (wasCurrent) {
+    currentJobPath = '';
+    // Otherwise the next launch reopens the job that was just closed.
+    prefs.data.lastJobPath = '';
+  }
+  prefs.save();
+  return { recent: prefs.data.recent || [], closedCurrent: wasCurrent, path: target || '' };
+});
 
 ipcMain.handle('job-open', async () => {
   const res = await dialog.showOpenDialog(win, {
@@ -498,7 +530,7 @@ ipcMain.handle('job-open-path', async (_, p) => {
     let missing = false;
     try { fs.statSync(p); } catch (e) { missing = e.code === 'ENOENT'; }
     if (missing) {
-      prefs.data.recent = (prefs.data.recent || []).filter(r => r && r.path !== p);
+      prefs.data.recent = removeRecent(prefs.data.recent, p);
       prefs.save();
       return { error: 'gone', recent: prefs.data.recent };
     }
@@ -567,6 +599,21 @@ ipcMain.handle('compare-cancel', () => { tokens.compare.cancelled = true; return
 
 ipcMain.handle('get-rows', (_, offset, limit, view) => session.rows(offset, limit, view));
 ipcMain.handle('get-overview', (_, view) => session.overview(view));
+
+// Right-click → Reveal. The window sends a row index and a side; the path is
+// resolved here, where the pairs, the two roots and each side's own spelling of
+// the name live. When the item is gone the containing folder is opened instead
+// — more useful than an error, and it is what the user was heading for anyway.
+ipcMain.handle('reveal-node', (_, idx, side) => {
+  try {
+    const r = session.locate(idx, side === 'left' ? 'left' : 'right');
+    if (r.ok) { shell.showItemInFolder(r.path); return { ok: true }; }
+    if (r.fallback) { shell.openPath(r.fallback); return { ok: true, note: r.error }; }
+    return { ok: false, error: r.error };
+  } catch (err) {
+    return { ok: false, error: err.message || String(err) };
+  }
+});
 
 // Asked by the confirmation dialog. Anything that would make the run refuse is
 // better said here, with the folders on screen and the settings one click

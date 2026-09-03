@@ -39,6 +39,24 @@ function jobNameFromPath(p) {
   return base || 'Untitled';
 }
 
+// ── The recent-jobs list (Zone 1) ─────────────────────────────────────────
+// Most recent first, unique by path, capped. Kept here rather than inline in
+// the window process so both callers — opening a job and closing one — share
+// one definition of what the list is, and so it can be tested without Electron.
+const RECENT_MAX = 10;
+
+function pushRecent(list, name, p) {
+  const out = (list || []).filter(r => r && r.path && r.path !== p);
+  out.unshift({ name: name || jobNameFromPath(p), path: p });
+  return out.slice(0, RECENT_MAX);
+}
+
+// Takes an entry OUT of the list. The file itself is never touched: the list
+// is a convenience, the .syncto file is the thing the user owns.
+function removeRecent(list, p) {
+  return (list || []).filter(r => r && r.path && r.path !== p);
+}
+
 function defaultJob() {
   return {
     format : JOB_FORMAT,
@@ -575,4 +593,5 @@ function saveJob(file, job) {
 }
 
 module.exports = { Prefs, defaultJob, defaultPrefs, loadJob, saveJob, merge, migrateJob,
-  migratePrefs, credentialMap, jobNameFromPath, JOB_EXT, JOB_FORMAT };
+  migratePrefs, credentialMap, jobNameFromPath, pushRecent, removeRecent, RECENT_MAX,
+  JOB_EXT, JOB_FORMAT };

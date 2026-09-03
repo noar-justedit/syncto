@@ -116,7 +116,7 @@ class FsPool {
   // Returns { fs, path } ready to use.
   async open(loc) {
     if (loc.kind === 'native') {
-      return { fs: this.native, path: this.native.resolve(loc.path) };
+      return { fs: this.native, path: this.native.resolve(loc.path), kind: 'native' };
     }
     const key = `${loc.username}@${loc.host}:${loc.port}`;
     let backend = this.sftp.get(key);
@@ -138,7 +138,7 @@ class FsPool {
       throw err;
     }
     this.sftp.set(key, backend);
-    return { fs: backend, path: backend.resolve(loc.path) };
+    return { fs: backend, path: backend.resolve(loc.path), kind: 'sftp' };
   }
 
   async closeAll() {

@@ -37,6 +37,7 @@ const state = {
   dirty  : false,
   speeds : [],
   version: '',
+  pairInfo: null,
   auto   : { nextAt: 0, tick: null },   // auto-sync scheduler
   selIdx : null,                        // selected grid row (node idx)
 };
@@ -56,27 +57,44 @@ const ICON_SERVER = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" 
 
 // Pairs 2..N as stacked SOURCE/DESTINATION rows under the main fields —
 // the FreeFileSync layout: every pair visible and editable at once.
+// Every pair, drawn the same way — pair 1 included. It used to live in its own
+// markup up in the header, with the only swap button and free-space readouts
+// nobody asked for, so no column lined up with the pairs below it.
+//
+// Pair 1's two inputs still carry the ids the rest of the window knows them by
+// (left-path / right-path, left-server / right-server), so drag-and-drop, the
+// keyboard shortcuts and the server dialog keep working unchanged.
+const ICON_TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>';
+const ICON_SWAP  = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 3 4 4-4 4"/><path d="M20 7H4"/><path d="m8 21-4-4 4-4"/><path d="M4 17h16"/></svg>';
+
+// Lights (or unlights) the server button that belongs to one folder field.
+function lightServerButton(input) {
+  const field = input.closest('.pr-field');
+  const btn = field && field.querySelector('.srv-btn');
+  if (btn) btn.classList.toggle('on', input.value.trim().startsWith('sftp://'));
+}
+
 function renderPairRows() {
-  const j = state.job;
-  const RM = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
-  const ARR = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>';
-  const SRV = ICON_SERVER;
-  $('pairrows').innerHTML = j.pairs.slice(1).map((p, k) => {
-    const i = k + 1;
+  const j = ensurePairs(state.job);
+  const only = j.pairs.length === 1;
+  $('pairrows').innerHTML = j.pairs.map((p, i) => {
+    const id = n => i === 0 ? ` id="${n}"` : '';
+    const on = v => v.startsWith('sftp://') ? ' on' : '';
     return `<div class="prow" data-i="${i}">
+      <button class="pr-rm" data-tip="${only ? 'A job needs at least one pair' : 'Remove this pair'}"
+              aria-label="Remove pair ${i + 1}"${only ? ' disabled' : ''}>${ICON_TRASH}</button>
       <span class="pr-num" data-tip="Folder pair ${i + 1}">${i + 1}</span>
       <div class="pr-field">
-        <input class="pr-left" value="${esc(p.left)}" placeholder="Source folder" spellcheck="false">
+        <input class="pr-left"${id('left-path')} value="${esc(p.left)}" placeholder="Source folder" spellcheck="false">
         <button class="br-btn pr-browse-l">Browse</button>
-        <button class="srv-btn pr-server-l${p.left.startsWith('sftp://') ? ' on' : ''}" data-tip="Connect to a server (SFTP)" aria-label="Connect to a server">${SRV}</button>
+        <button class="srv-btn pr-server-l${on(p.left)}"${id('left-server')} data-tip="Connect to a server (SFTP)" aria-label="Connect to a server">${ICON_SERVER}</button>
       </div>
-      <span class="pr-gap">${ARR}</span>
+      <button class="pr-swap" data-tip="Swap this pair's source and destination">${ICON_SWAP}</button>
       <div class="pr-field">
-        <input class="pr-right" value="${esc(p.right)}" placeholder="Destination folder" spellcheck="false">
+        <input class="pr-right"${id('right-path')} value="${esc(p.right)}" placeholder="Destination folder" spellcheck="false">
         <button class="br-btn pr-browse-r">Browse</button>
-        <button class="srv-btn pr-server-r${p.right.startsWith('sftp://') ? ' on' : ''}" data-tip="Connect to a server (SFTP)" aria-label="Connect to a server">${SRV}</button>
+        <button class="srv-btn pr-server-r${on(p.right)}"${id('right-server')} data-tip="Connect to a server (SFTP)" aria-label="Connect to a server">${ICON_SERVER}</button>
       </div>
-      <button class="pr-rm" data-tip="Remove this pair">${RM}</button>
     </div>`;
   }).join('');
 }
@@ -155,6 +173,7 @@ function renderFilterBtn() {
 }
 
 function renderJobTitle() {
+  renderJobActions();
   const el = $('job-title');
   if (state.jobPath) el.textContent = state.job.name || 'Untitled';
   else el.innerHTML = '<span class="unsaved">Untitled — not saved yet</span>';
@@ -163,11 +182,6 @@ function renderJobTitle() {
 function jobToUi() {
   const j = ensurePairs(state.job);
   renderJobTitle();
-  $('left-path').value  = j.pairs[0].left  || '';
-  $('right-path').value = j.pairs[0].right || '';
-  // Pair 1 can be removed exactly like any other — hidden only when it's the
-  // job's last remaining pair, same rule that governs every other row.
-  $('pair0-rm').style.display = j.pairs.length > 1 ? '' : 'none';
   renderPairRows();
 
   setSeg('seg-cmp', j.compare.compareVariant);
@@ -212,8 +226,7 @@ function jobToUi() {
 
 function uiToJob() {
   const j = ensurePairs(state.job);
-  j.pairs[0].left  = $('left-path').value.trim();
-  j.pairs[0].right = $('right-path').value.trim();
+
   for (const row of document.querySelectorAll('#pairrows .prow')) {
     const i = Number(row.dataset.i);
     if (!j.pairs[i]) continue;
@@ -267,6 +280,99 @@ function setVariantBtn(v) {
 // ── Grid ───────────────────────────────────────────────────────────────────
 let fetchSeq = 0;
 
+// ── The empty grid ─────────────────────────────────────────────────────────
+// Four different situations end with no rows on screen, and they used to share
+// one sentence that hedged between them. The important one is the ordinary
+// state of a backup that is kept up to date — every pair already in sync —
+// which is a RESULT and now says so, with the figures, instead of reading like
+// a filter problem. It used to be unreachable in a multi-pair job anyway: each
+// pair left a heading behind, so the grid was never empty and five
+// synchronized pairs looked like five rows of work.
+const ICO_EMPTY_FOLDER =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">'
+  + '<path d="M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v.5"/>'
+  + '<path d="M12 10v4h4"/><path d="m12 14 1.535-1.605a5 5 0 0 1 8 1.5"/><path d="M22 22v-4h-4"/>'
+  + '<path d="m22 18-1.535 1.605a5 5 0 0 1-8-1.5"/></svg>';
+const ICO_IN_SYNC =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
+  + '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>';
+const ICO_FILTER =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">'
+  + '<path d="M3 4h18l-7 8v6l-4 2v-8Z"/></svg>';
+
+function renderEmptyState(res) {
+  const box = $('gridempty'), s = state.stats;
+  const set = (cls, ico, title, sub, act) => {
+    box.className = cls;
+    $('ge-ico').innerHTML = ico;
+    $('ge-title').textContent = title || '';
+    $('ge-sub').innerHTML = sub;
+    const b = $('ge-act');
+    // '' would fall back to the stylesheet, which hides it — the rule is on
+    // #ge-act itself, not on a parent.
+    b.style.display = act ? 'inline-block' : 'none';
+    if (act) { b.textContent = act.label; b.dataset.act = act.key; }
+  };
+  const n = v => v.toLocaleString();
+
+  // (1) Nothing has been compared yet.
+  if (!s) {
+    set('', ICO_EMPTY_FOLDER, '', 'Pick two folders, then press <b>Compare</b>.');
+    return;
+  }
+
+  const pairs = (res && res.pairs) || 1;
+  const scoped = !!(state.view.scope);
+  const filtered = !!(state.view.onlyOperation || state.view.onlyCategory ||
+                      (state.view.search || '').trim() || scoped);
+  const todo = s.filesToProcess + (s.conflicts || 0);
+
+  // (2) There IS work, and the view is hiding all of it. Say which view.
+  if (todo > 0 && filtered) {
+    set('', ICO_FILTER, '',
+      `${n(todo)} item${todo > 1 ? 's' : ''} need attention, but none of them match what this view shows.`,
+      { label: 'Show everything', key: 'clear' });
+    return;
+  }
+
+  // (3) The comparison found nothing at all — both sides empty, or the hard
+  //     filter removed everything before the comparison even ran.
+  if (!s.rows) {
+    set('', ICO_EMPTY_FOLDER, '',
+      scoped ? 'That folder is empty.'
+             : 'Nothing was compared. The folders are empty, or the filter excludes everything in them.');
+    return;
+  }
+
+  // (4) The one that matters: everything is already identical.
+  const bits = [];
+  if (pairs > 1) bits.push(`${pairs} pairs`);
+  bits.push(`${n(s.rows)} item${s.rows > 1 ? 's' : ''} compared`);
+  if (s.excluded) bits.push(`${n(s.excluded)} excluded by the filter`);
+  set('ok', ICO_IN_SYNC,
+    pairs > 1 ? 'All pairs are in sync' : 'Everything is in sync',
+    `${bits.join(' · ')}<br>Nothing to copy, nothing to delete.`,
+    { label: 'Show the identical files', key: 'equal' });
+}
+
+$('ge-act').addEventListener('click', async () => {
+  const k = $('ge-act').dataset.act;
+  if (k === 'clear') {
+    state.view.onlyOperation = '';
+    state.view.onlyCategory  = '';
+    state.view.search = '';
+    state.view.scope = null;
+    const sf = $('search'); if (sf) sf.value = '';
+  } else if (k === 'equal') {
+    state.view.showEqual = true;
+    const sw = $('chk-equal'); if (sw) sw.checked = true;
+    persist();
+  }
+  renderStats();
+  await refreshGrid(true);
+  await refreshOverview();
+});
+
 async function refreshGrid(resetScroll) {
   const scroll = $('gridscroll');
   if (resetScroll) scroll.scrollTop = 0;
@@ -275,9 +381,12 @@ async function refreshGrid(resetScroll) {
   $('gridspacer').style.height = (state.total * ROWH) + 'px';
   $('gridscroll').style.display = state.total ? '' : 'none';
   $('gridempty').style.display  = state.total ? 'none' : '';
-  $('grid-empty-msg').innerHTML = state.stats
-    ? 'Nothing to show here. Everything is already in sync, or the view filters are hiding it — try <b>Show identical</b>.'
-    : 'Pick two folders, then press <b>Compare</b>.';
+  // How many pairs actually put something on screen. Pairs that are entirely
+  // in sync no longer leave a heading behind, so without this line they would
+  // simply vanish and leave the reader counting.
+  state.pairInfo = { pairs: res.pairs || 1, shown: res.pairsShown || 0 };
+  if (!state.total) renderEmptyState(res);
+  renderStats();
   state.rows.clear();
   await renderWindow();
 }
@@ -418,10 +527,23 @@ async function toggleExcludeTemp(idx) {
   await refreshOverview();
 }
 
+const CTX_REVEAL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="m9 13 3 3 3-3"/></svg>';
 const CTX_OK = '<svg class="ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>';
 const CTX_KO = '<svg class="ko" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg>';
 const CTX_SQ = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>';
 const CTX_SQ_CHK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 11 3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>';
+
+// "Reveal in Finder" on a Mac, "Show in Explorer" on Windows — the name people
+// already know from their own file manager.
+const REVEAL_VERB = API.platform === 'darwin' ? 'Reveal in Finder'
+                  : API.platform === 'win32'  ? 'Show in Explorer'
+                  : 'Open containing folder';
+
+async function revealNode(idx, side) {
+  const res = await API.revealNode(idx, side);
+  if (res && !res.ok) $('status-note').textContent = res.error;
+  else if (res && res.note) $('status-note').textContent = res.note;
+}
 
 function openCtx(x, y, r) {
   closeCtx();
@@ -429,10 +551,21 @@ function openCtx(x, y, r) {
   const sub = kind => variants.map(v =>
     `<div class="ctx-it" data-k="${kind}" data-p="${esc(v)}"><span class="lbl">${esc(v)}</span></div>`).join('');
 
+  // A row is two places on disk, not one, so there are two entries. A side the
+  // item is not on is greyed rather than hidden: a menu whose shape changes
+  // from row to row is harder to use than one where the missing half is
+  // visible and inert. `undefined` means "we were not told" (the overview
+  // builds a lighter row) — offer it and let the main process answer.
+  const off = v => v === null ? ' off' : '';
+  const reveal =
+    `<div class="ctx-it${off(r.l)}" data-k="rv-left">${CTX_REVEAL}<span class="lbl">${REVEAL_VERB} — source</span></div>` +
+    `<div class="ctx-it${off(r.r)}" data-k="rv-right">${CTX_REVEAL}<span class="lbl">${REVEAL_VERB} — destination</span></div>` +
+    `<div class="ctx-sep"></div>`;
+
   const m = document.createElement('div');
   m.id = 'ctx-menu';
   m.className = 'ctx';
-  m.innerHTML =
+  m.innerHTML = reveal +
     `<div class="ctx-it" data-k="temp">${r.active ? CTX_SQ : CTX_SQ_CHK}<span class="lbl">Exclude temporarily</span><span class="key">Space</span></div>` +
     `<div class="ctx-sep"></div>` +
     `<div class="ctx-it">${CTX_OK}<span class="lbl">Include via filter</span><span class="sub-arrow">▶</span><div class="ctx-sub">${sub('include')}</div></div>` +
@@ -449,7 +582,10 @@ function openCtx(x, y, r) {
     if (!it) return;
     e.stopPropagation();
     closeCtx();
-    if (it.dataset.k === 'temp') await toggleExcludeTemp(r.idx);
+    if (it.classList.contains('off')) return;
+    if (it.dataset.k === 'rv-left')       await revealNode(r.idx, 'left');
+    else if (it.dataset.k === 'rv-right') await revealNode(r.idx, 'right');
+    else if (it.dataset.k === 'temp')     await toggleExcludeTemp(r.idx);
     else await addFilterPattern(it.dataset.k, it.dataset.p);
   });
 }
@@ -463,6 +599,37 @@ $('gridbody').addEventListener('contextmenu', async e => {
   await renderWindow();
   const r = state.rows.get(Number(row.dataset.i));
   if (r) openCtx(e.clientX, e.clientY, r);
+});
+
+// Right-click on a folder field — the SOURCE and DESTINATION boxes, and the
+// extra pairs below them. Same reflex as the grid: "show me that folder".
+function openPathCtx(x, y, folder) {
+  closeCtx();
+  if (!folder) return;
+  const remote = /^sftp:\/\//i.test(folder);
+  const m = document.createElement('div');
+  m.id = 'ctx-menu';
+  m.className = 'ctx';
+  m.innerHTML =
+    `<div class="ctx-it${remote ? ' off' : ''}" data-k="rv">${CTX_REVEAL}<span class="lbl">${REVEAL_VERB}</span></div>`;
+  document.body.appendChild(m);
+  const rct = m.getBoundingClientRect();
+  m.style.left = Math.min(x, window.innerWidth - rct.width - 8) + 'px';
+  m.style.top  = Math.min(y, window.innerHeight - rct.height - 8) + 'px';
+  m.addEventListener('click', async e => {
+    const it = e.target.closest('.ctx-it[data-k]');
+    if (!it || it.classList.contains('off')) return;
+    e.stopPropagation();
+    closeCtx();
+    await API.revealPath(folder);
+  });
+}
+
+document.addEventListener('contextmenu', e => {
+  const f = e.target.closest('#left-path, #right-path, .pr-left, .pr-right');
+  if (!f) return;
+  e.preventDefault();
+  openPathCtx(e.clientX, e.clientY, (f.value || '').trim());
 });
 
 document.addEventListener('mousedown', e => { if (!e.target.closest('.ctx')) closeCtx(); });
@@ -513,8 +680,21 @@ function renderStats() {
   box.innerHTML = parts.join('');
 
   const data = fmtBytes(s.bytesTotal);
-  $('status-note').textContent =
-    `${s.filesToProcess} item${s.filesToProcess === 1 ? '' : 's'} to process · ${data} to copy · ${s.rows} compared`;
+  const bits = [
+    `${s.filesToProcess} item${s.filesToProcess === 1 ? '' : 's'} to process`,
+    `${data} to copy`,
+    `${s.rows} compared`,
+  ];
+  // Said in words rather than as empty rows in the grid.
+  const pi = state.pairInfo;
+  // Not when the list is empty: the panel in the middle of the window already
+  // says it in full, and repeating it in the strip reads like a second, weaker
+  // answer to the same question.
+  if (state.total && pi && pi.pairs > 1 && pi.shown < pi.pairs) {
+    const quiet = pi.pairs - pi.shown;
+    bits.push(`${quiet} of ${pi.pairs} pairs already in sync`);
+  }
+  $('status-note').textContent = bits.join(' · ');
 }
 
 function isActiveFilter(key, kind) {
@@ -585,6 +765,7 @@ async function doCompare() {
   setBusyUi(true, 'Comparing…');
   $('pb-title').textContent = 'Comparing…';
   $('btn-pause').style.display = 'none';
+  resetCompareProgress();
 
   const res = await API.compare(state.job);
 
@@ -701,6 +882,9 @@ async function doSync() {
   state.speeds = [];
   setBusyUi(true, 'Synchronizing…', true);
   $('pb-title').textContent = 'Synchronizing…';
+  $('pb-ring').classList.remove('spin');
+  setStatLabels('Files', 'Data remaining', 'Speed', 'ETA');
+  { const del = $('s-del-box'); if (del) del.style.display = ''; }
 
   const res = await API.sync(state.job);
 
@@ -785,15 +969,87 @@ function setBusyUi(on, title, steps) {
   }
 }
 
+// ── Comparison progress ────────────────────────────────────────────────────
+// Walking a tree has no total you can know in advance — you find out how big it
+// is by finishing. The old code dealt with that by filling the ring over every
+// 500 items scanned and starting again, which on a large multi-pair job fills,
+// empties and refills for minutes on end. That is not "unknown", it is a
+// progress bar that lies, and it tells you less than nothing.
+//
+// Two honest answers instead:
+//
+//   • The database remembers how many items these folders held last time. For
+//     a backup that runs regularly that is a good estimate, so show a real
+//     percentage and call it approximate. Capped at 99 % — the run is not over
+//     until it says it is.
+//   • No database yet (first comparison of this pair): no percentage at all.
+//     The ring spins, and the count of items scanned goes in the middle where
+//     the percentage would be. A number that only ever grows.
+//
+// Across pairs the figures are running totals, and the ring's own progress is
+// (finished pairs + fraction of the current one) / pairs. Nothing goes
+// backwards, at a pair boundary or anywhere else.
+let cmpMaxFrac = 0;
+
+// The four tiles are the same boxes in both phases, so they have to say what
+// they are actually showing. During a copy: files done, data left, speed, ETA.
+// During a comparison there IS no data left and no ETA — there is a count of
+// what has been looked at, how long it has been going, and how fast. Leaving
+// the copy labels up made people read "ETA 4s" as four seconds to the end.
+function setStatLabels(files, size, spd, eta) {
+  const put = (id, t) => { const e = $(id); if (e) e.textContent = t; };
+  put('s-files-lbl', files); put('s-size-lbl', size);
+  put('s-spd-lbl', spd);     put('s-eta-lbl', eta);
+}
+
+function resetCompareProgress() {
+  cmpMaxFrac = 0;
+  $('pb-ring').classList.remove('spin');
+  setStatLabels('Items scanned', 'Data read', 'Scan rate', 'Elapsed');
+  // Nothing is removed by a comparison. A tile reading "Removed 0" for two
+  // minutes invites the reader to wonder what it is counting down to.
+  const del = $('s-del-box'); if (del) del.style.display = 'none';
+}
+
 API.onCompareProgress(p => {
-  const prefix = p.pairs > 1 ? `[${p.pair}/${p.pairs}] ` : '';
-  $('pb-file').textContent = prefix + (p.current || '—');
-  $('s-files').textContent = String(p.scanned || 0);
-  $('s-size').textContent  = p.bytes ? fmtBytes(p.bytes) + ' read' : '—';
-  // A comparison has no known total, so the ring breathes instead of filling.
-  const pseudo = ((p.scanned || 0) % 500) / 500;
-  $('pb-ring').setAttribute('stroke-dashoffset', RING_LEN * (1 - pseudo));
-  $('pb-pct').textContent = '…';
+  const pairs = Math.max(1, p.pairs || 1);
+  const done  = p.pairIndex || 0;
+  const label = p.pairs > 1 ? `Pair ${p.pair}/${p.pairs} · ` : '';
+  $('pb-file').textContent = label + (p.current || '—');
+
+  const scanned = p.scannedTotal != null ? p.scannedTotal : (p.scanned || 0);
+  $('s-files').textContent = String(scanned);
+  const bytes = p.bytesTotal != null ? p.bytesTotal : (p.bytes || 0);
+  $('s-size').textContent = bytes ? fmtBytes(bytes) + ' read' : '—';
+
+  // Elapsed time, and how fast the scan is going. Neither needs a total to be
+  // true, and together they answer "is this thing moving?".
+  const ms = p.elapsedMs || 0;
+  $('s-eta').textContent = ms >= 1000 ? fmtEta(Math.round(ms / 1000)) : '—';
+  // Computed from milliseconds, not from whole seconds: a scan that reaches
+  // 22 000 items in the first second showed a blank rate, which is the moment
+  // someone is most likely to be wondering whether anything is happening.
+  $('s-spd').textContent = ms >= 400
+    ? Math.round(scanned / (ms / 1000)).toLocaleString() + ' items/s'
+    : '—';
+
+  const ring = $('pb-ring');
+  if (p.expected > 0) {
+    ring.classList.remove('spin');
+    const inPair = Math.min((p.scanned || 0) / p.expected, 0.99);
+    const frac = Math.min((done + inPair) / pairs, 0.99);
+    cmpMaxFrac = Math.max(cmpMaxFrac, frac);      // never let it fall back
+    ring.setAttribute('stroke-dashoffset', RING_LEN * (1 - cmpMaxFrac));
+    $('pb-pct').textContent = '≈' + Math.round(cmpMaxFrac * 100) + '%';
+  } else {
+    // Honest about not knowing: a spinning arc, and the real count in the
+    // middle instead of a percentage that would be made up.
+    ring.classList.add('spin');
+    ring.setAttribute('stroke-dashoffset', RING_LEN * 0.75);
+    $('pb-pct').textContent = scanned >= 1000
+      ? (scanned / 1000).toFixed(1).replace(/\.0$/, '') + 'k'
+      : String(scanned);
+  }
 });
 
 API.onSyncProgress(p => {
@@ -968,10 +1224,13 @@ function showSummary(res) {
   $('sum-errors').style.display = failed ? '' : 'none';
   $('sum-errors-body').innerHTML = res.errors.slice(0, 60)
     .map(e => `<div class="err-item">${esc(e.rel)} — ${esc(e.message)}</div>`).join('');
+  setCopyBlock('sum-errors-body', res.errors.map(e => `${e.rel} — ${e.message}`),
+    copyHeader(`${res.errors.length} error${res.errors.length > 1 ? 's' : ''}`));
 
   $('sum-notes').style.display = res.notes.length ? '' : 'none';
   $('sum-notes-body').innerHTML = res.notes.slice(0, 40)
     .map(n => `<div class="err-item">${esc(n)}</div>`).join('');
+  setCopyBlock('sum-notes-body', res.notes.slice(), copyHeader(`${res.notes.length} notes`));
 
   const files = (res.reportFiles || []).concat(res.checksumFiles || []);
   $('sum-files').innerHTML = files
@@ -993,6 +1252,44 @@ $('sum-open-report').addEventListener('click', () => {
   if (p) API.openPath(p);
 });
 
+// ── Copyable error / note blocks ───────────────────────────────────────────
+// The panels show at most 60 lines; what gets copied is the WHOLE list. A log
+// you cannot select is a log you cannot send to anyone, and these boxes are
+// exactly the ones people need to forward.
+const ICON_COPY  = '<svg viewBox="0 0 24 24"><rect x="8" y="8" width="14" height="14" rx="2"/>'
+  + '<path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
+const ICON_CHECK = '<svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>';
+const copyBuf = Object.create(null);
+
+// `lines` is the full list, not the truncated one that is on screen.
+function setCopyBlock(bodyId, lines, header) {
+  const body = (header ? [header, ''] : []).concat(lines);
+  copyBuf[bodyId] = body.join('\n');
+  const btn = document.querySelector(`.err-copy[data-copy="${bodyId}"]`);
+  if (btn) { btn.classList.remove('done'); btn.innerHTML = ICON_COPY + '<span>Copy</span>'; }
+}
+
+function copyHeader(what) {
+  const v = state.version ? ' ' + state.version : '';
+  const name = (state.job && state.job.name) ? ' · ' + state.job.name : '';
+  return `syncto${v}${name} · ${what} · ${new Date().toLocaleString()}`;
+}
+
+document.addEventListener('click', async e => {
+  const btn = e.target.closest('.err-copy');
+  if (!btn) return;
+  const text = copyBuf[btn.dataset.copy];
+  if (!text) return;
+  const ok = await API.copyText(text);
+  btn.innerHTML = (ok ? ICON_CHECK : ICON_COPY) + `<span>${ok ? 'Copied' : 'Failed'}</span>`;
+  btn.classList.toggle('done', !!ok);
+  clearTimeout(btn._t);
+  btn._t = setTimeout(() => {
+    btn.classList.remove('done');
+    btn.innerHTML = ICON_COPY + '<span>Copy</span>';
+  }, 1600);
+});
+
 function showError(title, msg) {
   // Not left over from the last successful run: a green "150 files verified"
   // shield under a red error card certifies something unrelated.
@@ -1004,6 +1301,7 @@ function showError(title, msg) {
   $('sum-grid').innerHTML = '';
   $('sum-errors').style.display = '';
   $('sum-errors-body').innerHTML = `<div class="err-item">${esc(msg)}</div>`;
+  setCopyBlock('sum-errors-body', [msg], copyHeader(title));
   $('sum-notes').style.display = 'none';
   $('sum-files').innerHTML = '';
   $('sum-open-report').style.display = 'none';
@@ -1052,6 +1350,8 @@ async function doVerify() {
   $('vf-bad').style.display = bad.length ? '' : 'none';
   $('vf-bad-body').innerHTML = bad.slice(0, 60)
     .map(r => `<div class="err-item">${esc(r.rel)} — ${esc(r.status)}</div>`).join('');
+  setCopyBlock('vf-bad-body', bad.map(r => `${r.rel} — ${r.status}`),
+    copyHeader(`verify · ${bad.length} problem${bad.length > 1 ? 's' : ''}`));
 }
 
 API.onVerifyProgress(p => {
@@ -1123,47 +1423,42 @@ function bind() {
     if (state.paused) await API.syncPause(); else await API.syncResume();
   });
 
-  $('left-browse').addEventListener('click',  async () => { const p = await API.browseFolder('Left folder');  if (p) { $('left-path').value = p;  onPathChanged(); } });
-  $('right-browse').addEventListener('click', async () => { const p = await API.browseFolder('Right folder'); if (p) { $('right-path').value = p; onPathChanged(); } });
+
   $('st-rep-browse').addEventListener('click', async () => { const p = await API.browseFolder('Report folder'); if (p) $('st-rep-folder').value = p; });
 
-  $('left-path').addEventListener('change', onPathChanged);
-  $('right-path').addEventListener('change', onPathChanged);
+
 
   // One click swaps SOURCE and DESTINATION for EVERY pair of the job.
-  $('swap-btn').addEventListener('click', () => {
-    uiToJob();
-    for (const p of state.job.pairs) { const t = p.left; p.left = p.right; p.right = t; }
-    jobToUi();               // refreshes the main fields AND the rows
-    onPathChanged();
-  });
-
-  // Removing pair 1 promotes pair 2 into the main fields — same splice the
-  // other rows use, just at index 0. Only enabled above 1 pair (see jobToUi).
-  $('pair0-rm').addEventListener('click', () => {
-    uiToJob();
-    state.job.pairs.splice(0, 1);
-    jobToUi();
-    onPathChanged();          // re-reads free space for the promoted pair, persists
-  });
 
   // Pair rows: edit in place, browse per field, remove, add.
   $('pairrows').addEventListener('change', e => {
+    if (!e.target.matches('.pr-left, .pr-right')) return;
+    // The server button doubles as that field's status light. Updated in place
+    // rather than by redrawing the rows, because redrawing while someone is
+    // tabbing between fields takes the focus away from them.
+    lightServerButton(e.target);
     // onPathChanged, not just persist: editing a pair changes WHICH folders
     // the job covers, and the plan in memory belongs to the old set.
-    if (e.target.matches('.pr-left, .pr-right')) onPathChanged();
+    onPathChanged();
   });
   $('pairrows').addEventListener('click', async e => {
     const row = e.target.closest('.prow');
     if (!row) return;
     const i = Number(row.dataset.i);
     if (e.target.closest('.pr-rm')) {
+      // The last remaining pair's button is disabled, so this cannot empty a
+      // job down to nothing.
+      if (state.job.pairs.length <= 1) return;
       uiToJob();
       state.job.pairs.splice(i, 1);
-      // jobToUi, not just renderPairRows: the ✕ on pair 1 is shown or hidden
-      // by jobToUi alone. Skipping it left that button visible on a job down
-      // to a single pair, and clicking it emptied SOURCE and DESTINATION —
-      // and saved that.
+      jobToUi();
+      onPathChanged();
+      return;
+    }
+    if (e.target.closest('.pr-swap')) {
+      uiToJob();
+      const p = state.job.pairs[i];
+      if (p) { const t = p.left; p.left = p.right; p.right = t; }
       jobToUi();
       onPathChanged();
       return;
@@ -1225,13 +1520,14 @@ function bind() {
     switch (m.action) {
       case 'compare': doCompare(); break;
       case 'sync': if (state.stats) askConfirm(); break;
-      case 'swap': $('swap-btn').click(); break;
+      case 'swap': swapAllPairs(); break;
       case 'invert': state.stats = await API.invertAll(); afterEdit(); break;
       case 'verify': doVerify(); break;
       case 'job-new': newJob(); break;
       case 'job-open': openJob(); break;
       case 'job-save': saveJobFile(false); break;
       case 'job-save-as': saveJobFile(true); break;
+      case 'job-close': closeJob(); break;
       default: break;
     }
   });
@@ -1241,6 +1537,7 @@ function bind() {
   $('job-open-btn').addEventListener('click', openJob);
   $('job-save-btn').addEventListener('click', () => saveJobFile(false));
   $('job-saveas-btn').addEventListener('click', () => saveJobFile(true));
+  $('job-close-btn').addEventListener('click', () => closeJob());
   $('recent-list').addEventListener('click', e => {
     const it = e.target.closest('.recent-item');
     if (it) openRecent(it.dataset.path);
@@ -1313,25 +1610,23 @@ function bind() {
   installTooltips();
 }
 
+// A pair changed. Nothing here reads the disk any more: the free-space line
+// under each field was the only reason to, and a folder pair is a source and a
+// destination — the disk figures belonged to the machine, not to the job, and
+// they were what stopped every pair from lining up.
 async function onPathChanged() {
   uiToJob();
   invalidateIfPairsChanged();
   persist();
-  for (const [inputId, labelId, btnId] of [
-    ['left-path', 'left-free', 'left-server'],
-    ['right-path', 'right-free', 'right-server'],
-  ]) {
-    const p = $(inputId).value.trim();
-    const lbl = $(labelId);
-    // The server button doubles as the indicator for that side: lit when the
-    // field holds a server, plain when it holds a local path.
-    $(btnId).classList.toggle('on', p.startsWith('sftp://'));
-    if (!p || p.startsWith('sftp://')) { lbl.textContent = p.startsWith('sftp://') ? 'remote' : ''; continue; }
-    const ok = await API.folderExists(p);
-    if (!ok) { lbl.textContent = 'does not exist yet'; continue; }
-    const d = await API.diskFree(p);
-    lbl.textContent = d ? `${fmtBytes(d.free)} free of ${fmtBytes(d.total)}` : '';
-  }
+}
+
+// ⌘T — swaps every pair at once. Each row also has its own swap button, which
+// swaps that row only.
+function swapAllPairs() {
+  uiToJob();
+  for (const p of state.job.pairs) { const t = p.left; p.left = p.right; p.right = t; }
+  jobToUi();
+  onPathChanged();
 }
 
 async function newJob() {
@@ -1377,6 +1672,86 @@ function persist() {
     API.savePrefs({ job: state.job, ui: { showEqual: state.view.showEqual } });
   }, 400);
 }
+
+// ── Closing a job ──────────────────────────────────────────────────────────
+// "Close" means: take this job out of the JOBS list, and — if it is the one
+// currently open — go back to an untitled job. It never deletes the file. The
+// status strip says so afterwards, with the path, because a job disappearing
+// from a list is exactly the moment someone wonders whether they just lost it.
+async function closeJob(p) {
+  const target = p || state.jobPath;
+  if (!target) return;
+  const name = (state.recent.find(r => r.path === target) || {}).name ||
+               (state.jobPath === target ? state.job.name : '') || 'That job';
+  const res = await API.jobClose(target);
+  if (res && res.recent) state.recent = res.recent;
+
+  if (res && res.closedCurrent) {
+    autoStop();
+    state.job = await API.jobNew();
+    state.jobPath = '';
+    jobToUi();
+    state.stats = null; state.total = 0; state.comparedPairs = null;
+    renderStats();
+    await refreshGrid(true);
+    await refreshOverview();
+    // The preferences hold a copy of the open job; without this the blank one
+    // is only written on the next edit, and a crash in between reopens the job
+    // that was just closed.
+    persist();
+  }
+  renderRecent();
+  renderJobActions();
+  $('status-note').textContent = `${name} closed — the file is still on disk: ${target}`;
+}
+
+// CLOSE is only meaningful while a job file is open. NEW is what clears an
+// untitled one, and saying so in the tooltip is cheaper than a dialog.
+function renderJobActions() {
+  const b = $('job-close-btn');
+  if (!b) return;
+  b.disabled = !state.jobPath;
+  b.dataset.tip = state.jobPath
+    ? 'Close this job — the file stays on disk'
+    : 'Nothing to close — no job file is open';
+}
+
+const CTX_OPEN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></svg>';
+const CTX_CLOSE = '<svg class="ko" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
+
+function openJobCtx(x, y, jobPath) {
+  closeCtx();
+  if (!jobPath) return;
+  const m = document.createElement('div');
+  m.id = 'ctx-menu';
+  m.className = 'ctx';
+  m.innerHTML =
+    `<div class="ctx-it" data-k="open">${CTX_OPEN}<span class="lbl">Open</span></div>` +
+    `<div class="ctx-it" data-k="rv">${CTX_REVEAL}<span class="lbl">${REVEAL_VERB}</span></div>` +
+    `<div class="ctx-sep"></div>` +
+    `<div class="ctx-it" data-k="close">${CTX_CLOSE}<span class="lbl">Close</span></div>`;
+  document.body.appendChild(m);
+  const rct = m.getBoundingClientRect();
+  m.style.left = Math.min(x, window.innerWidth - rct.width - 8) + 'px';
+  m.style.top  = Math.min(y, window.innerHeight - rct.height - 8) + 'px';
+  m.addEventListener('click', async e => {
+    const it = e.target.closest('.ctx-it[data-k]');
+    if (!it || it.classList.contains('off')) return;
+    e.stopPropagation();
+    closeCtx();
+    if (it.dataset.k === 'open')  return openRecent(jobPath);
+    if (it.dataset.k === 'rv')    return API.revealPath(jobPath);
+    if (it.dataset.k === 'close') return closeJob(jobPath);
+  });
+}
+
+document.addEventListener('contextmenu', e => {
+  const it = e.target.closest('.recent-item');
+  if (!it) return;
+  e.preventDefault();
+  e.stopPropagation();
+  openJobCtx(e.clientX, e.clientY, it.dataset.path);
+});
 
 // ── Zone 1 — recent jobs ───────────────────────────────────────────────────
 const ICON_JOB = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 10v4h4"/><path d="m12 14 1.535-1.605a5 5 0 0 1 8 1.5"/><path d="M22 22v-4h-4"/><path d="m22 18-1.535 1.605a5 5 0 0 1-8-1.5"/><path d="M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v.5"/></svg>';
@@ -2127,13 +2502,9 @@ async function srvDraw() {
 async function srvUseFolder() {
   const url = await API.serverUrl(srv.conn, srv.picked);
   const t = srv.target;
-  if (t.kind === 'main') {
-    $(t.side === 'left' ? 'left-path' : 'right-path').value = url;
-    $(t.side === 'left' ? 'left-server' : 'right-server').classList.add('on');
-  } else {
-    state.job.pairs[t.index][t.side] = url;
-    renderPairRows();
-  }
+  uiToJob();                       // keep whatever else was typed in the rows
+  state.job.pairs[t.index][t.side] = url;
+  renderPairRows();
   closeServerDialog();
   onPathChanged();
 }
@@ -2145,8 +2516,6 @@ async function closeServerDialog() {
 }
 
 function bindServerDialog() {
-  $('left-server').addEventListener('click',  () => openServerDialog({ kind: 'main', side: 'left'  }));
-  $('right-server').addEventListener('click', () => openServerDialog({ kind: 'main', side: 'right' }));
 
   // Editing the address, the port or the login means this is a different
   // server. Without dropping savedId, the main process reconnected to the

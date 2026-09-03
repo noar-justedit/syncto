@@ -29,6 +29,7 @@ const api = {
   revealPath   : (p)    => ipcRenderer.invoke('reveal-path', p),
   openExternal : (u)    => ipcRenderer.invoke('open-external', u),
   openPath     : (p)    => ipcRenderer.invoke('open-path', p),
+  copyText     : (t)    => ipcRenderer.invoke('copy-text', t),
   diskFree     : (p)    => ipcRenderer.invoke('disk-free', p),
   folderExists : (p)    => ipcRenderer.invoke('folder-exists', p),
 
@@ -36,7 +37,9 @@ const api = {
   jobOpen    : ()        => ipcRenderer.invoke('job-open'),
   jobOpenPath: (p)       => ipcRenderer.invoke('job-open-path', p),
   jobSave    : (job, as) => ipcRenderer.invoke('job-save', job, as),
+  jobClose   : (p)       => ipcRenderer.invoke('job-close', p),
   getOverview: (view)    => ipcRenderer.invoke('get-overview', view),
+  revealNode : (idx, side)=> ipcRenderer.invoke('reveal-node', idx, side),
   preflight  : (job)     => ipcRenderer.invoke('preflight', job),
   takeMigrationNotes: () => ipcRenderer.invoke('take-migration-notes'),
 

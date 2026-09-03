@@ -63,20 +63,17 @@ class Session {
     await this._openSides(job, credentials);
 
     const cmp = Object.assign({}, job.compare);
-    const comparer = new Comparer({
-      left: this.left, right: this.right,
-      config: cmp, token, onProgress,
-    });
-    const res = await comparer.run();
-    this.nodes  = res.nodes;
-    this.errors = res.errors;
-    this.leftovers = res.leftovers || [];
-    this.cancelled = !!res.cancelled;
 
     // The database is read for two reasons: Two way and Update decide their
     // directions with it, and move detection needs the file ids it remembers.
     // A mirror job with move detection on therefore reads (and later writes)
     // the database too, even though its directions never depend on it.
+    //
+    // It is read BEFORE the scan, not after, for a third reason: it remembers
+    // how many items these two folders held last time. Walking a tree has no
+    // knowable total — you find out how big it is by finishing — so without
+    // that number the interface cannot honestly show progress at all. With it,
+    // a backup that runs every day can say "about 60%" and mean it.
     this.db = null; this.dbNote = null;
     this.pairId = pairIdFor(job.pairId, this.left.path, this.right.path);
     this.wantMoves = cmp.detectMoves !== false;
@@ -86,6 +83,18 @@ class Session {
       // "no database yet" is only worth mentioning when directions depend on it.
       this.dbNote = usesDatabase(job.sync.variant) ? reason : null;
     }
+    this.expected = (this.db && this.db.items) ? Object.keys(this.db.items).length : 0;
+
+    const comparer = new Comparer({
+      left: this.left, right: this.right,
+      config: cmp, token, onProgress,
+      expected: this.expected,
+    });
+    const res = await comparer.run();
+    this.nodes  = res.nodes;
+    this.errors = res.errors;
+    this.leftovers = res.leftovers || [];
+    this.cancelled = !!res.cancelled;
 
     const applied = applyDirections(this.nodes, job.sync, cmp, this.db);
     this.byChange = applied.byChange;
@@ -142,6 +151,8 @@ class Session {
     const slice = idx.slice(offset || 0, (offset || 0) + (limit || 200));
     return {
       total: idx.length,
+      pairs: 1,
+      pairsShown: idx.length ? 1 : 0,
       rows : slice.map(i => this._row(this.nodes[i])),
     };
   }
@@ -602,6 +613,8 @@ class MultiSession {
     const perPair = [];
     const errors = [];
     let movesFound = 0, dbNote = null, cancelled = false;
+    let scannedBefore = 0, bytesBefore = 0;
+    const startedAt = Date.now();
     for (let i = 0; i < this.pairs.length; i++) {
       if (token && token.cancelled) { cancelled = true; break; }
       const pairJob = Object.assign({}, job, {
@@ -611,12 +624,31 @@ class MultiSession {
         // folder. Path-derived ids are unambiguous — use them.
         pairId: multi ? null : job.pairId,
       });
+      // Every pair scans from zero, so a per-pair counter falls back to 0 at
+      // each one and the ring empties and refills — which reads as a run
+      // starting over rather than one making progress. What the window gets is
+      // the RUNNING TOTAL across the whole comparison, plus where in the list
+      // of pairs we are, so nothing on screen ever goes backwards.
+      let lastScanned = 0, lastBytes = 0;
       const res = await this.sessions[i].compare(pairJob, {
         token, credentials,
-        onProgress: p => onProgress && onProgress(Object.assign({}, p, {
-          pair: i + 1, pairs: this.pairs.length, pairLabel: pairLabel(this.pairs[i]),
-        })),
+        onProgress: p => {
+          lastScanned = p.scanned || 0;
+          lastBytes   = p.bytes || 0;
+          if (onProgress) onProgress(Object.assign({}, p, {
+            pair: i + 1, pairs: this.pairs.length, pairLabel: pairLabel(this.pairs[i]),
+            pairIndex: i,
+            scannedTotal: scannedBefore + lastScanned,
+            bytesTotal  : bytesBefore + lastBytes,
+            elapsedMs   : Date.now() - startedAt,
+          }));
+        },
       });
+      // Carry the pair's own final counts forward, not a derived number: this
+      // has to match the last figure the window was shown, or the total jumps
+      // at every pair boundary.
+      scannedBefore += lastScanned;
+      bytesBefore   += lastBytes;
       perPair.push(res);
       movesFound += res.movesFound || 0;
       if (res.cancelled) cancelled = true;
@@ -655,16 +687,24 @@ class MultiSession {
   rows(offset, limit, view) {
     const multi = this.sessions.length > 1;
     const all = [];
+    let shown = 0;
     for (let p = 0; p < this.sessions.length; p++) {
       if (!this._inScope(p, view)) continue;
       const s = this.sessions[p];
       const vis = s._visibleIndices(view);
-      if (multi) all.push({ hdr: true, p });
+      // A heading with nothing under it says nothing. A pair that is entirely
+      // in sync — the ordinary state of a backup that is kept up to date —
+      // used to leave its heading behind, so five synchronized pairs produced
+      // a list of five rows that looked like work and hid the "nothing to do"
+      // message the window has for exactly this case.
+      if (vis.length) { if (multi) all.push({ hdr: true, p }); shown++; }
       for (const i of vis) all.push({ p, i });
     }
     const slice = all.slice(offset || 0, (offset || 0) + (limit || 200));
     return {
       total: all.length,
+      pairs: this.sessions.length,
+      pairsShown: shown,
       rows: slice.map(e => {
         if (e.hdr) {
           const pr = this.pairs[e.p];
@@ -682,6 +722,34 @@ class MultiSession {
         return r;
       }),
     };
+  }
+
+  // Where a row's item actually lives, for "Reveal in Finder". Resolved here
+  // rather than in the window: the renderer knows a row index and a relative
+  // path, not which pair it belongs to, which side is a server, or how that
+  // side spells the name (a Mac stores accents decomposed, a Linux share
+  // composed — handing the wrong spelling to the Finder reveals nothing).
+  //
+  // Returns { ok, path } or { ok:false, error }.
+  locate(gidx, side) {
+    const { s, idx } = this._split(gidx);
+    if (!s || !s.nodes || !s.nodes[idx]) return { ok: false, error: 'That row is no longer there — compare again.' };
+    const node = s.nodes[idx];
+    const base = side === 'left' ? s.left : s.right;
+    if (!base) return { ok: false, error: 'That side is not open.' };
+
+    // A server has no Finder window. Say so rather than doing nothing.
+    if (base.kind && base.kind !== 'native') {
+      return { ok: false, error: 'That side is on a server, so it cannot be opened in a file window.' };
+    }
+
+    const state = side === 'left' ? node.left : node.right;
+    if (!state || !state.exists) {
+      return { ok: false, error: 'That item does not exist on this side — nothing to reveal.',
+               fallback: base.path };
+    }
+    const rel = (side === 'left' ? node.relL : node.relR) || node.rel;
+    return { ok: true, path: base.fs.join(base.path, ...rel.split('/')) };
   }
 
   _apply(indices, fn) {

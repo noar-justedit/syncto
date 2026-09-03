@@ -427,15 +427,56 @@ class SyncRunner {
     const srcStat = await srcFs.stat(src);
     if (!srcStat) throw new Error('Source vanished before it could be copied.');
 
+    // The comparison recorded a type for this row, but it is NOT the authority
+    // here. When the two sides disagree — a symbolic link facing a real file,
+    // a file facing a folder — the comparison deliberately files the row as a
+    // "file" so it can be shown and resolved in the grid. Copying it as one is
+    // what broke every macOS .framework whose copy on the target had been
+    // flattened by another tool: `Resources` is a link to a directory, so
+    // reading it gave "EISDIR: illegal operation on a directory, read", and
+    // `MPClasses` is a link whose own length is 26 bytes while its target
+    // holds a megabyte — measured as 26, written as 997472, then rejected as a
+    // size mismatch. What lstat says right now decides, and it costs nothing:
+    // the stat above was already being made.
+    const srcType = srcStat.type || n.type;
+
+    if (srcType === 'folder') {
+      throw new Error('The source is a folder while the target is not. syncto will not turn a ' +
+        'file into a folder in one step — remove one of the two by hand and run again.');
+    }
+    if (srcType === 'other') {
+      throw new Error('The source is neither a file, a folder nor a symbolic link — a device, a ' +
+        'socket or a pipe. There is nothing to copy.');
+    }
+
     // Symlinks are recreated, not followed.
-    if (n.type === 'symlink') {
+    if (srcType === 'symlink') {
       const target = await srcFs.readlink(src);
-      if (await dstFs.exists(dst)) {
+      const cur = await dstFs.stat(dst);
+      if (cur && cur.type === 'folder') {
+        // A real folder where the source has a link: a bundle already
+        // flattened here. Removing it goes through the ordinary deletion
+        // policy, so it lands in the recycle bin or the revision folder like
+        // any other deletion — and a folder still holding real files refuses,
+        // naming what is in the way, instead of being wiped behind the user.
+        try { await this.dispose(to, n, true); }
+        catch (err) {
+          // rmdirClean names what is in the way, in a sentence written for an
+          // ordinary deletion ("excluded by a filter…"). Here the reason is a
+          // different one, so keep the names and drop the explanation.
+          const m = /it still contains (.+?)\. Those items/.exec(err.message || '');
+          const what = m ? ` It still holds ${m[1]}.` : ` (${err.message})`;
+          throw new Error('The target holds a real folder where the source has a symbolic link — ' +
+            'an application bundle copied here by a tool that followed its links.' + what +
+            ' Remove that folder on the target side and run again.');
+        }
+      } else if (cur) {
         await this.archiveExisting(to, n);
         // Permanent mode archives nothing, and a full trash can fail silently:
         // the old link may still be there, and symlink() refuses to replace.
         if (await dstFs.exists(dst)) await dstFs.unlink(dst);
       }
+      await dstFs.mkdir(dstFs.dirname(dst));
       await dstFs.symlink(target, dst);
       // The recreated link carries today's date. Without lutimes the target
       // would look newer at every run and be recreated forever — and under
@@ -458,6 +499,15 @@ class SyncRunner {
     }
 
     await dstFs.mkdir(dstFs.dirname(dst));
+
+    // The mirror image of the case above: a real folder sitting where the
+    // source has a file. The temporary file would be written happily and the
+    // rename onto it would then fail with a bare errno, leaving the .syncto_tmp
+    // behind. Clear it first, through the deletion policy like everything else.
+    {
+      const cur = await dstFs.stat(dst);
+      if (cur && cur.type === 'folder') await this.dispose(to, n, true);
+    }
 
     // An existing target is put aside before being replaced, so "overwrite"
     // never means "lose the previous version" when versioning is on.
