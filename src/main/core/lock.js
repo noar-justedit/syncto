@@ -50,7 +50,22 @@ const { LOCK_NAME } = require('./compare');
 
 const EMIT_LIFE_SIGN_MS   = 5000;                        // heartbeat period
 const POLL_LIFE_SIGN_MS   = 2000;                        // how often a waiter looks
-const DETECT_ABANDONED_MS = EMIT_LIFE_SIGN_MS + 7000;    // 12 s of silence = abandoned
+// How long a folder has to stay silent before its owner is presumed dead.
+//
+// This was 12 s, which is the right number for two processes on one machine
+// and much too tight for two machines on a network. An SMB share reconnecting,
+// a switch renegotiating, a NAS spinning a disk back up: fifteen seconds of
+// nothing is an ordinary Tuesday, and it aborted whole runs with "the lock file
+// has not been refreshed for 15 s". A minute of complete silence still means
+// something is genuinely wrong, and a backup tool can afford to wait a minute
+// before stepping on another machine's work.
+//
+// The SAME number is used at both ends, and that is the safety property: the
+// owner gives up exactly when a waiter becomes entitled to take over, never
+// later. ⚠️ Two machines running DIFFERENT versions of syncto no longer agree
+// on it — a 0.6.1 machine would take the folder after 12 s while a newer one
+// still believes it holds it. Update both.
+const DETECT_ABANDONED_MS = 60000;
 const ABANDONED_LEVEL_MAX = 10;                          // guard against pathological recursion
 const FORMAT  = 'syncto-lock';
 const VERSION = 1;
@@ -137,6 +152,14 @@ function processStatus(info, local) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// The lock ids this process is holding RIGHT NOW. A lock we hold and a lock we
+// once failed to release are both "itsUs" to processStatus — same machine,
+// same process id — and only the lock id tells them apart. Without this, the
+// "clear the leftovers" button would free a folder in the middle of the run
+// that is writing to it.
+const HELD = new Set();
+function isHeldHere(lockId) { return !!lockId && HELD.has(lockId); }
+
 async function readLockInfo(fsx, lockPath) {
   return new Promise(resolve => {
     const chunks = [];
@@ -155,6 +178,28 @@ async function readLockInfo(fsx, lockPath) {
   });
 }
 
+// Is this lock still ours? Answers with what can be PROVEN, and says so when
+// nothing can be:
+//
+//   'ours'    — the file is there and carries our lock id
+//   'taken'   — the file is there and carries someone else's
+//   'gone'    — the file is not there (stat says absent, not "I could not ask")
+//   'unknown' — the share did not answer
+//
+// The distinction is the whole point. readLockInfo() resolves null both when
+// the file is missing and when the read failed, and the heartbeat treated that
+// null as "the lock file disappeared" — so one unreadable moment on a network
+// share ended the run. A read that fails is not evidence of anything.
+async function checkStillOurs(fsx, lockPath, lockId) {
+  let st;
+  try { st = await fsx.stat(lockPath); }
+  catch (_) { return 'unknown'; }        // the share did not answer
+  if (!st) return 'gone';                // stat is explicit: absent
+  const cur = await readLockInfo(fsx, lockPath);
+  if (!cur) return 'unknown';            // there, but unreadable this instant
+  return cur.lockId === lockId ? 'ours' : 'taken';
+}
+
 // One held lock, with its heartbeat.
 //
 // The heartbeat is not just a keep-alive, it is a re-check. If the share goes
@@ -166,11 +211,18 @@ async function readLockInfo(fsx, lockPath) {
 // a third machine while the second was still running.
 class DirLock {
   // onLost(reason) fires when this lock is no longer ours. The run must stop.
-  constructor(fsx, lockPath, info, onLost) {
+  //
+  // `timing` exists so the test suite can play out a network dropout in a
+  // second instead of a minute. Nothing in the application passes it: a run
+  // always uses the real periods, and one assertion checks that those are
+  // still the numbers two machines have to agree on.
+  constructor(fsx, lockPath, info, onLost, timing) {
     this.fs = fsx;
     this.path = lockPath;
     this.info = info;
     this.onLost = onLost || null;
+    this.beatMs   = (timing && timing.beatMs)   || EMIT_LIFE_SIGN_MS;
+    this.detectMs = (timing && timing.detectMs) || DETECT_ABANDONED_MS;
     this.timer = null;
     this.released = false;
     this.lost = null;
@@ -180,11 +232,18 @@ class DirLock {
     // machine legitimately took the folder. What matters is how long it has
     // been since a beat actually landed.
     this._lastBeat = Date.now();
+    // How rough the ride was, for the run summary. A run that survived four
+    // dropouts finished correctly, and saying so is more use than silence.
+    this.hiccups = 0;
+    this.worstGapMs = 0;
+    this._hiccupSince = 0;
+    HELD.add(info.lockId);
   }
 
   _fail(reason) {
     if (this.lost || this.released) return;
     this.lost = reason;
+    HELD.delete(this.info.lockId);
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
     if (this.onLost) { try { this.onLost(reason); } catch (_) {} }
   }
@@ -196,43 +255,52 @@ class DirLock {
       // in a blocked write. This is the only thing that notices a mount that
       // has stopped answering.
       const silent = Date.now() - this._lastBeat;
-      if (silent >= DETECT_ABANDONED_MS) {
+      if (silent >= this.detectMs) {
         return this._fail(`the lock file has not been refreshed for ${
           Math.round(silent / 1000)} s — the folder may have been taken over`);
       }
       if (this._beating) return;
       this._beating = (async () => {
         // Still ours? A stat is not enough — the file may have been taken over
-        // and recreated by someone else, at a similar size.
-        const cur = await readLockInfo(this.fs, this.path);
-        if (!cur || cur.lockId !== this.info.lockId) {
-          throw new Error(cur
-            ? `the folder was taken over by ${describe(cur)}`
-            : 'the lock file disappeared');
+        // and recreated by someone else, at a similar size. And a read that
+        // FAILS proves nothing at all, which is what this distinguishes.
+        const state = await checkStillOurs(this.fs, this.path, this.info.lockId);
+        if (state === 'gone')  throw new Error('the lock file disappeared');
+        if (state === 'taken') {
+          const cur = await readLockInfo(this.fs, this.path);
+          throw new Error(`the folder was taken over by ${describe(cur)}`);
         }
+        if (state === 'unknown') throw new Error('hiccup: the share did not answer');
         // A single space. Growing the file IS the life sign — nothing else
         // needs to be readable or parsed by the other side.
         await this.fs.appendByte(this.path, ' ');
         this._lastBeat = Date.now();
+        if (this._hiccupSince) {
+          this.worstGapMs = Math.max(this.worstGapMs, Date.now() - this._hiccupSince);
+          this._hiccupSince = 0;
+        }
       })()
         .catch(err => {
-          // A hiccup is normal — the tick above is what decides when silence
-          // has lasted long enough for another machine to be entitled to the
-          // folder. Losing it outright is immediate, though.
-          if (/taken over|disappeared/.test(err.message || '')) this._fail(err.message);
+          // Positive evidence ends the run at once. Anything else is the
+          // network being the network: the tick above is what decides when the
+          // silence has lasted long enough for another machine to be entitled
+          // to the folder, and until then we ride it out.
+          if (/taken over|disappeared/.test(err.message || '')) return this._fail(err.message);
+          if (!this._hiccupSince) { this._hiccupSince = Date.now(); this.hiccups++; }
         })
         .finally(() => { this._beating = null; });
     };
-    this.timer = setInterval(beat, EMIT_LIFE_SIGN_MS);
+    this.timer = setInterval(beat, this.beatMs);
     if (this.timer.unref) this.timer.unref();
   }
 
   async release() {
     if (this.released) return;
     this.released = true;
+    HELD.delete(this.info.lockId);
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
     // The in-flight append has to finish first: one landing AFTER the unlink
-    // would recreate the file and block other machines for 12 seconds.
+    // would recreate the file and block other machines for a full minute.
     if (this._beating) { try { await this._beating; } catch (_) {} }
     if (this.lost) return;              // not ours any more — deleting it would evict its owner
     try {
@@ -247,6 +315,92 @@ class DirLock {
 function describe(info) {
   if (!info) return 'another syncto run';
   return `${info.computerName} (${info.userId})`;
+}
+
+// ── Leftover lock files ───────────────────────────────────────────────────
+// The protocol above clears an abandoned lock, but only when somebody asks for
+// that folder again. A run killed by a crash, a cable pulled, a NAS that went
+// to sleep — the lock file stays, and nothing ever mentions it. The same goes
+// for the "Delete.N." corpse an interrupted takeover leaves behind: the next
+// takeover clears it, and if there is no next takeover it sits there for good.
+//
+// Age is measured against the file's own mtime, which is exactly what the
+// heartbeat refreshes every 5 s. One stat, no polling, no waiting.
+//
+// A network share can have a clock of its own, so this can be wrong in both
+// directions: a live lock looking old, or a dead one looking fresh. Neither is
+// allowed to matter — this function only REPORTS. Removing goes through
+// clearStaleLock(), which does the real life-sign watch first.
+function isCorpseName(name) {
+  return /^Delete\.\d+\./.test(name) && name.includes(LOCK_NAME);
+}
+
+// entries: what a readdir of the folder returned ({name, size, mtime}).
+// Returns [] when nothing is left over.
+function findLeftoverLocks(entries, folderPath, joinPath, now) {
+  const t = now || Date.now();
+  const out = [];
+  for (const e of entries || []) {
+    if (!e || !e.name) continue;
+    const corpse = isCorpseName(e.name);
+    if (e.name !== LOCK_NAME && !corpse) continue;
+    const ageMs = Math.max(0, t - (e.mtime || 0));
+    out.push({
+      folder: folderPath,
+      path  : joinPath(folderPath, e.name),
+      name  : e.name,
+      kind  : corpse ? 'corpse' : 'lock',
+      ageMs,
+      // A corpse is a lock that was ALREADY declared abandoned by whoever
+      // renamed it — there is nothing left to protect. It is still given the
+      // silence window, because a machine can be between its rename and its
+      // unlink, and that window is milliseconds.
+      stale : ageMs >= DETECT_ABANDONED_MS,
+    });
+  }
+  return out;
+}
+
+// Removes one leftover, and re-establishes the proof first: a lock file is the
+// one thing standing between two machines writing the same files, so an
+// mtime that merely LOOKS old is not enough to delete it.
+//
+//   - a corpse is removed once it has been silent long enough;
+//   - a lock this machine wrote for a process that is gone is removed at once;
+//   - anything else is watched for real life signs, and left alone if it moves.
+//
+// Returns 'removed' | 'alive' | 'gone' | 'failed'.
+async function clearStaleLock(fsx, item, opts) {
+  const { onStatus, token } = opts || {};
+  let st = null;
+  try { st = await fsx.stat(item.path); } catch (_) { return 'failed'; }
+  if (!st) return 'gone';
+
+  if (item.kind === 'corpse') {
+    const ageMs = Date.now() - (st.mtime || 0);
+    if (ageMs < DETECT_ABANDONED_MS) return 'alive';
+    try { await fsx.unlink(item.path); return 'removed'; }
+    catch (_) { return 'failed'; }
+  }
+
+  const info = await readLockInfo(fsx, item.path);
+  // A run of ours is holding this folder this very second.
+  if (info && isHeldHere(info.lockId)) return 'alive';
+  const status = info ? processStatus(info, localLockInfo()) : 'unknown';
+  if (status === 'running') return 'alive';
+
+  if (status === 'unknown') {
+    // Another machine, or one we cannot identify: earn the right to delete it
+    // the same way acquireOne does — watch the file, and back off if it moves.
+    const alive = await watchLifeSigns(fsx, item.path, info, onStatus, token);
+    if (alive) return 'alive';
+  }
+
+  try { await takeOver(fsx, item.path, onStatus, info, 3); }
+  catch (_) { return 'failed'; }
+  let after = null;
+  try { after = await fsx.stat(item.path); } catch (_) { return 'removed'; }
+  return after ? 'failed' : 'removed';
 }
 
 // Acquires the lock on one base folder, waiting for a live owner to finish.
@@ -266,7 +420,7 @@ async function acquireOne(fsx, folderPath, opts) {
     let createErr;
     try {
       await fsx.writeExclusive(lockPath, payload);
-      const lock = new DirLock(fsx, lockPath, local, onLost);
+      const lock = new DirLock(fsx, lockPath, local, onLost, (opts || {}).timing);
       lock._startHeartbeat();
       return lock;
     } catch (err) {
@@ -419,6 +573,13 @@ async function acquireAll(entries, opts) {
   }
   return {
     count: held.length,
+    // What the network did during the run: how many times a folder stopped
+    // answering, and the longest stretch that was ridden out.
+    hiccups() {
+      let n = 0, worst = 0;
+      for (const l of held) { n += l.hiccups || 0; worst = Math.max(worst, l.worstGapMs || 0); }
+      return { count: n, worstMs: worst };
+    },
     // Non-null as soon as ANY of the folders stopped being ours mid-run.
     lost() {
       const l = held.find(x => x.lost);
@@ -430,5 +591,6 @@ async function acquireAll(entries, opts) {
 
 module.exports = {
   acquireOne, acquireAll, abandonedLockName, processStatus, localLockInfo, readLockInfo,
+  findLeftoverLocks, clearStaleLock, isCorpseName, checkStillOurs, isHeldHere,
   EMIT_LIFE_SIGN_MS, POLL_LIFE_SIGN_MS, DETECT_ABANDONED_MS, LOCK_NAME,
 };

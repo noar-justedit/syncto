@@ -4,6 +4,142 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.6.2] — 2026-09-05
+
+Locks: a run that survives the network, and the files a dead run leaves behind.
+
+### Fixed
+
+- **A synchronization between two machines died on every network hiccup**, with
+  *"the lock file has not been refreshed for 15 s — the folder may have been
+  taken over"*. Nobody had taken anything over. Two causes:
+  - **The silence window was 12 seconds.** That is the right number for two
+    processes on one machine and much too tight for two machines on a share.
+    An SMB reconnection, a switch renegotiating, a NAS spinning a disk back up:
+    fifteen seconds of nothing is an ordinary Tuesday. It is now **60 seconds**,
+    the same number at both ends — the owner gives up exactly when a waiter
+    becomes entitled to take over, never later.
+  - **A read that failed was read as "the lock file disappeared."** The helper
+    that reads a lock returns nothing both when the file is missing and when the
+    read failed, and the heartbeat treated the two the same — so one unreadable
+    instant ended the run. The check now distinguishes *gone* (the filesystem
+    said absent) from *unknown* (the share did not answer), and only the first
+    is proof. A genuine takeover — the file replaced by another machine's lock —
+    still stops the run immediately, as it must.
+- **The run summary says what the network did.** A run that rode out three
+  dropouts finished correctly; that is a note, not an error, and it is worth
+  knowing before the share stops answering for good.
+
+### Added
+
+- **Leftover lock files are found and reported.** syncto locks each folder it
+  writes to and clears the lock when it finishes. A run that never finished — a
+  crash, a cable pulled, a machine put to sleep — leaves the file behind, and
+  until now nothing cleared it unless another run happened to want that folder.
+  A comparison already lists the root of every base folder, so noticing one
+  costs nothing. `3 leftover locks — clear` appears in the status strip.
+- **Clearing them is a click, never automatic.** A lock file is the one thing
+  standing between two machines writing the same files, so an old-looking
+  timestamp is not a licence to delete: each one is re-verified — a lock held by
+  a live process is left exactly where it is, an unidentified one is watched for
+  real life signs first — and removal goes through the same atomic rename the
+  protocol uses. The summary says how many were removed, how many were still in
+  use, and how many refused.
+
+### Notes
+
+- ⚠️ **Update both machines.** Two machines running different versions no longer
+  agree on the silence window: an older one would take a folder after 12 s while
+  a newer one still believes it holds it.
+
+## [0.6.1] — 2026-09-05
+
+The check moves to the moment a job is opened, and syncto stops guessing.
+
+### Added
+
+- **Opening a saved job checks every folder it names.** The ones that are not
+  there arrive in one list — one line per folder, with the pair number and the
+  side — each with a **Browse…** button. *Apply* writes only the rows that were
+  resolved. This happens before anything is planned against a stale path, which
+  is the cheapest moment to fix one.
+- **A missing folder is drawn in red in its own row**, with the reason on hover.
+  That is what is still on screen an hour after the dialog was closed, and the
+  row is where the problem actually is. The red follows what is typed: it clears
+  the moment a path resolves and appears the moment one stops.
+- **Browse opens where the folder used to be.** When the path no longer
+  resolves, the picker walks up until it finds something that does, instead of
+  landing on wherever the user last browsed.
+- **A red mark in the status strip** — `2 folders missing — fix` — reopens the
+  list. At launch the window only marks: a drive that is not mounted yet is the
+  normal state of a morning, and a dialog in the face at every start is how a
+  warning stops being read.
+
+### Removed
+
+- **The search for the folder under its new name, added in 0.6.0.** syncto no
+  longer reads the neighbouring folders' databases looking for a lookalike to
+  propose. It says the row is wrong, in words and in red, and the person points
+  it at the right place. One less thing deciding on the user's behalf, and one
+  less directory scan.
+
+### Kept
+
+- **The run still refuses** when a folder that has a history is not there:
+  copying all of it again would duplicate it. The message now says to fix the
+  row rather than naming a folder syncto went looking for.
+
+### Notes
+
+- **SFTP sides are not checked.** Answering "does this folder exist" on a server
+  means opening a connection and possibly asking for a password, which is not
+  something opening a job should do on its own.
+
+## [0.6.0] — 2026-09-05
+
+A folder that was renamed is no longer copied again from scratch.
+
+### Fixed
+
+- **A base folder renamed on the drive was treated as a new one.** The job
+  still named the old path, the path no longer resolved, that side read as
+  empty — and the next comparison proposed to copy everything into the old
+  name, beside the folder that already held it. Nothing refused, because the
+  guard that catches a missing root only fires when the OTHER side would lose
+  files, and here nothing was going to be deleted. A destination that has a
+  history and is no longer there is now a refusal, whichever way the files were
+  about to move.
+
+### Added
+
+- **syncto looks for the folder under its new name, and offers it.** A renamed
+  folder takes its `.syncto.db` with it, and that file names the pair — so the
+  folder identifies itself. No inode numbers (Windows and exFAT have no stable
+  ones), no name similarity, no scoring of contents. When the candidate's stamp
+  matches the surviving side's, it is not a resemblance: `savePairDb` writes the
+  same stamp to both sides, so that folder is literally the other half of the
+  last run.
+- **A dialog, not an action.** It names the missing path, the folder that looks
+  like it, and why. *Use this folder* writes the new path into that one pair,
+  on that one side, and compares again. Nothing is ever retargeted on its own —
+  repointing a mirror at a folder nobody confirmed is how the wrong folder gets
+  emptied. Several folders carrying the same pair are listed, and none is
+  chosen.
+
+### Notes
+
+- **The scan is the immediate parent only**, never the volume, and it gives up
+  on a parent holding more than 200 entries. It runs only when a base folder is
+  missing, so a normal comparison pays nothing for it.
+- **A brand-new destination raises nothing** — no dialog, no refusal. That is
+  where every job starts.
+- **A folder that was really deleted** is still reported, with no folder offered
+  in its place and the advice that fits.
+- Still true, and the subject of a later version: a pair's identity is derived
+  from its two paths, so changing a path starts a fresh database. It costs
+  nothing in MIRROR; in UPDATE and 2 WAYS it means the next run has no memory of
+  the previous one.
+
 ## [0.5.11] — 2026-09-03
 
 Interface only. The engine is untouched.

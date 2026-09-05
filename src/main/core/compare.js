@@ -29,6 +29,11 @@
 // Optional whole-hour shifts cover DST and timezone-naive filesystems.
 
 const { PathFilter, SoftFilter } = require('./filter');
+// Required lazily: lock.js takes LOCK_NAME from this file, so importing it at
+// the top would be a cycle and LOCK_NAME would be undefined on one of the two
+// load orders. One call per comparison, so the lookup costs nothing.
+let _lockMod = null;
+function lockMod() { return (_lockMod || (_lockMod = require('./lock'))); }
 
 const CAT = {
   EQUAL      : 'equal',
@@ -194,6 +199,7 @@ class Comparer {
     this.nodes  = [];
     this.errors = [];
     this.leftovers = [];      // stray .syncto_tmp files from an interrupted run
+    this.locks = [];          // lock files a run that never finished left behind
     this.stats  = { scanned: 0, comparedBytes: 0 };
     this.symlinks = this.cfg.symlinks || 'exclude';   // exclude | asLink
     // How many items these two folders held at the end of the last run, read
@@ -249,6 +255,7 @@ class Comparer {
     return {
       nodes: this.nodes, errors: this.errors, stats: this.stats,
       leftovers: this.leftovers,
+      locks: this.locks,
       cancelled: !!this.token.cancelled,
     };
   }
@@ -262,6 +269,15 @@ class Comparer {
     const dir  = relDir ? base.fs.join(base.path, ...relDir.split('/')) : base.path;
     try {
       const list = await base.fs.readdir(dir);
+      // Lock files live at the ROOT of a base folder and nowhere else. The
+      // listing is already in hand, so noticing a leftover costs nothing — and
+      // the walk hides these names from the user, which is exactly why nobody
+      // ever found out one had been left behind by a run that never finished.
+      if (!relDir) {
+        this.locks.push(...lockMod()
+          .findLeftoverLocks(list, base.path, (d, n) => base.fs.join(d, n))
+          .map(x => Object.assign(x, { side })));
+      }
       const map = new Map();
       for (const e of list) {
         if (ALWAYS_SKIP.has(e.name) || isSyncToInternal(e.name)) continue;

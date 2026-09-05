@@ -38,6 +38,7 @@ const state = {
   speeds : [],
   version: '',
   pairInfo: null,
+  missingPaths: [],
   auto   : { nextAt: 0, tick: null },   // auto-sync scheduler
   selIdx : null,                        // selected grid row (node idx)
 };
@@ -97,6 +98,26 @@ function renderPairRows() {
       </div>
     </div>`;
   }).join('');
+  // The rows were just rebuilt, so the red went with them.
+  markMissingPaths(state.missingPaths);
+}
+
+// Marks the rows whose folder is not there. This is what stays on screen after
+// the dialog has been closed — a warning you dismissed is a warning you no
+// longer have, and the path is where the problem actually is.
+function markMissingPaths(list) {
+  document.querySelectorAll('#pairrows .prow input').forEach(i => {
+    i.classList.remove('gone');
+    i.removeAttribute('data-tip');
+  });
+  for (const e of list || []) {
+    const row = document.querySelector(`#pairrows .prow[data-i="${e.pairIndex}"]`);
+    if (!row) continue;
+    const inp = row.querySelector(e.side === 'left' ? '.pr-left' : '.pr-right');
+    if (!inp) continue;
+    inp.classList.add('gone');
+    inp.dataset.tip = 'This folder is not there — Browse to point this row somewhere else';
+  }
 }
 
 // ── Formatting ─────────────────────────────────────────────────────────────
@@ -802,6 +823,217 @@ async function doCompare() {
   if (res.dbNote) notes.push(res.dbNote);
   if (res.errors && res.errors.length) notes.push(`${res.errors.length} folder(s) could not be read`);
   if (notes.length) $('status-note').textContent += ' · ' + notes.join(' · ');
+
+  // A folder the job names that is not there: the rows are already red, and the
+  // run will refuse. Checked again here because a drive can be reorganised
+  // between opening a job and comparing it.
+  await offerRelinkForJob(true);
+
+  // Lock files nobody cleared. The comparison found them for free — it lists
+  // the root of every base folder anyway.
+  noteStaleLocks(res.staleLocks || []);
+}
+
+// ── A folder the job names that is not there ───────────────────────────────
+// Raised when a saved job is OPENED, which is the moment a stale path can still
+// be fixed for the price of one dialog — before a comparison plans a full copy
+// against it and before a run refuses. Raised again after a comparison, because
+// a drive can be reorganised between the two.
+//
+// Every entry is a decision. Where the engine can name the folder that carries
+// this pair's database under a new name it says so, and one click takes it;
+// otherwise Browse opens where the folder used to be. Nothing is ever applied
+// on its own — repointing a mirror at a folder nobody confirmed is how the
+// wrong folder gets emptied.
+let relinkEntries = [];
+// Paths the user has already waved away in this session. Without this, every
+// comparison against a drive that is simply not connected reopens the dialog.
+const relinkDismissed = new Set();
+
+function relinkKey(e) { return `${e.pairIndex} ${e.side} ${e.path}`; }
+
+async function offerRelinkForJob(quiet) {
+  try {
+    uiToJob();
+    showRelink(await API.checkJobPaths(state.job), quiet);
+  } catch (_) { /* checking folders must never stop a job from opening */ }
+}
+
+// Same check, without the dialog: run while the user edits a path, so the red
+// appears the moment a folder stops resolving and clears the moment it does.
+let pathCheckTimer = null;
+function recheckPathsSoon() {
+  clearTimeout(pathCheckTimer);
+  pathCheckTimer = setTimeout(async () => {
+    try {
+      uiToJob();
+      const list = await API.checkJobPaths(state.job);
+      state.missingPaths = list;
+      markMissingPaths(list);
+      renderMissingBadge(list.filter(e => !relinkDismissed.has(relinkKey(e))).length);
+    } catch (_) {}
+  }, 500);
+}
+
+function showRelink(list, quiet) {
+  // The red on the rows shows EVERY missing folder, including the ones already
+  // waved away. Dismissing only silences the dialog.
+  state.missingPaths = list || [];
+  markMissingPaths(state.missingPaths);
+  const fresh = (list || []).filter(e => !relinkDismissed.has(relinkKey(e)));
+  relinkEntries = fresh.map(e => Object.assign({}, e, { chosen: null }));
+  renderMissingBadge(relinkEntries.length);
+  // At launch the window only marks it. A NAS that is not mounted yet is the
+  // normal state of a morning, and a dialog in the face at every start is how
+  // a warning stops being read.
+  if (!relinkEntries.length || quiet) return;
+
+  const n = relinkEntries.length;
+  const named = state.job && state.job.name ? `"${state.job.name}"` : 'this job';
+  $('rl-title').textContent = n > 1
+    ? `${n} folders this job uses are missing`
+    : 'A folder this job uses is missing';
+  $('rl-sub').innerHTML =
+    `${esc(named)} points at ${n > 1 ? 'folders that are' : 'a folder that is'} not there. ` +
+    `Point ${n > 1 ? 'them' : 'it'} at the right place now, or open the job as it is and fix it later — ` +
+    `comparing against a missing folder plans a copy of everything into it.`;
+  renderRelinkList();
+  $('ov-relink').classList.add('open');
+}
+
+function renderRelinkList() {
+  $('rl-list').innerHTML = relinkEntries.map((e, i) => {
+    const where = e.side === 'left' ? 'Source' : 'Destination';
+    const tag = [e.label, where].filter(Boolean).join(' · ');
+    if (e.chosen) {
+      return `<div class="rl-row done" data-i="${i}">
+        <div class="rl-hd"><span class="rl-tag">${esc(tag)}</span><span class="rl-state">will be used</span></div>
+        <div class="rl-path ok">${esc(e.chosen)}</div>
+        <div class="rl-acts"><button class="rl-btn" data-a="undo">Undo</button>
+        <button class="rl-btn" data-a="browse">Choose another…</button></div>
+      </div>`;
+    }
+    const hist = e.hadHistory
+      ? `<div class="rl-note">Synchronized ${e.lastRun ? 'on ' + esc(new Date(e.lastRun).toLocaleDateString()) : 'before'}` +
+        `${e.items ? `, holding ${e.items.toLocaleString()} items` : ''}.</div>`
+      : '';
+    return `<div class="rl-row" data-i="${i}">
+      <div class="rl-hd"><span class="rl-tag">${esc(tag)}</span><span class="rl-state">missing</span></div>
+      <div class="rl-path gone">${esc(e.path)}</div>
+      ${hist}
+      <div class="rl-acts"><button class="rl-btn" data-a="browse">Browse…</button></div>
+    </div>`;
+  }).join('');
+  $('rl-apply').disabled = !relinkEntries.some(e => e.chosen);
+}
+
+$('rl-list').addEventListener('click', async e => {
+  const btn = e.target.closest('.rl-btn[data-a]');
+  if (!btn) return;
+  const row = btn.closest('.rl-row');
+  const item = relinkEntries[Number(row.dataset.i)];
+  if (!item) return;
+  if (btn.dataset.a === 'undo') item.chosen = null;
+  if (btn.dataset.a === 'browse') {
+    const side = item.side === 'left' ? 'Source folder' : 'Destination folder';
+    // Opens where the folder used to be: in the renamed case the parent is
+    // still there, with the folder under its new name sitting in it.
+    const p = await API.browseFolder(`${side} — ${item.label || 'pair'}`, item.path);
+    if (!p) return;
+    item.chosen = p;
+  }
+  renderRelinkList();
+});
+
+// Writes the confirmed paths into the job — those rows, those sides, nothing
+// else — and drops any comparison that was made against the old ones.
+async function applyRelink() {
+  const done = relinkEntries.filter(e => e.chosen);
+  $('ov-relink').classList.remove('open');
+  if (!done.length) return;
+  uiToJob();
+  const pairs = ensurePairs(state.job).pairs;
+  for (const e of done) {
+    if (!pairs[e.pairIndex]) continue;
+    pairs[e.pairIndex][e.side === 'left' ? 'left' : 'right'] = e.chosen;
+  }
+  jobToUi();
+  persist();
+  invalidateComparison('Folders changed — compare again.');
+  renderMissingBadge(relinkEntries.length - done.length);
+  relinkEntries = [];
+  recheckPathsSoon();
+  $('status-note').textContent = done.length > 1
+    ? `${done.length} folders repointed. Compare again.`
+    : `${done[0].side === 'left' ? 'Source' : 'Destination'} of pair ${done[0].pair} now points at ${done[0].chosen}.`;
+}
+
+function dismissRelink() {
+  for (const e of relinkEntries) relinkDismissed.add(relinkKey(e));
+  $('ov-relink').classList.remove('open');
+  renderMissingBadge(relinkEntries.length);
+  relinkEntries = [];
+}
+
+// Waved away, or found at startup: the dialog is gone but the problem is not.
+// A line in the status strip keeps it one click away instead of silent.
+function renderMissingBadge(n) {
+  const el = $('missing-badge');
+  if (!el) return;
+  el.style.display = n > 0 ? '' : 'none';
+  el.textContent = n > 0 ? `${n} folder${n > 1 ? 's' : ''} missing — fix` : '';
+}
+
+// ── Lock files a previous run left behind ──────────────────────────────────
+// syncto locks each folder it writes to and clears the lock when it finishes.
+// A run that never finished — a crash, a cable pulled, a NAS that went to
+// sleep — leaves the file there. The next run clears it by itself, but only if
+// there IS a next run on that folder, so one can sit on a share for months.
+//
+// The comparison already lists the root of every base folder, so noticing one
+// costs nothing. Removing one does not: it is the single thing standing between
+// two machines writing the same files, so it is never done on the way past.
+let staleLocks = [];
+
+function renderLockBadge() {
+  const el = $('lock-badge');
+  if (!el) return;
+  const n = staleLocks.length;
+  el.style.display = n > 0 ? '' : 'none';
+  el.disabled = false;
+  el.textContent = n > 0
+    ? `${n} leftover lock${n > 1 ? 's' : ''} — clear`
+    : '';
+}
+
+function noteStaleLocks(list) {
+  staleLocks = list || [];
+  renderLockBadge();
+}
+
+async function clearStaleLocksNow() {
+  if (!staleLocks.length) return;
+  const el = $('lock-badge');
+  el.disabled = true;
+  el.textContent = 'Checking…';
+  // Checking can take a full minute per lock: the file is watched for life
+  // signs before anything is removed, exactly as a waiting run would.
+  const res = await API.clearLocks(state.job, staleLocks);
+  if (!res || !res.ok) {
+    renderLockBadge();
+    showError('Could not clear the lock files', (res && res.error) || 'Unknown error');
+    return;
+  }
+  const by = k => res.results.filter(r => r.status === k).length;
+  const removed = by('removed'), alive = by('alive'), failed = by('failed');
+  staleLocks = staleLocks.filter((_, i) =>
+    res.results[i] && res.results[i].status === 'failed');
+  renderLockBadge();
+  const bits = [];
+  if (removed) bits.push(`${removed} leftover lock${removed > 1 ? 's' : ''} removed`);
+  if (alive)   bits.push(`${alive} still in use — left alone`);
+  if (failed)  bits.push(`${failed} could not be removed`);
+  $('status-note').textContent = bits.join(' · ') || 'Nothing to clear.';
 }
 
 // ── Synchronize ────────────────────────────────────────────────────────────
@@ -1398,6 +1630,10 @@ function bind() {
     await refreshOverview();
   });
 
+  $('rl-apply').addEventListener('click', applyRelink);
+  $('rl-ignore').addEventListener('click', dismissRelink);
+  $('missing-badge').addEventListener('click', () => offerRelinkForJob(false));
+  $('lock-badge').addEventListener('click', clearStaleLocksNow);
   $('cf-cancel').addEventListener('click', () => $('ov-confirm').classList.remove('open'));
   $('btn-cf-settings').addEventListener('click', () => {
     $('ov-confirm').classList.remove('open');
@@ -1590,6 +1826,7 @@ function bind() {
       const ESC_CLOSE = {
         'ov-settings': 'set-close',   'ov-filter' : 'filter-close',
         'ov-confirm' : 'cf-cancel',   'ov-summary': 'sum-close',
+        'ov-relink'  : 'rl-ignore',
         'ov-verify'  : 'vf-close',    'ov-auto'   : 'auto-cf-cancel',
         'update-ov'  : 'upd-later',
         // Closing this one drops the SSH connection — hiding the window and
@@ -1618,6 +1855,8 @@ async function onPathChanged() {
   uiToJob();
   invalidateIfPairsChanged();
   persist();
+  // Debounced: the red follows what is typed, without a stat per keystroke.
+  recheckPathsSoon();
 }
 
 // ⌘T — swaps every pair at once. Each row also has its own swap button, which
@@ -1631,6 +1870,8 @@ function swapAllPairs() {
 
 async function newJob() {
   autoStop();
+  relinkEntries = []; state.missingPaths = []; renderMissingBadge(0);
+  noteStaleLocks([]);
   state.job = await API.jobNew();
   state.jobPath = '';
   jobToUi();
@@ -1650,6 +1891,10 @@ async function openJob() {
   jobToUi();
   renderRecent();
   onPathChanged();
+  // Opening a saved job is the moment to find out that one of the folders it
+  // names is not there any more — while it costs one dialog, rather than after
+  // a comparison has planned a full copy into it.
+  await offerRelinkForJob();
 }
 
 async function saveJobFile(as) {
@@ -1785,6 +2030,7 @@ async function openRecent(p) {
   jobToUi();
   renderRecent();
   onPathChanged();
+  await offerRelinkForJob();
 }
 
 // ── Zone 2 — overview of the compared folders ──────────────────────────────
@@ -2654,6 +2900,8 @@ function installTooltips() {
   renderRecent();
   await loadNtfyUi();
   onPathChanged();
+  // Marked, not raised: see showRelink.
+  offerRelinkForJob(true);
   document.title = `syncto ${state.version}`;
   $('footer-ver').textContent = 'v' + state.version;
   $('footer-gh').addEventListener('click', () => API.openExternal('https://github.com/noar-justedit/syncto'));

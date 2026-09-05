@@ -24,12 +24,13 @@ const { Comparer, CAT, OP, CHECKSUM_FILE } = require('./compare');
 const { PathFilter } = require('./filter');
 const { applyDirections, computeStats, operationFor, applyFolderRules,
         detectMoves, dissolveMove, usesDatabase } = require('./direction');
-const { loadPairDb, savePairDb, buildSession, pairIdFor } = require('./db');
+const { loadPairDb, savePairDb, buildSession, pairIdFor, readSideSession } = require('./db');
 const { SyncRunner } = require('./sync');
 const { FsPool, parseLocation, redactLocation } = require('../fs/afs');
+const { NativeFs } = require('../fs/native');
 const { buildReport, toHtml, toCsv, toJson } = require('./report');
 const { formatChecksumList, parseChecksumList, createHasher, hashStream } = require('./hash');
-const { acquireAll } = require('./lock');
+const { acquireAll, clearStaleLock, DETECT_ABANDONED_MS } = require('./lock');
 
 class Session {
   constructor() {
@@ -94,7 +95,12 @@ class Session {
     this.nodes  = res.nodes;
     this.errors = res.errors;
     this.leftovers = res.leftovers || [];
+    this.locks = res.locks || [];
     this.cancelled = !!res.cancelled;
+
+    // A base folder that does not resolve is either gone or renamed, and the
+    // two look identical from here. Ask the surviving side what it remembers.
+    await this._inspectMissingRoots();
 
     const applied = applyDirections(this.nodes, job.sync, cmp, this.db);
     this.byChange = applied.byChange;
@@ -110,6 +116,10 @@ class Session {
       count : this.nodes.length,
       stats : this.stats,
       errors: this.errors,
+      // Lock files a previous run never cleared. Reported, never removed on
+      // the way past: a lock file is the one thing standing between two
+      // machines writing the same files.
+      staleLocks: (this.locks || []).filter(l => l.stale),
       cancelled: this.cancelled,
       byChange: this.byChange,
       dbNote: this.dbNote,
@@ -299,6 +309,23 @@ class Session {
     return { rows, totalBytes: total === 1 ? 0 : total, identical: rows.length === 0 };
   }
 
+  // Fills in what the surviving side knows about a missing one: whether these
+  // two folders were ever synchronized, when, and whether a folder carrying
+  // this pair's history is sitting next to the missing path under another name.
+  //
+  // Runs ONLY when a root is missing, so a normal comparison pays nothing.
+  async _inspectMissingRoots() {
+    for (const e of this.errors) {
+      if (!e.missingRoot) continue;
+      const other = e.missingRoot === 'left' ? this.right : this.left;
+      const sess = await readSideSession(other.fs, other.path, this.pairId);
+      if (!sess) continue;             // never synchronized: a genuinely new folder
+      e.hadHistory = true;
+      e.lastRun = sess.updated || 0;
+      e.items = sess.items ? Object.keys(sess.items).length : 0;
+    }
+  }
+
   // A base folder that is GONE reads as an empty side, and an empty side plus
   // a mirror is a mass deletion of the healthy one. Returns the message to
   // refuse with, or null.
@@ -314,10 +341,21 @@ class Session {
       const otherSide = e.missingRoot === 'left' ? 'right' : 'left';
       const doomed = this.nodes.filter(n => n.active &&
         n.op === (otherSide === 'left' ? OP.DELETE_LEFT : OP.DELETE_RIGHT));
-      if (!doomed.length) continue;
-      return `The ${e.missingRoot} folder is not there (${e.path}), which makes that side look empty — ` +
-        `and this job would delete ${doomed.length} item${doomed.length > 1 ? 's' : ''} from the ${otherSide} side because of it. ` +
-        `Reconnect the drive or fix the path, then compare again.`;
+      if (doomed.length) {
+        return `The ${e.missingRoot} folder is not there (${e.path}), which makes that side look empty — ` +
+          `and this job would delete ${doomed.length} item${doomed.length > 1 ? 's' : ''} from the ${otherSide} side because of it. ` +
+          `Reconnect the drive or fix the path, then compare again.`;
+      }
+      // Nothing would be DELETED, so the guard above stays quiet — and that is
+      // exactly the case that let a renamed destination be copied again from
+      // scratch, in full, beside the folder that already held it. A folder that
+      // has a history and is no longer there is a problem whichever way the
+      // files were about to move.
+      if (!e.hadHistory) continue;
+      const when = e.lastRun ? new Date(e.lastRun).toLocaleString() : 'an earlier run';
+      return `The ${e.missingRoot} folder is not there (${e.path}), but it was synchronized on ${when}` +
+        `${e.items ? ` and held ${e.items} items` : ''}. Copying everything again would duplicate it. ` +
+        `Reconnect the drive or point that row at the right folder, then compare again.`;
     }
     return null;
   }
@@ -613,6 +651,7 @@ class MultiSession {
     const perPair = [];
     const errors = [];
     let movesFound = 0, dbNote = null, cancelled = false;
+    const lockSeen = new Map();
     let scannedBefore = 0, bytesBefore = 0;
     const startedAt = Date.now();
     for (let i = 0; i < this.pairs.length; i++) {
@@ -654,6 +693,8 @@ class MultiSession {
       if (res.cancelled) cancelled = true;
       if (res.dbNote && !dbNote) dbNote = res.dbNote;
       errors.push(...res.errors.map(e => Object.assign({}, e, { pair: i + 1 })));
+      // Two pairs can share a base folder; its lock must be listed once.
+      for (const l of res.staleLocks || []) if (!lockSeen.has(l.path)) lockSeen.set(l.path, l);
     }
 
     this.stats = mergeStats(this.sessions.map(s => s.stats));
@@ -666,6 +707,7 @@ class MultiSession {
       stats: this.stats,
       cancelled,
       errors,
+      staleLocks: [...lockSeen.values()],
       movesFound,
       dbNote,
       pairs: this.pairs.map((p, i) => ({ ...p, label: pairLabel(p), stats: perPair[i] && perPair[i].stats })),
@@ -999,6 +1041,17 @@ class MultiSession {
       allNotes.push(msg);
       allErrors.push({ rel: '.syncto.lock', message: msg });
       counters.errors++;
+    } else if (locks && locks.hiccups) {
+      // The run survived the network dropping out. Said as a note, because a
+      // run that finished correctly is not an error — but a share that stops
+      // answering for half a minute is worth knowing about before it stops
+      // answering for two.
+      const h = locks.hiccups();
+      if (h.count) {
+        allNotes.push(`The network stopped answering ${h.count} time${h.count > 1 ? 's' : ''} ` +
+          `during the run (longest ${Math.round(h.worstMs / 1000)} s). The run rode it out — ` +
+          `a folder is only given up after ${Math.round(DETECT_ABANDONED_MS / 1000)} s of complete silence.`);
+      }
     }
 
     return {
@@ -1086,4 +1139,97 @@ async function readText(fsx, p) {
   });
 }
 
-module.exports = { Session, MultiSession, verifyFolder, CHECKSUM_FILE, writeText, readText, pairLabel };
+// ── Clearing a lock a previous run left behind ────────────────────────────
+// Deliberately separate from the comparison that found them. Finding one costs
+// a stat; removing one has to earn the right, and that can mean watching the
+// file for twelve seconds to be sure nobody is still feeding it.
+async function clearStaleLocks(job, items, opts) {
+  const { onStatus, token, credentials } = opts || {};
+  const pool = new FsPool();
+  const results = [];
+  try {
+    for (const item of items || []) {
+      if (!item || !item.path || !item.folder) continue;
+      let fsx, target;
+      try {
+        // pool.open takes a parsed location, not a raw path.
+        const side = await pool.open(parseLocation(item.folder, credentials));
+        fsx = side.fs;
+        target = Object.assign({}, item, { path: fsx.join(side.path, item.name) });
+      } catch (err) {
+        results.push({ path: item.path, status: 'failed', error: err.message || String(err) });
+        continue;
+      }
+      let status = 'failed', error = null;
+      try { status = await clearStaleLock(fsx, target, { onStatus, token }); }
+      catch (err) { error = err.message || String(err); }
+      results.push(error ? { path: item.path, status: 'failed', error } : { path: item.path, status });
+    }
+  } finally {
+    try { await pool.closeAll(); } catch (_) {}
+  }
+  return results;
+}
+
+// ── Checking a job's folders WITHOUT comparing anything ────────────────────
+// Called when a job is opened, which is the moment a stale path can still be
+// fixed cheaply — before a comparison plans a full copy against it, and before
+// a run refuses. Every native side of every pair is stat'ed; a missing one gets
+// the same treatment a missing root gets during a comparison: does the other
+// side remember this pair, and is there a folder next to it carrying that pair's
+// database under another name.
+//
+// SFTP sides are skipped. Answering "does it exist" there means opening a
+// connection and possibly asking for a password, which is not something opening
+// a job should do on its own.
+async function checkJobPaths(job, opts) {
+  const pairs = (Array.isArray(job.pairs) && job.pairs.length)
+    ? job.pairs
+    : [{ left: job.left || '', right: job.right || '' }];
+  const multi = pairs.length > 1;
+  const fsx = new NativeFs();
+  const out = [];
+
+  for (let i = 0; i < pairs.length; i++) {
+    const pair = pairs[i];
+    const left = String(pair.left || '').trim();
+    const right = String(pair.right || '').trim();
+    if (!left || !right) continue;                       // an unfinished row is not a problem yet
+    const remote = p => /^sftp:\/\//i.test(p);
+
+    for (const side of ['left', 'right']) {
+      const here  = side === 'left' ? left : right;
+      const other = side === 'left' ? right : left;
+      if (remote(here)) continue;
+      let exists = false;
+      try { const st = await fsx.stat(fsx.resolve(here)); exists = !!st && st.type === 'folder'; }
+      catch (_) { exists = true; }   // unreadable is not missing — never claim it is
+      if (exists) continue;
+
+      const entry = {
+        pairIndex: i, pair: i + 1, side, path: here,
+        label: multi ? `Pair ${i + 1}` : '',
+        hadHistory: false, lastRun: 0, items: 0,
+      };
+
+      // What the surviving side remembers. Without it there is nothing to say
+      // beyond "this folder is not there" — which is still worth saying.
+      if (!remote(other)) {
+        try {
+          const pairId = pairIdFor(job.pairId, left, right);
+          const sess = await readSideSession(fsx, fsx.resolve(other), pairId);
+          if (sess) {
+            entry.hadHistory = true;
+            entry.lastRun = sess.updated || 0;
+            entry.items = sess.items ? Object.keys(sess.items).length : 0;
+          }
+        } catch (_) { /* what the folder held is a bonus, never a reason to fail */ }
+      }
+      out.push(entry);
+    }
+  }
+  return out;
+}
+
+module.exports = { Session, MultiSession, verifyFolder, CHECKSUM_FILE, writeText, readText,
+  pairLabel, checkJobPaths, clearStaleLocks };

@@ -299,6 +299,12 @@ border:1px solid var(--border);border-radius:5px;padding:3px 0;}
 .prow input{flex:1;min-width:0;background:var(--bg);border:1px solid var(--border);border-radius:var(--rs);
 padding:7px 11px;font-size:12.5px;color:var(--text);font-family:var(--mono);outline:none;transition:border-color .15s;}
 .prow input:focus{border-color:var(--accent-g);}
+/* The folder this row names is not there. Said on the row itself, where the
+   path is, and not only in a dialog that has been dismissed: the red is what
+   is still on screen an hour later. */
+.prow input.gone{border-color:rgba(242,85,90,.55);background:rgba(242,85,90,.07);color:var(--red);}
+.prow input.gone:focus{border-color:var(--red);}
+
 /* Every pair gets its own swap, and it swaps THAT pair. */
 .prow .pr-swap{width:30px;height:30px;justify-self:center;border-radius:50%;
 border:1px solid var(--border2);background:var(--bg3);color:var(--text3);cursor:pointer;
@@ -574,6 +580,37 @@ border:1px solid var(--border2);border-radius:16px;transition:.2s;}
 background:var(--text3);border-radius:50%;transition:.2s;}
 .switch input:checked + .slider{background:var(--green-d);border-color:rgba(53,201,139,.5);}
 .switch input:checked + .slider::before{transform:translateX(12px);background:var(--green);}
+/* Missing / renamed base folder */
+.rl-row{border:1px solid var(--border);border-radius:9px;padding:12px 13px;margin-bottom:10px;
+background:var(--bg3);}
+.rl-row.done{border-color:rgba(53,201,139,.4);background:rgba(53,201,139,.06);}
+.rl-hd{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;}
+.rl-tag{font-size:10.5px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;
+color:var(--text3);}
+.rl-state{font-size:10.5px;font-weight:700;color:var(--red);}
+.rl-row.done .rl-state{color:var(--green);}
+.rl-path{font-family:var(--mono);font-size:12px;color:var(--text2);background:var(--bg);
+border:1px solid var(--border);border-radius:7px;padding:8px 10px;overflow-wrap:anywhere;}
+.rl-path.gone{color:var(--text3);text-decoration:line-through;text-decoration-color:rgba(242,85,90,.5);}
+.rl-path.ok{color:var(--green);border-color:rgba(53,201,139,.35);background:rgba(53,201,139,.07);}
+.rl-lbl{font-size:10.5px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;
+color:var(--text3);margin:10px 0 6px;}
+.rl-note{font-size:11.5px;color:var(--text3);margin-top:7px;line-height:1.5;}
+.rl-acts{display:flex;gap:7px;margin-top:11px;}
+.rl-btn{padding:7px 12px;border-radius:6px;border:1px solid var(--border2);background:var(--bg4);
+color:var(--text2);font-family:inherit;font-size:11.5px;font-weight:600;cursor:pointer;}
+.rl-btn:hover{color:var(--text);border-color:var(--text3);}
+.rl-btn.use{background:rgba(53,201,139,.12);border-color:rgba(53,201,139,.4);color:var(--green);}
+.rl-more{font-size:11.5px;color:var(--text3);margin-top:9px;line-height:1.5;overflow-wrap:anywhere;}
+#missing-badge{display:inline-flex;align-items:center;font-family:inherit;font-size:11px;
+font-weight:700;letter-spacing:.02em;color:var(--red);background:var(--red-d);
+border:1px solid rgba(242,85,90,.35);border-radius:5px;padding:3px 9px;cursor:pointer;}
+#missing-badge:hover{border-color:var(--red);}
+#lock-badge{display:inline-flex;align-items:center;font-family:inherit;font-size:11px;
+font-weight:700;letter-spacing:.02em;color:var(--orange);background:var(--orange-d);
+border:1px solid rgba(242,160,61,.4);border-radius:5px;padding:3px 9px;cursor:pointer;}
+#lock-badge:hover{border-color:var(--orange);}
+#lock-badge:disabled{opacity:.5;cursor:default;}
 .m-btns{display:flex;gap:9px;margin-top:20px;}
 .m-btn{flex:1;padding:11px;border-radius:var(--rs);border:1px solid var(--border2);
 background:var(--bg3);color:var(--text);font-family:var(--font);font-size:13.5px;font-weight:700;
@@ -999,6 +1036,13 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
 <!-- ── Status strip ─────────────────────────────────────────────── -->
 <div id="statusbar">
   <span class="status-note" id="status-empty">No comparison yet.</span>
+  <!-- Waved away, or found while the drive was still disconnected: the dialog
+       is gone, the problem is not. One click reopens it. -->
+  <button id="missing-badge" style="display:none"></button>
+  <!-- A lock a previous run never cleared. Reported, never removed on the way
+       past: it is the one thing standing between two machines writing the same
+       files, so clearing one is a deliberate act. -->
+  <button id="lock-badge" style="display:none"></button>
   <div id="stat-chips" style="display:flex;gap:7px;flex-wrap:wrap"></div>
   <div class="status-spacer"></div>
   <span class="status-note" id="status-note"></span>
@@ -1385,6 +1429,21 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
       <button class="m-btn" id="cf-cancel">Cancel</button>
       <button class="m-btn" id="btn-cf-settings" style="display:none">Open settings</button>
       <button class="m-btn primary" id="cf-ok">Synchronize</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ A base folder that is missing, and may have been renamed ═══
+     Never applied on its own: repointing a mirror at a folder nobody
+     confirmed is how the wrong folder gets emptied. -->
+<div class="ov" id="ov-relink">
+  <div class="mcard">
+    <div class="m-h1" id="rl-title">A folder this job uses is missing</div>
+    <div class="m-sub" id="rl-sub"></div>
+    <div id="rl-list"></div>
+    <div class="m-btns">
+      <button class="m-btn" id="rl-ignore">Leave them as they are</button>
+      <button class="m-btn primary" id="rl-apply" disabled>Apply</button>
     </div>
   </div>
 </div>

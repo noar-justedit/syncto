@@ -89,7 +89,7 @@ function checkForUpdate() {
   });
 }
 
-const { MultiSession, verifyFolder } = require('./core/session');
+const { MultiSession, verifyFolder, checkJobPaths, clearStaleLocks } = require('./core/session');
 const { FsPool } = require('./fs/afs');
 const { Prefs, defaultJob, loadJob, saveJob, jobNameFromPath, JOB_EXT, credentialMap,
         pushRecent: addRecent, removeRecent } = require('./config');
@@ -310,11 +310,27 @@ ipcMain.handle('take-migration-notes', () => {
 });
 ipcMain.handle('save-prefs',  (_, p) => prefs.save(p));
 
-ipcMain.handle('browse-folder', async (_, title) => {
-  const res = await dialog.showOpenDialog(win, {
+// `startIn` opens the picker where the folder used to be. Relinking a renamed
+// folder is the case that needs it: the parent is still there, and the folder
+// under its new name is sitting in it.
+ipcMain.handle('browse-folder', async (_, title, startIn) => {
+  const opts = {
     title: title || 'Choose a folder',
     properties: ['openDirectory', 'createDirectory'],
-  });
+  };
+  if (startIn) {
+    let start = String(startIn);
+    // A path that no longer resolves makes the dialog fall back to the last
+    // place the user browsed, which is rarely the right one. Walk up until
+    // something exists.
+    for (let i = 0; i < 12 && start; i++) {
+      try { if (fs.statSync(start).isDirectory()) { opts.defaultPath = start; break; } } catch (_) {}
+      const up = path.dirname(start);
+      if (up === start) break;
+      start = up;
+    }
+  }
+  const res = await dialog.showOpenDialog(win, opts);
   return (res.canceled || !res.filePaths.length) ? null : res.filePaths[0];
 });
 
@@ -484,6 +500,29 @@ function openJobFile(p) {
   const recent = pushRecent(job.name, p);
   return { job, path: p, recent };
 }
+
+// Every native folder this job names, stat'ed. Called when a job is opened —
+// the moment a stale path can still be fixed for the price of one dialog,
+// rather than after a comparison has planned a full copy against it.
+// Removing a lock a previous run left behind. Never done on the way past: this
+// can mean watching the file for a full minute to be sure nobody is feeding it.
+ipcMain.handle('clear-locks', async (_, job, items) => {
+  try {
+    const results = await clearStaleLocks(job, items, {
+      credentials: credentialMap(prefs.data.servers),
+      token: tokens.compare,
+      onStatus: st => send('lock-progress', st),
+    });
+    return { ok: true, results };
+  } catch (err) {
+    return { ok: false, error: err.message || String(err) };
+  }
+});
+
+ipcMain.handle('check-job-paths', async (_, job) => {
+  try { return await checkJobPaths(job); }
+  catch (_) { return []; }
+});
 
 ipcMain.handle('job-new', () => { currentJobPath = ''; return defaultJob(); });
 

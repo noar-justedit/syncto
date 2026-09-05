@@ -2696,6 +2696,495 @@ function testCloseJob() {
   }
 }
 
+// ══ 31. A base folder with a history that is gone (0.6.0) ═════════════════
+// Reported on 0.5.11: a destination folder was renamed on the drive, and the
+// next comparison proposed to copy all of it again — into the old name, beside
+// the copy that already held it. Nothing refused, because the existing guard
+// only fires when the OTHER side would lose files, and here nothing was going
+// to be deleted. syncto does not go looking for the folder: it says the row is
+// wrong, in words and in red, and the person fixes it.
+async function testMissingRootWithHistory() {
+  console.log('\n\n31. A base folder with a history that is gone (0.6.0)');
+
+  const { readSideSession } = require('../src/main/core/db');
+  const { NativeFs } = require('../src/main/fs/native');
+  const nfs = new NativeFs();
+
+  // A pair that has really run, so both .syncto.db files are real.
+  async function synced(nFiles) {
+    const { dir } = scratch();
+    const L = path.join(dir, 'SOURCE'), R = path.join(dir, 'G', 'MagicCam_OLD');
+    for (let i = 0; i < nFiles; i++) write(L, `A00${i % 2}/CLIP_${i}.mov`, 'x'.repeat(500 + i));
+    fs.mkdirSync(path.join(dir, 'G'), { recursive: true });
+    const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+    const s = new Session();
+    await s.compare(job, { token: {} });
+    await s.sync(job, { token: {}, appVersion: 'test' });
+    const pairId = s.pairId;
+    await s.close();
+    return { dir, L, R, pairId, job: () => makeJob(L, R, { sync: { variant: 'mirror' } }) };
+  }
+
+  // (a) What the surviving side remembers is the whole basis for the refusal.
+  {
+    const c = await synced(6);
+    ok(fs.existsSync(path.join(c.R, '.syncto.db')), 'the run left a database in the destination');
+    const sess = await readSideSession(nfs, c.L, c.pairId);
+    ok(!!sess, 'the source still holds this pair session');
+    ok(sess.items && Object.keys(sess.items).length > 0, 'with the items it last agreed on');
+    eq(await readSideSession(nfs, c.L, 'auto-somethingelse'), null,
+       'and nothing for a pair id nobody stored');
+    eq(await readSideSession(nfs, path.join(c.dir, 'nope'), c.pairId), null,
+       'an unreadable folder answers null rather than throwing');
+  }
+
+  // (b) The reported case: renamed on the drive, job untouched.
+  {
+    const c = await synced(8);
+    fs.renameSync(c.R, path.join(path.dirname(c.R), 'MagicCam_JUSTEDIT'));
+
+    const s = new Session();
+    const res = await s.compare(c.job(), { token: {} });
+    ok(res.stats.createRight > 0, 'the comparison still plans the copy — the path really is gone');
+
+    const warn = await s.preflight(c.job(), {});
+    eq(warn.length, 1, 'but the synchronization refuses');
+    const msg = (warn[0] || {}).message || '';
+    ok(/was synchronized on/.test(msg), 'saying the folder had a history');
+    ok(/would duplicate it/.test(msg), 'and what copying again would cost');
+    ok(/point that row at the right folder/.test(msg), 'and who has to fix it');
+    // Deliberately NOT a search of the drive for a lookalike.
+    ok(!/MagicCam_JUSTEDIT/.test(msg), 'syncto does not go hunting for a replacement');
+    await s.close();
+
+    // Pointing the job at the new name is all it takes.
+    const s2 = new Session();
+    const NEW = path.join(path.dirname(c.R), 'MagicCam_JUSTEDIT');
+    const r2 = await s2.compare(makeJob(c.L, NEW, { sync: { variant: 'mirror' } }), { token: {} });
+    eq(r2.stats.filesToProcess, 0, 'and then there is nothing left to copy');
+    eq((await s2.preflight(makeJob(c.L, NEW, { sync: { variant: 'mirror' } }), {})).length, 0,
+       'and nothing left to refuse');
+    await s2.close();
+  }
+
+  // (c) Deleted outright rather than renamed: same refusal, same advice.
+  {
+    const c = await synced(4);
+    fs.rmSync(c.R, { recursive: true, force: true });
+    const s = new Session();
+    await s.compare(c.job(), { token: {} });
+    const warn = await s.preflight(c.job(), {});
+    eq(warn.length, 1, 'a folder that had a history and is gone still refuses');
+    ok(/Reconnect the drive/.test((warn[0] || {}).message || ''), 'with the advice that fits');
+    await s.close();
+  }
+
+  // (d) THE REGRESSION THAT WOULD HURT: a first run into a destination that has
+  //     never existed must stay completely silent. Every job starts here.
+  {
+    const { L, R } = scratch();
+    write(L, 'a.mov', 'x');
+    const target = path.join(R, 'NEW_TARGET');
+    const job = () => makeJob(L, target, { sync: { variant: 'mirror' } });
+    const s = new Session();
+    await s.compare(job(), { token: {} });
+    eq((await s.preflight(job(), {})).length, 0, 'a brand-new destination does not refuse to run');
+    await s.close();
+  }
+
+  // (e) The older guard still comes first: a missing SOURCE would empty the
+  //     destination, and that message names the deletions.
+  {
+    const c = await synced(5);
+    fs.rmSync(c.L, { recursive: true, force: true });
+    const s = new Session();
+    await s.compare(c.job(), { token: {} });
+    const warn = await s.preflight(c.job(), {});
+    eq(warn.length, 1, 'a missing source still refuses');
+    ok(/would delete/.test((warn[0] || {}).message || ''), 'and still leads with the deletions');
+    await s.close();
+  }
+}
+
+// ══ 32. Opening a job whose folders moved (0.6.1) ═════════════════════════
+// 0.6.0 caught this after a comparison. Opening the job is earlier and cheaper:
+// the stale path can be fixed before anything is planned against it. What the
+// window gets is one entry per native folder the job names that is not there.
+async function testCheckJobPaths() {
+  console.log('\n\n32. Opening a job whose folders moved (0.6.1)');
+
+  const { checkJobPaths } = require('../src/main/core/session');
+
+  // (a) Which rows are reported, and which are deliberately not.
+  {
+    const { dir } = scratch();
+    const A = path.join(dir, 'A'), B = path.join(dir, 'B');
+    fs.mkdirSync(A, { recursive: true });
+    fs.mkdirSync(B, { recursive: true });
+    const GONE = path.join(dir, 'NOT_THERE');
+
+    const job = {
+      pairs: [
+        { left: A, right: B },                 // both there
+        { left: A, right: GONE },              // the one to report
+        { left: 'sftp://nas/share', right: A },// a server side is not stat'ed
+        { left: A, right: '' },                // an unfinished row is not a problem
+      ],
+    };
+    const out = await checkJobPaths(job);
+    eq(out.length, 1, 'only the folder that is really missing is reported');
+    eq(out[0].pairIndex, 1, 'with the row the window has to write into');
+    eq(out[0].pair, 2, 'numbered for the user');
+    eq(out[0].side, 'right', 'and the side');
+    eq(out[0].path, GONE, 'and the path that does not resolve');
+    eq(out[0].hadHistory, false, 'these two folders were never synchronized');
+  }
+
+  // (b) A folder that was renamed after a real run: the suggestion is filled in
+  //     from the .syncto.db the folder took with it.
+  {
+    const { dir } = scratch();
+    const L = path.join(dir, 'SOURCE'), R = path.join(dir, 'G', 'MagicCam_OLD');
+    for (let i = 0; i < 5; i++) write(L, `CLIP_${i}.mov`, 'x'.repeat(300 + i));
+    fs.mkdirSync(path.join(dir, 'G'), { recursive: true });
+    for (const n of ['LUTS', '_TEMP']) fs.mkdirSync(path.join(dir, 'G', n), { recursive: true });
+    const s = new Session();
+    const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+    await s.compare(job, { token: {} });
+    await s.sync(job, { token: {}, appVersion: 'test' });
+    await s.close();
+
+    const NEW = path.join(dir, 'G', 'MagicCam_JUSTEDIT');
+    fs.renameSync(R, NEW);
+
+    const out = await checkJobPaths({ pairs: [{ left: L, right: R }] });
+    eq(out.length, 1, 'the renamed destination is reported');
+    eq(out[0].hadHistory, true, 'the surviving side remembers this pair');
+    ok(out[0].items > 0, 'and how many items it held');
+    eq(out[0].candidate, undefined, 'syncto does not go looking for a replacement');
+    eq(out[0].label, '', 'a single-pair job needs no "Pair 1" label');
+  }
+
+  // (c) The same job once the path is fixed: silence.
+  {
+    const { dir } = scratch();
+    const L = path.join(dir, 'L'), R = path.join(dir, 'R');
+    fs.mkdirSync(L, { recursive: true }); fs.mkdirSync(R, { recursive: true });
+    eq((await checkJobPaths({ pairs: [{ left: L, right: R }] })).length, 0,
+       'a job whose folders are all there reports nothing');
+    eq((await checkJobPaths({ left: L, right: R })).length, 0,
+       'including a job written before multi-pair');
+  }
+
+  // (d) A file where a folder should be is missing as far as a job is
+  //     concerned — syncing into it would fail on the first write.
+  {
+    const { dir } = scratch();
+    const L = path.join(dir, 'L');
+    fs.mkdirSync(L, { recursive: true });
+    const F = path.join(dir, 'a-file.txt');
+    fs.writeFileSync(F, 'not a folder');
+    const out = await checkJobPaths({ pairs: [{ left: L, right: F }] });
+    eq(out.length, 1, 'a file standing where a folder is expected is reported');
+  }
+
+  // (e) The wiring: the check runs when a job is OPENED, and only marks at
+  //     launch. A dialog in the face at every start, because a NAS is not
+  //     mounted yet, is how a warning stops being read.
+  {
+    const html  = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/index.html'), 'utf8');
+    const appjs = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.js'), 'utf8');
+    const pre   = fs.readFileSync(path.join(__dirname, '..', 'src/main/preload.js'), 'utf8');
+    const main  = fs.readFileSync(path.join(__dirname, '..', 'src/main/main.js'), 'utf8');
+
+    ok(/ipcMain\.handle\('check-job-paths'/.test(main), 'main answers on the channel');
+    ok(/checkJobPaths\s*:.*invoke\('check-job-paths'/.test(pre), 'preload exposes it');
+    eq((appjs.match(/await offerRelinkForJob\(\);/g) || []).length, 2,
+       'both ways of opening a job check its folders');
+    ok(/offerRelinkForJob\(true\);/.test(appjs), 'and the launch only marks');
+    ok(html.includes('id="missing-badge"'), 'the mark is a button in the status strip');
+    ok(/missing-badge'\)\.addEventListener\('click', \(\) => offerRelinkForJob\(false\)\)/.test(appjs),
+       'clicking it opens the dialog');
+
+    // (f) The red on the row. This is what is still on screen an hour after the
+    //     dialog was closed, and the path is where the problem actually is.
+    ok(/\.prow input\.gone\{border-color:rgba\(242,85,90/.test(html),
+       'a row whose folder is missing is drawn in red');
+    ok(/function markMissingPaths\(list\)/.test(appjs), 'and something marks it');
+    ok(/markMissingPaths\(state\.missingPaths\);/.test(appjs),
+       'rebuilding the pair rows puts the red back');
+    ok(/recheckPathsSoon\(\);/.test(appjs), 'editing a path re-checks it');
+    ok(/state\.missingPaths = list \|\| \[\];/.test(appjs),
+       'the red covers every missing folder, dismissed or not');
+    ok(!/relinkFromCompare|findRenamedBase|rl-btn use/.test(appjs),
+       'and nothing is left of the folder-hunting the window used to do');
+
+    // Browse opens where the folder used to be. Without it the picker lands on
+    // wherever the user last browsed, which is rarely the right drive.
+    ok(/browse-folder', async \(_, title, startIn\)/.test(main), 'browse takes a starting folder');
+    ok(/opts\.defaultPath = start;/.test(main), 'and uses it');
+    ok(/API\.browseFolder\(`\$\{side\} — \$\{item\.label \|\| 'pair'\}`, item\.path\)/.test(appjs),
+       'the dialog passes the missing path as the starting point');
+  }
+}
+
+// ══ 33. Locks: network tolerance, and leftovers (0.6.2) ═══════════════════
+// Two reports, one subject.
+//
+// The first: a synchronization between two machines on a network died every
+// time with "the lock file has not been refreshed for 15 s — the folder may
+// have been taken over". Nobody had taken anything over. An SMB share
+// reconnecting takes longer than the twelve seconds the protocol allowed.
+//
+// The second: lock files left behind by runs that never finished. The protocol
+// clears an abandoned lock, but only when somebody asks for that folder again —
+// and if nobody does, the file sits there.
+async function testLockTolerance() {
+  console.log('\n\n33. Locks: network tolerance and leftovers (0.6.2)');
+
+  const {
+    checkStillOurs, findLeftoverLocks, clearStaleLock, isCorpseName,
+    acquireOne, localLockInfo, DETECT_ABANDONED_MS, EMIT_LIFE_SIGN_MS, LOCK_NAME,
+  } = require('../src/main/core/lock');
+  const { NativeFs } = require('../src/main/fs/native');
+  const nfs = new NativeFs();
+
+  // (a) The window. A number that is right for two processes on one machine is
+  //     wrong for two machines on a network.
+  {
+    ok(DETECT_ABANDONED_MS >= 60000,
+       'a folder is given up only after a full minute of silence');
+    ok(DETECT_ABANDONED_MS > 15000,
+       'and 15 s of network trouble — the case reported — is ridden out');
+    ok(DETECT_ABANDONED_MS > EMIT_LIFE_SIGN_MS * 4,
+       'which is several heartbeats, not one missed beat');
+  }
+
+  // (b) THE BUG. A read that fails proves nothing, and was being read as "the
+  //     lock file disappeared" — one unreadable instant ended the run.
+  {
+    const { dir } = scratch();
+    const p = path.join(dir, LOCK_NAME);
+    const mine = localLockInfo();
+    fs.writeFileSync(p, JSON.stringify(mine) + '\n');
+
+    eq(await checkStillOurs(nfs, p, mine.lockId), 'ours', 'our own lock reads as ours');
+    eq(await checkStillOurs(nfs, p, 'someone-elses-id'), 'taken',
+       'a lock carrying another id reads as taken');
+    eq(await checkStillOurs(nfs, path.join(dir, 'no-such-lock'), mine.lockId), 'gone',
+       'a file that is really absent reads as gone');
+
+    // A share that does not answer: stat throws rather than returning null.
+    const flaky = Object.assign(Object.create(Object.getPrototypeOf(nfs)), nfs, {
+      stat: async () => { const e = new Error('ETIMEDOUT'); e.code = 'ETIMEDOUT'; throw e; },
+    });
+    eq(await checkStillOurs(flaky, p, mine.lockId), 'unknown',
+       'a share that does not answer is unknown, NOT gone');
+
+    // There, but unreadable this instant: the old code called this "gone".
+    const unreadable = Object.assign(Object.create(Object.getPrototypeOf(nfs)), nfs, {
+      createReadStream: () => { throw new Error('EIO'); },
+    });
+    eq(await checkStillOurs(unreadable, p, mine.lockId), 'unknown',
+       'a lock that cannot be read this instant is unknown, NOT gone');
+  }
+
+  // (c) A held lock rides out a share that stops answering, and still gives up
+  //     the instant somebody really takes it.
+  {
+    const { dir } = scratch();
+    let failing = false;
+    const flaky = Object.assign(Object.create(Object.getPrototypeOf(nfs)), nfs, {
+      stat: async (...a) => {
+        if (failing) { const e = new Error('ETIMEDOUT'); e.code = 'ETIMEDOUT'; throw e; }
+        return NativeFs.prototype.stat.apply(nfs, a);
+      },
+      appendByte: async (...a) => {
+        if (failing) { const e = new Error('ETIMEDOUT'); e.code = 'ETIMEDOUT'; throw e; }
+        return NativeFs.prototype.appendByte.apply(nfs, a);
+      },
+    });
+
+    // Same logic, played at speed: 200 ms beats and a 2 s window instead of
+    // 5 s and a minute. The real numbers are asserted in (a).
+    const FAST = { beatMs: 200, detectMs: 2000 };
+    let lostReason = null;
+    const lock = await acquireOne(flaky, dir, { onLost: r => { lostReason = r; }, timing: FAST });
+    ok(!!lock, 'the lock is taken');
+
+    // Three heartbeats' worth of a share that answers nothing.
+    failing = true;
+    await new Promise(r => setTimeout(r, FAST.beatMs * 4));
+    eq(lostReason, null, 'several beats of silence do not end the run');
+    ok(lock.hiccups >= 1, 'but it is counted, for the run summary');
+    failing = false;
+    await new Promise(r => setTimeout(r, FAST.beatMs * 3));
+    eq(lostReason, null, 'and the run carries on once the share comes back');
+    ok(lock.worstGapMs >= FAST.beatMs, 'the longest gap is remembered');
+
+    // The exact shape of the reported failure: the share answers a stat but
+    // the read comes back empty. That used to read as "the lock file
+    // disappeared" and ended the run on the spot.
+    let readBroken = false;
+    const halfDead = Object.assign(Object.create(Object.getPrototypeOf(nfs)), nfs, {
+      createReadStream: (...a) => {
+        if (readBroken) throw new Error('EIO');
+        return NativeFs.prototype.createReadStream.apply(nfs, a);
+      },
+    });
+    let lost2 = null;
+    const sub = path.join(dir, 'sub');
+    fs.mkdirSync(sub, { recursive: true });
+    const lock2 = await acquireOne(halfDead, sub, { onLost: r => { lost2 = r; }, timing: FAST });
+    readBroken = true;
+    await new Promise(r => setTimeout(r, FAST.beatMs * 4));
+    eq(lost2, null, 'a share whose reads fail does not end the run either');
+    readBroken = false;
+    await lock2.release();
+
+    // Now somebody really takes the folder: that IS proof, and it stops at once.
+    fs.writeFileSync(path.join(dir, LOCK_NAME),
+      JSON.stringify(Object.assign(localLockInfo(), { computerName: 'OTHER-MAC' })) + '\n');
+    await new Promise(r => setTimeout(r, FAST.beatMs * 3));
+    ok(!!lostReason, 'a genuine takeover still ends the run immediately');
+    ok(/taken over/.test(lostReason || ''), 'and says who took it');
+    await lock.release();
+  }
+
+  // (d) Finding what a dead run left behind. The comparison already lists the
+  //     root of every base folder, so this reads no extra bytes.
+  {
+    const join = (d, n) => path.join(d, n);
+    const now = 1_700_000_000_000;
+    const entries = [
+      { name: LOCK_NAME,                    mtime: now - 90_000 },
+      { name: `Delete.0.${LOCK_NAME}`,      mtime: now - 90_000 },
+      { name: `Delete.3.${LOCK_NAME}`,      mtime: now - 1_000  },
+      { name: '.syncto.db',                 mtime: now },
+      { name: 'CLIP_0001.mov',              mtime: now },
+      { name: 'Delete.0.something-else.txt',mtime: now - 90_000 },
+    ];
+    const found = findLeftoverLocks(entries, '/vol/BACKUP', join, now);
+    eq(found.map(f => f.name).sort(),
+       [`Delete.0.${LOCK_NAME}`, `Delete.3.${LOCK_NAME}`, LOCK_NAME].sort(),
+       'the lock and its corpses are found, and nothing else');
+    eq(found.filter(f => f.stale).length, 2,
+       'the one touched a second ago is not called stale');
+    eq(found.find(f => f.name === LOCK_NAME).kind, 'lock', 'a lock is a lock');
+    eq(found.find(f => f.name === `Delete.0.${LOCK_NAME}`).kind, 'corpse',
+       'and a renamed one is a corpse');
+    ok(isCorpseName(`Delete.7.${LOCK_NAME}`), 'corpse names are recognised');
+    ok(!isCorpseName('Delete.0.holiday.mov'), 'and a user file called Delete.0 is not one');
+    eq(findLeftoverLocks(null, '/x', join, now), [], 'an empty listing finds nothing');
+  }
+
+  // (e) Clearing one. A lock that is being fed is left exactly where it is —
+  //     an mtime that merely looks old is not a licence to delete.
+  {
+    const { dir } = scratch();
+    const lockPath = path.join(dir, LOCK_NAME);
+    const old = Date.now() - DETECT_ABANDONED_MS - 60_000;
+
+    // A corpse: already declared abandoned by whoever renamed it.
+    const corpse = path.join(dir, `Delete.0.${LOCK_NAME}`);
+    fs.writeFileSync(corpse, 'x');
+    fs.utimesSync(corpse, new Date(old), new Date(old));
+    eq(await clearStaleLock(nfs, { path: corpse, kind: 'corpse' }, {}), 'removed',
+       'an old corpse is removed');
+    ok(!fs.existsSync(corpse), 'and it really is gone');
+
+    const fresh = path.join(dir, `Delete.1.${LOCK_NAME}`);
+    fs.writeFileSync(fresh, 'x');
+    eq(await clearStaleLock(nfs, { path: fresh, kind: 'corpse' }, {}), 'alive',
+       'a corpse from this very second is left alone — a takeover is in flight');
+    ok(fs.existsSync(fresh), 'so the file is still there');
+
+    // A lock from a process on this machine that no longer exists.
+    const dead = Object.assign(localLockInfo(), { processId: 999_999, sessionId: 999_998 });
+    fs.writeFileSync(lockPath, JSON.stringify(dead) + '\n');
+    eq(await clearStaleLock(nfs, { path: lockPath, kind: 'lock' }, {}), 'removed',
+       'a lock left by a dead process on this machine is removed');
+    ok(!fs.existsSync(lockPath), 'and the folder is free again');
+
+    // A lock this very process holds is not a leftover.
+    const live = await acquireOne(nfs, dir, {});
+    eq(await clearStaleLock(nfs, { path: lockPath, kind: 'lock' }, {}), 'alive',
+       'a lock that is genuinely held is never removed');
+    ok(fs.existsSync(lockPath), 'it is still there');
+    await live.release();
+    eq(await clearStaleLock(nfs, { path: lockPath, kind: 'lock' }, {}), 'gone',
+       'and once released there is nothing left to clear');
+  }
+
+  // (f) A comparison reports them, and reports nothing when there is nothing.
+  {
+    const { L, R } = scratch();
+    write(L, 'a.mov', 'x');
+    const clean = new Session();
+    const r0 = await clean.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: {} });
+    eq(r0.staleLocks.length, 0, 'a healthy folder reports no leftover lock');
+    await clean.close();
+
+    const old = Date.now() - DETECT_ABANDONED_MS - 60_000;
+    for (const base of [L, R]) {
+      const p = path.join(base, LOCK_NAME);
+      fs.writeFileSync(p, JSON.stringify(localLockInfo()) + '\n');
+      fs.utimesSync(p, new Date(old), new Date(old));
+    }
+    const s = new Session();
+    const res = await s.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: {} });
+    eq(res.staleLocks.length, 2, 'a leftover lock on each side is reported');
+    eq(res.staleLocks.filter(l => l.kind === 'lock').length, 2, 'as locks');
+    ok(res.staleLocks.every(l => l.folder && l.path), 'each naming its folder and file');
+    // And it stays invisible to the plan: reported, never synchronized.
+    eq(res.stats.filesToProcess, 1, 'the lock files are not copied anywhere');
+    await s.close();
+  }
+
+  // (f2) The wrapper the window actually calls. Tested separately from
+  //      clearStaleLock because it is where the plumbing lives — it opens the
+  //      folder through the pool, and a folder is a LOCATION there, not a
+  //      string. Getting that wrong reported "could not be removed" on every
+  //      file while they all sat there untouched.
+  {
+    const { clearStaleLocks } = require('../src/main/core/session');
+    const { dir } = scratch();
+    const lockPath = path.join(dir, LOCK_NAME);
+    const corpse   = path.join(dir, `Delete.0.${LOCK_NAME}`);
+    const old = Date.now() - DETECT_ABANDONED_MS - 90_000;
+    for (const f of [lockPath, corpse]) {
+      fs.writeFileSync(f, JSON.stringify(localLockInfo()) + '\n');
+      fs.utimesSync(f, new Date(old), new Date(old));
+    }
+    const res = await clearStaleLocks({}, [
+      { folder: dir, name: LOCK_NAME, path: lockPath, kind: 'lock' },
+      { folder: dir, name: `Delete.0.${LOCK_NAME}`, path: corpse, kind: 'corpse' },
+    ], {});
+    eq(res.length, 2, 'every item comes back with a verdict');
+    ok(res.every(r => r.status !== 'failed'), 'and none of them failed');
+    ok(res.every(r => !r.error), 'with no error carried back');
+    eq(fs.readdirSync(dir).filter(n => n.includes('.syncto.lock')), [],
+       'the folder really is clean afterwards');
+  }
+
+  // (g) The window's side: reported, and cleared only on purpose.
+  {
+    const html  = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/index.html'), 'utf8');
+    const appjs = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.js'), 'utf8');
+    const pre   = fs.readFileSync(path.join(__dirname, '..', 'src/main/preload.js'), 'utf8');
+    const main  = fs.readFileSync(path.join(__dirname, '..', 'src/main/main.js'), 'utf8');
+    ok(html.includes('id="lock-badge"'), 'the status strip can say so');
+    ok(/noteStaleLocks\(res\.staleLocks \|\| \[\]\)/.test(appjs), 'a comparison fills it');
+    ok(/lock-badge'\)\.addEventListener\('click', clearStaleLocksNow\)/.test(appjs),
+       'and clearing is a click, never automatic');
+    ok(/clearLocks\s*:.*invoke\('clear-locks'/.test(pre), 'preload exposes the channel');
+    ok(/ipcMain\.handle\('clear-locks'/.test(main), 'and main answers on it');
+    // Nothing in the comparison path may delete a lock on the way past.
+    const cmp = fs.readFileSync(path.join(__dirname, '..', 'src/main/core/compare.js'), 'utf8');
+    ok(!/unlink[\s\S]{0,80}LOCK_NAME/.test(cmp), 'the comparison never removes one itself');
+  }
+}
+
 (async function main() {
   console.log('syncto engine tests');
   console.log('scratch: ' + ROOT);
@@ -2730,6 +3219,9 @@ function testCloseJob() {
     await testBundlesAndCopyLog();
     await testInSyncPairs();
     testCloseJob();
+    await testMissingRootWithHistory();
+    await testCheckJobPaths();
+    await testLockTolerance();
   } catch (err) {
     failed++;
     failures.push('UNCAUGHT: ' + (err.stack || err.message));

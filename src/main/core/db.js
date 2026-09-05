@@ -264,6 +264,16 @@ function newPairId() {
 // The order matters (left and right are recorded separately), which is why the
 // two paths are not sorted: swapping sides deliberately starts a fresh history
 // rather than reading the old one backwards.
+// The pair's own session as ONE side stores it. loadPairDb needs both sides to
+// agree, which is right for deciding directions and useless here: the whole
+// question is what the surviving side remembers about a side that is missing.
+async function readSideSession(fsx, basePath, pairId) {
+  let doc = null;
+  try { doc = await readDb(fsx, basePath); } catch (_) { return null; }
+  const sess = doc && doc.sessions && doc.sessions[pairId];
+  return sess || null;
+}
+
 function pairIdFor(explicit, leftPath, rightPath) {
   if (explicit) return explicit;
   const norm = p => String(p || '').replace(/[\\/]+$/, '').toLowerCase();
@@ -273,4 +283,5 @@ function pairIdFor(explicit, leftPath, rightPath) {
   return 'auto-' + h;
 }
 
-module.exports = { SyncDb, loadPairDb, savePairDb, buildSession, newPairId, pairIdFor, readDb, writeDb };
+module.exports = { SyncDb, loadPairDb, savePairDb, buildSession, newPairId, pairIdFor,
+  readDb, writeDb, readSideSession };

@@ -25,7 +25,9 @@ const api = {
   loadPrefs : ()        => ipcRenderer.invoke('load-prefs'),
   savePrefs : (p)       => ipcRenderer.invoke('save-prefs', p),
 
-  browseFolder : (title)=> ipcRenderer.invoke('browse-folder', title),
+  browseFolder : (title, startIn) => ipcRenderer.invoke('browse-folder', title, startIn),
+  checkJobPaths: (job)   => ipcRenderer.invoke('check-job-paths', job),
+  clearLocks   : (job, items) => ipcRenderer.invoke('clear-locks', job, items),
   revealPath   : (p)    => ipcRenderer.invoke('reveal-path', p),
   openExternal : (u)    => ipcRenderer.invoke('open-external', u),
   openPath     : (p)    => ipcRenderer.invoke('open-path', p),
@@ -81,6 +83,7 @@ const api = {
   verifyCancel: ()      => ipcRenderer.invoke('verify-cancel'),
 
   onCompareProgress: cb => sub('compare-progress', cb),
+  onLockProgress   : cb => sub('lock-progress', cb),
   onSyncProgress   : cb => sub('sync-progress', cb),
   onVerifyProgress : cb => sub('verify-progress', cb),
   onMenu           : cb => sub('menu', cb),
