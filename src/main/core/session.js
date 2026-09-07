@@ -31,6 +31,7 @@ const { NativeFs } = require('../fs/native');
 const { buildReport, toHtml, toCsv, toJson } = require('./report');
 const { formatChecksumList, parseChecksumList, createHasher, hashStream } = require('./hash');
 const { acquireAll, clearStaleLock, DETECT_ABANDONED_MS } = require('./lock');
+const { log } = require('../log');
 
 class Session {
   constructor() {
@@ -91,7 +92,15 @@ class Session {
       config: cmp, token, onProgress,
       expected: this.expected,
     });
+    const t0 = Date.now();
+    log.info('compare', `${redactLocation(this.left.path)} \u2194 ${redactLocation(this.right.path)}` +
+      ` \u00b7 by ${cmp.compareVariant} \u00b7 symlinks=${cmp.symlinks || 'exclude'}` +
+      ` \u00b7 db=${this.db && this.db.available ? this.expected + ' items' : 'none'}`);
     const res = await comparer.run();
+    log.info('compare', `done: ${res.nodes.length} items in ${Date.now() - t0} ms` +
+      (res.errors && res.errors.length ? ` \u00b7 ${res.errors.length} error(s)` : '') +
+      (res.cancelled ? ' (cancelled)' : ''));
+    for (const e of (res.errors || []).slice(0, 20)) log.warn('compare', e.path || '', e.message);
     this.nodes  = res.nodes;
     this.errors = res.errors;
     this.leftovers = res.leftovers || [];
@@ -476,7 +485,11 @@ class Session {
           this.nodes, run.applied, this.db,
           job.compare.compareVariant || 'timeSize',
           this.left.path, this.right.path, keepRel);
+        log.info('db', `writing the database on both sides (${
+          session && session.items ? Object.keys(session.items).length : 0} items)`);
+        const dbT = Date.now();
         dbStamp = await savePairDb(this.left, this.right, pairId, session);
+        log.info('db', `written in ${Date.now() - dbT} ms`);
       } catch (err) {
         // This is an ERROR, not a note. A two-way run whose database was not
         // written looks perfect and lies to the next one: delete a file the
@@ -897,6 +910,11 @@ class MultiSession {
 
     const startedAt = Date.now();
     const multi = this.sessions.length > 1;
+    log.info('sync', `START ${job.sync.variant} · ${this.sessions.length} pair(s) · ` +
+      `deletion=${job.sync.deletion || 'recycler'} · lockFolders=${job.sync.lockFolders !== false}`);
+    for (let i = 0; i < this.pairs.length; i++) {
+      log.info('sync', `  pair ${i + 1}: ${redactLocation(this.pairs[i].left)} → ${redactLocation(this.pairs[i].right)}`);
+    }
 
     // Lock every folder this run will write to, before touching anything.
     // Another machine synchronizing the same folders waits (or we wait for it).
@@ -905,8 +923,21 @@ class MultiSession {
     if (job.sync.lockFolders !== false) {
       const folders = [];
       for (const s of this.sessions) { folders.push(s.left, s.right); }
+      // The window showed NOTHING between pressing Synchronize and the first
+      // file: a normal acquisition emits no status at all, and on a server each
+      // folder is a handful of round trips on one serialized connection. A run
+      // that was merely slow looked frozen — and a run that was stuck looked
+      // identical to one that was working.
+      if (onProgress) onProgress({ phase: 'lock', current: 'Locking the folders…', waiting: true });
       locks = await acquireAll(folders, {
         token,
+        onFolder: (p, i, n) => {
+          log.info('lock', `folder ${i + 1}/${n}`);
+          if (onProgress) onProgress({
+            phase: 'lock', waiting: true,
+            current: `Locking folder ${i + 1} of ${n}…`,
+          });
+        },
         // Losing a lock mid-run means another machine now owns that folder and
         // may already be writing to it. Stopping is the only safe answer: two
         // engines renaming the same .syncto_tmp is how files get shredded.
@@ -1035,6 +1066,11 @@ class MultiSession {
       }
     }
 
+    log.info('sync', `END errors=${counters.errors} files=${counters.files} ` +
+      `deleted=${counters.deleted || 0} in ${Math.round((endedAt - startedAt) / 1000)} s` +
+      (cancelled ? ' (cancelled)' : ''));
+    for (const e of allErrors.slice(0, 50)) log.error('sync', e.rel || '(run)', e.message);
+
     if (lockLost) {
       const msg = `The folder lock was lost during the run (${lockLost}) — another machine took over, ` +
         `so syncto stopped to avoid two engines writing the same files. Nothing after that point was done.`;
@@ -1068,7 +1104,13 @@ class MultiSession {
       pairsDone: perPair.length, pairsTotal: this.pairs.length,
     };
     } finally {
-      if (locks) await locks.release();
+      // The last thing a run does, and it talks to the server. Announced, so a
+      // window that sits at 100% is at least saying what it is waiting for.
+      if (locks) {
+        if (onProgress) onProgress({ phase: 'sync', pass: 'cleanup', current: 'Releasing the folder locks…' });
+        await locks.release();
+      }
+      log.info('sync', 'finished');
     }
   }
 

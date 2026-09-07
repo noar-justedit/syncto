@@ -47,6 +47,7 @@ const os = require('os');
 const fsNode = require('fs');
 const nodePath = require('path');
 const { LOCK_NAME } = require('./compare');
+const { log } = require('../log');
 
 const EMIT_LIFE_SIGN_MS   = 5000;                        // heartbeat period
 const POLL_LIFE_SIGN_MS   = 2000;                        // how often a waiter looks
@@ -160,20 +161,39 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 const HELD = new Set();
 function isHeldHere(lockId) { return !!lockId && HELD.has(lockId); }
 
+// A RAW STREAM, not a queued request — so the 45 s deadline the SFTP layer
+// puts on every request does NOT cover it. A read that never delivers used to
+// park release() for ever, and release() runs in a `finally`: the whole run
+// then never settled, sitting at 100% FINISHING with Cancel doing nothing,
+// because nothing in that phase looks at the token.
+const READ_LOCK_TIMEOUT_MS = 20000;
+
 async function readLockInfo(fsx, lockPath) {
   return new Promise(resolve => {
     const chunks = [];
-    let rs;
-    try { rs = fsx.createReadStream(lockPath); } catch (_) { return resolve(null); }
+    let rs, done = false;
+    const finish = v => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try { if (rs) rs.destroy(); } catch (_) {}
+      resolve(v);
+    };
+    const timer = setTimeout(() => {
+      log.warn('lock', `no answer reading ${lockPath} within ${
+        Math.round(READ_LOCK_TIMEOUT_MS / 1000)} s`);
+      finish(null);
+    }, READ_LOCK_TIMEOUT_MS);
+    try { rs = fsx.createReadStream(lockPath); } catch (_) { return finish(null); }
     rs.on('data', c => chunks.push(c));
-    rs.on('error', () => resolve(null));
+    rs.on('error', () => finish(null));
     rs.on('end', () => {
       const text = Buffer.concat(chunks).toString('utf8');
       // The heartbeat appends spaces after the JSON, so parse the first line.
       try {
         const json = JSON.parse(text.split('\n')[0]);
-        resolve(json && json.format === FORMAT ? json : null);
-      } catch (_) { resolve(null); }
+        finish(json && json.format === FORMAT ? json : null);
+      } catch (_) { finish(null); }
     });
   });
 }
@@ -413,6 +433,7 @@ async function acquireOne(fsx, folderPath, opts) {
   let ghostTries = 0;   // create fails "exists" but no lock file is there
   let takeoverTries = 0;
 
+  log.info('lock', `acquiring ${folderPath}`);
   for (;;) {
     if (token && token.cancelled) throw new Error('Cancelled');
 
@@ -422,9 +443,21 @@ async function acquireOne(fsx, folderPath, opts) {
       await fsx.writeExclusive(lockPath, payload);
       const lock = new DirLock(fsx, lockPath, local, onLost, (opts || {}).timing);
       lock._startHeartbeat();
+      log.info('lock', `acquired ${folderPath}`);
       return lock;
     } catch (err) {
-      if (!/exist/i.test(err.code || err.message || '')) throw err;
+      if (!/exist/i.test(err.code || err.message || '')) {
+        log.error('lock', `cannot create the lock file in ${folderPath}`,
+          (err.code ? err.code + ' ' : '') + err.message);
+        throw err;
+      }
+      // Reported as "already exists" — which SFTPv3 cannot distinguish from a
+      // plain failure, so the log says what was really seen.
+      // The message already carries the code on a native filesystem; printing
+      // it twice ("EEXIST EEXIST: file already exists") reads like a bug.
+      const detail = err.message && err.code && err.message.startsWith(err.code)
+        ? err.message : (err.code ? err.code + ' ' : '') + err.message;
+      log.info('lock', `${folderPath} is already locked (or the server refused the create)`, detail);
       createErr = err;
     }
 
@@ -439,6 +472,11 @@ async function acquireOne(fsx, folderPath, opts) {
       let st = null;
       try { st = await fsx.stat(lockPath); } catch (_) {}
       if (!st) {
+        // The create said "exists" and there is no file. On SFTP that is what a
+        // refused write looks like — a permission problem, a full quota, a
+        // read-only export — because SFTPv3 answers "Failure" to all of them.
+        log.warn('lock', `${folderPath}: the create was refused but no lock file is there ` +
+          `(attempt ${ghostTries + 1}/5) — check that this account may write here`);
         if (++ghostTries >= 5) throw createErr;
         await sleep(POLL_LIFE_SIGN_MS);
         continue;
@@ -453,6 +491,8 @@ async function acquireOne(fsx, folderPath, opts) {
     }
 
     // Unknown owner (another machine): watch the file for life signs.
+    log.info('lock', `${folderPath} held by ${describe(info)} — watching for ` +
+      `${Math.round(DETECT_ABANDONED_MS / 1000)} s of silence`);
     const alive = await watchLifeSigns(fsx, lockPath, info, onStatus, token);
     if (alive) { takeoverTries = 0; continue; }
     await takeOver(fsx, lockPath, onStatus, info, ++takeoverTries);
@@ -539,6 +579,7 @@ async function takeOver(fsx, lockPath, onStatus, info, attempt) {
 // source lock it once) and sorted, so two machines requesting the same set can
 // never deadlock by taking them in opposite orders.
 async function acquireAll(entries, opts) {
+  const onFolder = (opts || {}).onFolder;
   const seen = new Map();
   for (const e of entries) {
     if (!e || !e.fs || !e.path) continue;
@@ -549,7 +590,9 @@ async function acquireAll(entries, opts) {
 
   const held = [];
   try {
+    let n = 0;
     for (const e of list) {
+      if (onFolder) onFolder(e.path, n++, list.length);
       // stat() returns null for "absent" and throws for everything else. The
       // old catch-all treated a permission error or a network hiccup as
       // "absent" and ran the whole synchronization on that folder WITHOUT a
@@ -585,7 +628,14 @@ async function acquireAll(entries, opts) {
       const l = held.find(x => x.lost);
       return l ? `${l.path}: ${l.lost}` : null;
     },
-    async release() { for (const l of held) { try { await l.release(); } catch (_) {} } },
+    async release() {
+      log.info('lock', `releasing ${held.length} folder lock(s)`);
+      const t0 = Date.now();
+      for (const l of held) {
+        try { await l.release(); } catch (err) { log.warn('lock', `release failed: ${l.path}`, err.message); }
+      }
+      log.info('lock', `released in ${Date.now() - t0} ms`);
+    },
   };
 }
 

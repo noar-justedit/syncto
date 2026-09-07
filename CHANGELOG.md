@@ -4,6 +4,134 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.6.6] — 2026-09-07
+
+Two lines the log should not have written.
+
+### Fixed
+
+- **A disconnection syncto asked for was logged as `connection lost`, at ERROR
+  level.** Ending a connection fires the same handler a dropped one does, so
+  every normal close left a red line behind. In a log somebody sends for
+  support that is worse than no line at all: it sends the reader hunting for a
+  fault that was never there. A deliberate close now says `connection closed`,
+  at INFO.
+- **`EEXIST EEXIST: file already exists`** — the code was printed twice when the
+  message already began with it.
+
+## [0.6.5] — 2026-09-07
+
+SFTP transfers stop being bounded by the round trip.
+
+### Fixed
+
+- **SFTP throughput was one chunk per round trip.** ssh2's SFTP streams issue
+  ONE request and wait for its answer before issuing the next — `SFTP.write()`
+  sends each piece of a large buffer from the callback of the piece before it,
+  and the read stream does the same. So the speed of a transfer was not set by
+  the bandwidth but by `one chunk ÷ one round trip`, which is invisible on a LAN
+  and ruinous on a real link: two users measured **1.5 MB/s at 22 ms** of
+  latency and **0.3 MB/s at 100 ms** — the same code, the same chunk, the ratio
+  of their pings. A single BRAW clip took hours, and the window, showing nothing
+  during the lock phase and nothing per file until it finished, looked frozen.
+
+  syncto now keeps **64 requests in flight** in both directions. Measured
+  against a real SFTP server with an injected delay, on the same connection and
+  the same file: **0.19 → 9.9 MB/s at 20 ms**, **0.14 → 4.8 MB/s at 100 ms**.
+  The gain counts twice, because the verification pass reads every file back.
+
+  Deliberately not ssh2's `fastGet`/`fastPut`, which do pipeline but take a local
+  path and hand back a finished file — that would cost the three things this
+  engine is built on: the fingerprint computed while the bytes go past,
+  byte-level progress, and a pause that works inside a file. All three still
+  work, and are covered by tests.
+
+- **A file with no bytes was not created at all on an SFTP target.** It never
+  reached the write path, so the remote file was never opened — silently.
+- **Pause restarted itself.** The back-pressure handler resumed the read
+  whenever the writer emptied, without asking whether the transfer was paused:
+  29 MB went through a "pause" in the run that caught it.
+
+### Added
+
+- **A real SFTP server in the test suite** (`test/sftp-server.js`), serving a
+  real folder with a configurable delay on every reply. A bound that only shows
+  up under latency cannot be tested without latency; syncto's SFTP path had
+  never been exercised by a test before this.
+- **A line every 15 seconds during a long file**, with bytes, elapsed time and
+  rate. A 6 GB clip on a slow link produced no log line at all until it
+  finished — six minutes of lock heartbeats and nothing else, which reads
+  exactly like a freeze.
+
+## [0.6.4] — 2026-09-07
+
+Three things the log immediately found, on a real transfer to a NAS.
+
+### Fixed
+
+- **The log panel showed the same three lines all session.** It was read from
+  disk once at launch and never again, so it still showed the header while the
+  file on disk held the whole run — and Copy copied that stale snapshot. Opening
+  the settings now re-reads it, and keeps re-reading every 1.5 s so a run in
+  progress can be watched line by line. Scrolling up to read something is no
+  longer undone by the next refresh.
+- **PAUSE did nothing during a file.** The gate the copy loop honours sits
+  BETWEEN two files, so on a server at 1.5 MB/s a single 17 MB track meant
+  eleven seconds of a button with no effect — indistinguishable from one that is
+  not wired at all. The read is now held and resumed inside the file.
+- **A run could sit at 100% FINISHING for ever.** Reading a lock file uses a raw
+  stream, which the 45-second deadline on queued requests does not cover; and
+  releasing the locks happens in a `finally`, so a read that never delivered
+  left the whole run unsettled — with nothing in that phase looking at the
+  cancel token either. That read now gives up after 20 s and says so.
+
+### Added
+
+- **The finishing phase says what it is doing** — removing emptied folders,
+  sweeping leftovers, writing the database, releasing the locks — in the window
+  and in the log, with timings. A silent 100% is indistinguishable from a hang.
+
+## [0.6.3] — 2026-09-07
+
+A diagnostic log, because syncto wrote nothing at all.
+
+### Added
+
+- **A log, switched on in Settings › Diagnostics.** It records every step of a
+  comparison and of a run, every request sent to a server, and how long each one
+  took. **Off by default**, and **emptied every time syncto starts**: turn it on,
+  reproduce the problem, copy it. No archive to dig through, no file that grows
+  for a year.
+- **Read and copied from the settings window** — the whole log, not the part
+  scrolled into view — with **SAVE .TXT** for a file to attach to a message,
+  plus REFRESH and CLEAR. Clicking the path shows the file in the Finder or in
+  Explorer.
+- **Per-file timings.** Each copy and each verification read records the bytes,
+  the milliseconds and the rate they work out to. That is what separates a slow
+  link from a slow server from a slow disk, instead of "it feels slow".
+- **Server requests are timed at both ends.** A start line with no matching end
+  line is the request that never came back — the one question a run that appears
+  frozen actually raises. A request the server never answers is logged as
+  `TIMED OUT` with the operation that was in flight.
+- **The lock phase is no longer invisible.** Between pressing Synchronize and the
+  first file, syncto locks every folder — a handful of round trips per folder on
+  a server, all on one serialized connection — and showed nothing at all while it
+  did. It now says `Locking folder 1 of 4…`, and the log names each one. A run
+  that was merely slow looked identical to one that was stuck.
+- **A refused lock file says so.** When a server answers a generic "Failure" to
+  the create — which SFTPv3 cannot distinguish from "already exists" — the log
+  now says the create was refused with no lock file present, and to check that
+  the account may write there. Comparison only reads; the lock file is the first
+  thing syncto ever writes, so a read-only destination passes the comparison and
+  fails here.
+
+### Notes
+
+- **No password ever reaches the file.** A folder field accepts
+  `sftp://user:secret@host`, and every line goes through a redaction pass first.
+- The log stops itself at 8 MB rather than filling a disk, and says where it
+  stopped. A profile it cannot write to disables it rather than failing the run.
+
 ## [0.6.2] — 2026-09-05
 
 Locks: a run that survives the network, and the files a dead run leaves behind.

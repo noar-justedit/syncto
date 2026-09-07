@@ -984,6 +984,50 @@ function renderMissingBadge(n) {
   el.textContent = n > 0 ? `${n} folder${n > 1 ? 's' : ''} missing — fix` : '';
 }
 
+// ── The diagnostic journal ─────────────────────────────────────────────────
+// Shown inside the settings so it can be read and copied without going near a
+// Finder window — the point is that somebody can send it in two clicks. The
+// Copy button is the one the error panels use, so what lands on the clipboard
+// is the whole tail, not the part that happens to be scrolled into view.
+function showLog(text, keepScroll) {
+  $('st-log-box').style.display = $('st-log').checked ? '' : 'none';
+  const body = $('st-log-text');
+  if (body.textContent === (text || '')) return;      // nothing new to draw
+  // Scrolled up to read something? A refresh every 1.5 s that yanks the view
+  // back to the bottom makes the panel unreadable while a run is going.
+  const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 24;
+  body.textContent = text || '';
+  if (!keepScroll || atBottom) body.scrollTop = body.scrollHeight;
+  setCopyBlock('st-log-text', String(text || '').split('\n'));
+}
+
+// While the settings are open the log is re-read on a timer, so a run that is
+// happening RIGHT NOW can be watched line by line. Stopped when the window
+// closes: there is no point reading a file nobody is looking at.
+let logWatchTimer = null;
+
+function startLogWatch() {
+  refreshLogUi();
+  clearInterval(logWatchTimer);
+  logWatchTimer = setInterval(() => {
+    if (!$('ov-settings').classList.contains('open')) return stopLogWatch();
+    if (!$('st-log').checked) return;
+    refreshLogUi(true);
+  }, 1500);
+}
+
+function stopLogWatch() { clearInterval(logWatchTimer); logWatchTimer = null; }
+
+async function refreshLogUi(keepScroll) {
+  try {
+    const li = await API.logInfo();
+    if (!li) return;
+    $('st-log').checked = !!li.enabled;
+    $('st-log-path').textContent = li.file || '';
+    showLog(li.text, keepScroll);
+  } catch (_) { /* the journal must never stop the window from opening */ }
+}
+
 // ── Lock files a previous run left behind ──────────────────────────────────
 // syncto locks each folder it writes to and clears the lock when it finishes.
 // A run that never finished — a crash, a cable pulled, a NAS that went to
@@ -1608,8 +1652,15 @@ function bind() {
     if (state.stats) askConfirm();
   });
   $('btn-verify').addEventListener('click', doVerify);
-  $('btn-settings').addEventListener('click', () => { jobToUi(); $('ov-settings').classList.add('open'); });
-  $('set-close').addEventListener('click', () => { uiToJob(); $('ov-settings').classList.remove('open'); persist(); });
+  $('btn-settings').addEventListener('click', () => {
+    jobToUi(); $('ov-settings').classList.add('open');
+    // The log is read from disk HERE, not once at launch. It was loaded at
+    // startup and never again, so the panel showed the three header lines for
+    // the rest of the session — and the Copy button copied that, while the
+    // real log on disk had the whole run in it.
+    startLogWatch();
+  });
+  $('set-close').addEventListener('click', () => { uiToJob(); $('ov-settings').classList.remove('open'); persist(); stopLogWatch(); });
 
   // Per-job filter modal: closing applies and re-compares if a result is shown.
   $('btn-filter').addEventListener('click', () => { jobToUi(); $('ov-filter').classList.add('open'); });
@@ -1661,6 +1712,32 @@ function bind() {
 
 
   $('st-rep-browse').addEventListener('click', async () => { const p = await API.browseFolder('Report folder'); if (p) $('st-rep-folder').value = p; });
+
+  // Diagnostics. The journal is written by the engine, not the window: what
+  // matters is what the filesystem and the server actually answered, not what
+  // the interface believed at the time.
+  $('st-log').addEventListener('change', async e => {
+    const res = await API.logSet(e.target.checked);
+    e.target.checked = !!(res && res.enabled);
+    showLog(res && res.text);
+  });
+  $('st-log-refresh').addEventListener('click', async () => {
+    const li = await API.logInfo();
+    showLog(li && li.text);
+  });
+  $('st-log-clear').addEventListener('click', async () => showLog(await API.logClear()));
+  $('st-log-save').addEventListener('click', async () => {
+    const b = $('st-log-save');
+    const res = await API.logSave();
+    if (res && res.canceled) return;
+    // Said on the button itself: a save dialog that closes with no sign of
+    // what happened leaves people clicking it again.
+    b.textContent = res && res.ok ? 'SAVED' : 'FAILED';
+    b.classList.toggle('done', !!(res && res.ok));
+    if (res && res.path) $('st-log-path').textContent = res.path;
+    setTimeout(() => { b.textContent = 'SAVE .TXT'; b.classList.remove('done'); }, 1800);
+  });
+  $('st-log-path').addEventListener('click', () => API.logReveal());
 
 
 
@@ -2900,6 +2977,7 @@ function installTooltips() {
   renderRecent();
   await loadNtfyUi();
   onPathChanged();
+  await refreshLogUi();
   // Marked, not raised: see showRelink.
   offerRelinkForJob(true);
   document.title = `syncto ${state.version}`;

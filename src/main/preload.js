@@ -32,6 +32,11 @@ const api = {
   openExternal : (u)    => ipcRenderer.invoke('open-external', u),
   openPath     : (p)    => ipcRenderer.invoke('open-path', p),
   copyText     : (t)    => ipcRenderer.invoke('copy-text', t),
+  logInfo      : ()     => ipcRenderer.invoke('log-info'),
+  logSet       : (on)   => ipcRenderer.invoke('log-set', on),
+  logClear     : ()     => ipcRenderer.invoke('log-clear'),
+  logReveal    : ()     => ipcRenderer.invoke('log-reveal'),
+  logSave      : ()     => ipcRenderer.invoke('log-save'),
   diskFree     : (p)    => ipcRenderer.invoke('disk-free', p),
   folderExists : (p)    => ipcRenderer.invoke('folder-exists', p),
 

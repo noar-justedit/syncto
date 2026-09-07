@@ -41,6 +41,9 @@ const READ_BLOCK = 512 * 1024;   // SFTP throughput is bounded by the window, no
 // the whole run hanging for ever, with no error and an unresponsive Abort.
 const OP_TIMEOUT_MS = 45000;
 
+const { log } = require('../log');
+const { PipelinedReader, PipelinedWriter } = require('./sftp-pipe');
+
 // NO backslash translation. These are POSIX paths: "a\b.txt" is a perfectly
 // legal file name on a Linux server, and turning it into "a/b.txt" made syncto
 // look for a directory that does not exist.
@@ -61,6 +64,7 @@ class SftpFs {
     this._chain = Promise.resolve();
     this._streams = new Set();   // transfers in flight, so a drop can kill them
     this.dead = null;            // the error that killed this connection
+    this.closing = false;        // a disconnection we asked for is not a fault
   }
 
   deviceKey() { return `sftp:${this.opts.username}@${this.opts.host}:${this.opts.port || 22}`; }
@@ -81,6 +85,8 @@ class SftpFs {
   _die(err) {
     if (this.dead) return;
     this.dead = err instanceof Error ? err : new Error(String(err || 'The SFTP connection was lost.'));
+    if (this.closing) log.info('sftp', 'connection closed');
+    else log.error('sftp', 'connection lost', this.dead.message);
     for (const s of this._streams) { try { s.destroy(this.dead); } catch (_) {} }
     this._streams.clear();
     try { if (this.conn) this.conn.end(); } catch (_) {}
@@ -103,22 +109,25 @@ class SftpFs {
   // Every request also carries a deadline. Without one, a single request
   // issued after the channel died blocked this queue — and therefore the whole
   // run — permanently, because its callback was never going to arrive.
-  _q(fn) {
+  _q(label, fn) {
+    if (typeof label === 'function') { fn = label; label = 'request'; }
     const guarded = () => {
       if (this.dead) return Promise.reject(this.dead);
       if (!this.sftp) return Promise.reject(new Error('The SFTP connection is not open.'));
+      const t = log.begin('sftp', label);
       return new Promise((resolve, reject) => {
         let done = false;
         const timer = setTimeout(() => {
           if (done) return;
           done = true;
           const err = new Error(`The server did not answer within ${Math.round(OP_TIMEOUT_MS / 1000)} s.`);
+          log.error('sftp', `TIMED OUT after ${Math.round(OP_TIMEOUT_MS / 1000)} s: ${label}`);
           this._die(err);
           reject(err);
         }, OP_TIMEOUT_MS);
         Promise.resolve().then(fn).then(
-          v => { if (!done) { done = true; clearTimeout(timer); resolve(v); } },
-          e => { if (!done) { done = true; clearTimeout(timer); reject(e); } });
+          v => { if (!done) { done = true; clearTimeout(timer); t.end(); resolve(v); } },
+          e => { if (!done) { done = true; clearTimeout(timer); t.fail(e); reject(e); } });
       });
     };
     const run = this._chain.then(guarded, guarded);
@@ -151,6 +160,7 @@ class SftpFs {
       const bail = err => {
         if (settled) return;
         settled = true;
+        log.error('sftp', 'connection failed', (err && (err.level || err.code || err.message)) || err);
         try { conn.end(); } catch (_) {}
         this.conn = null; this.sftp = null;
         // Do NOT keep the rejected promise: it would be replayed as a cached
@@ -159,12 +169,15 @@ class SftpFs {
         reject(err);
       };
 
+      log.info('sftp', `connecting to ${this.opts.username}@${this.opts.host}:${this.opts.port || 22}` +
+        (this.opts.privateKey ? ' (private key)' : this.opts.password ? ' (password)' : ' (no credential)'));
       conn.on('ready', () => {
         conn.sftp((err, sftp) => {
           if (err) return bail(err);
           if (settled) { try { conn.end(); } catch (_) {} return; }
           settled = true;
           this.conn = conn; this.sftp = sftp; this.dead = null;
+          log.info('sftp', 'connected');
           // From here on, losing the channel is a run-stopping error rather
           // than a silent freeze.
           const lost = e => this._die(e || new Error('The SFTP connection was closed by the server.'));
@@ -184,6 +197,12 @@ class SftpFs {
   }
 
   async close() {
+    // Ending the connection fires the same 'close' handler a dropped one does,
+    // so a deliberate disconnection was logged as "connection lost" at ERROR
+    // level. In a log somebody sends for support, a red line that means nothing
+    // is worse than no line: it sends the reader hunting for a fault that was
+    // never there.
+    this.closing = true;
     for (const s of this._streams) { try { s.destroy(); } catch (_) {} }
     this._streams.clear();
     try { if (this.conn) this.conn.end(); } catch (_) {}
@@ -207,7 +226,7 @@ class SftpFs {
   // a permission error must surface, not masquerade as an absent file (the
   // comparison would take "absent" at its word and schedule deletions).
   async stat(p) {
-    return this._q(() => new Promise((resolve, reject) => {
+    return this._q(`stat ${p}`, () => new Promise((resolve, reject) => {
       this.sftp.lstat(normalize(p), (err, st) => {
         if (!err) return resolve(this._mapStat(st));
         if (err.code === 2 || /no such file/i.test(err.message || '')) return resolve(null);
@@ -220,7 +239,7 @@ class SftpFs {
 
   async readdir(p) {
     const dir = normalize(p);
-    const list = await this._q(() => new Promise((resolve, reject) => {
+    const list = await this._q(`readdir ${p}`, () => new Promise((resolve, reject) => {
       this.sftp.readdir(dir, (err, l) => err ? reject(err) : resolve(l));
     }));
     return list
@@ -235,38 +254,41 @@ class SftpFs {
   // directory, so the folder browser opens where the user lives instead of at
   // the root of an archive server with two hundred entries.
   async realpath(p) {
-    return this._q(() => new Promise((resolve, reject) => {
+    return this._q(`realpath ${p}`, () => new Promise((resolve, reject) => {
       this.sftp.realpath(String(p == null ? '.' : p), (err, t) => err ? reject(err) : resolve(t));
     }));
   }
 
   async readlink(p) {
-    return this._q(() => new Promise((resolve, reject) => {
+    return this._q(`readlink ${p}`, () => new Promise((resolve, reject) => {
       this.sftp.readlink(normalize(p), (err, t) => err ? reject(err) : resolve(t));
     }));
   }
 
   async symlink(target, p) {
-    return this._q(() => new Promise((resolve, reject) => {
+    return this._q(`symlink ${p}`, () => new Promise((resolve, reject) => {
       this.sftp.symlink(target, normalize(p), err => err ? reject(err) : resolve());
     }));
   }
 
   // Streams bypass the queue on purpose: they hold a channel for their whole
   // lifetime, and the sync engine never runs two transfers on one connection.
+  // Both keep many requests in flight — see fs/sftp-pipe.js. ssh2's own
+  // streams issue one and wait, which turns the round trip into the speed
+  // limit: 1.5 MB/s at 22 ms, 0.3 MB/s at 100 ms, the same code both times.
   createReadStream(p) {
     if (this.dead) throw this.dead;
-    return this._track(this.sftp.createReadStream(normalize(p), { highWaterMark: READ_BLOCK }));
+    return this._track(new PipelinedReader(this, normalize(p)));
   }
 
   createWriteStream(p) {
     if (this.dead) throw this.dead;
-    return this._track(this.sftp.createWriteStream(normalize(p), { highWaterMark: READ_BLOCK }));
+    return this._track(new PipelinedWriter(this, normalize(p)));
   }
 
   // SSH_FXF_EXCL: the SFTP protocol has the exclusive-create flag natively.
   async writeExclusive(p, buf) {
-    return this._q(() => new Promise((resolve, reject) => {
+    return this._q(`create-exclusive ${p}`, () => new Promise((resolve, reject) => {
       const ws = this.sftp.createWriteStream(normalize(p), { flags: 'wx' });
       ws.on('error', err => {
         // Servers report the clash in various ways; normalize it for the caller.
@@ -279,7 +301,7 @@ class SftpFs {
   }
 
   async appendByte(p, byte) {
-    return this._q(() => new Promise((resolve, reject) => {
+    return this._q(`append ${p}`, () => new Promise((resolve, reject) => {
       const ws = this.sftp.createWriteStream(normalize(p), { flags: 'a' });
       ws.on('error', reject);
       ws.on('close', resolve);
@@ -296,7 +318,7 @@ class SftpFs {
       const st = await this.stat(cur);
       if (st) continue;
       try {
-        await this._q(() => new Promise((resolve, reject) => {
+        await this._q(`mkdir ${cur}`, () => new Promise((resolve, reject) => {
           this.sftp.mkdir(cur, err => err ? reject(err) : resolve());
         }));
       } catch (e) {
@@ -306,19 +328,19 @@ class SftpFs {
   }
 
   async unlink(p) {
-    return this._q(() => new Promise((resolve, reject) => {
+    return this._q(`unlink ${p}`, () => new Promise((resolve, reject) => {
       this.sftp.unlink(normalize(p), err => err ? reject(err) : resolve());
     }));
   }
 
   async rmdir(p) {
-    return this._q(() => new Promise((resolve, reject) => {
+    return this._q(`rmdir ${p}`, () => new Promise((resolve, reject) => {
       this.sftp.rmdir(normalize(p), err => err ? reject(err) : resolve());
     }));
   }
 
   _rawRename(src, dst) {
-    return this._q(() => new Promise((resolve, reject) => {
+    return this._q(`rename ${src} -> ${dst}`, () => new Promise((resolve, reject) => {
       this.sftp.rename(src, dst, err => err ? reject(err) : resolve());
     }));
   }
@@ -360,14 +382,14 @@ class SftpFs {
 
   async setMTime(p, mtimeMs) {
     const t = Math.floor(mtimeMs / 1000);
-    return this._q(() => new Promise((resolve, reject) => {
+    return this._q(`utimes ${p}`, () => new Promise((resolve, reject) => {
       this.sftp.utimes(normalize(p), t, t, err => err ? reject(err) : resolve());
     }));
   }
 
   async chmod(p, mode) {
     try {
-      await this._q(() => new Promise((resolve, reject) => {
+      await this._q(`chmod ${p}`, () => new Promise((resolve, reject) => {
         this.sftp.chmod(normalize(p), mode, err => err ? reject(err) : resolve());
       }));
     } catch (_) {}

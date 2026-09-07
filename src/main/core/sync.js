@@ -36,6 +36,7 @@
 
 const { OP, TEMP_EXT, OLD_EXT, ALWAYS_SKIP, OS_LITTER_FOLDERS, isSyncToInternal } = require('./compare');
 const { createHasher, hashStream, algoFor } = require('./hash');
+const { log } = require('../log');
 const { Versioner, runTimestamp, streamCopy } = require('./versioning');
 
 const RETRY_DEFAULT_DELAY = 5000;
@@ -73,29 +74,68 @@ function copyStream(srcFs, srcPath, dstFs, dstPath, hasher, onBytes, token) {
     if (hasher) hasher.init();
     const rs = srcFs.createReadStream(srcPath);
     const ws = dstFs.createWriteStream(dstPath);
-    let bytes = 0, settled = false;
+    let bytes = 0, settled = false, held = false;
 
     const fail = err => {
       if (settled) return;
       settled = true;
+      if (pauseTimer) { clearInterval(pauseTimer); pauseTimer = null; }
       try { rs.destroy(); } catch (_) {}
       try { ws.destroy(); } catch (_) {}
       reject(err);
     };
 
+    // PAUSE has to work DURING a file, not only between two. The gate the copy
+    // loop calls sits between files, so on a server at 1.5 MB/s a single 17 MB
+    // track meant eleven seconds of a button that did nothing — which is
+    // indistinguishable from a button that is not wired at all.
+    let pauseTimer = null;
+    const checkPause = () => {
+      if (settled) return;
+      if (token && token.cancelled) return fail(new Error('Cancelled'));
+      if (!token || !token.paused) {
+        if (held) { held = false; rs.resume(); }
+        clearInterval(pauseTimer); pauseTimer = null;
+      }
+    };
+
     rs.on('error', fail);
     ws.on('error', fail);
+    // A single 6 GB clip over a slow link takes hours, and until it finished the
+    // log said nothing at all about it — six minutes of lock heartbeats and
+    // nothing else reads exactly like a freeze. A line every 15 seconds says
+    // how far along it is and how fast, so a slow transfer is distinguishable
+    // from a stuck one at a glance.
+    const started = Date.now();
+    let lastTick = started;
     rs.on('data', chunk => {
       if (token && token.cancelled) return fail(new Error('Cancelled'));
+      if (token && token.paused && !held) {
+        held = true;
+        rs.pause();
+        if (!pauseTimer) pauseTimer = setInterval(checkPause, 150);
+      }
       bytes += chunk.length;
       if (hasher) { try { hasher.update(chunk); } catch (e) { return fail(e); } }
       if (onBytes) onBytes(chunk.length);
-      if (!ws.write(chunk)) { rs.pause(); ws.once('drain', () => rs.resume()); }
+      const t = Date.now();
+      if (t - lastTick >= 15000) {
+        lastTick = t;
+        const secs = (t - started) / 1000;
+        log.debug('copy', `… ${dstPath}`,
+          `${bytes} B in ${Math.round(secs)} s · ${(bytes / 1048576 / secs).toFixed(2)} MB/s`);
+      }
+      // Back-pressure. `held` has to be honoured here too: the drain handler
+      // used to resume unconditionally, so a paused transfer restarted itself
+      // the moment the writer emptied — 29 MB went through a "pause" in the
+      // test that caught it.
+      if (!ws.write(chunk)) { rs.pause(); ws.once('drain', () => { if (!held) rs.resume(); }); }
     });
     rs.on('end', () => ws.end());
     ws.on('finish', () => {
       if (settled) return;
       settled = true;
+      if (pauseTimer) { clearInterval(pauseTimer); pauseTimer = null; }
       resolve({ bytes, digest: hasher ? hasher.digest() : null });
     });
   });
@@ -424,6 +464,8 @@ class SyncRunner {
     this.current = n.rel;
     this.emit(true);
 
+    const t0 = Date.now();
+    log.debug('copy', `start ${n.rel} → ${to}`);
     const srcStat = await srcFs.stat(src);
     if (!srcStat) throw new Error('Source vanished before it could be copied.');
 
@@ -599,6 +641,14 @@ class SyncRunner {
       // run and bounced the file back and forth for ever.
       if (st) { dstId = st.id; if (!mtimeKept) dstMtime = st.mtime; }
     } catch (_) {}
+
+    // The line that turns "it feels slow" into a number. Bytes, milliseconds
+    // and the rate they work out to, per file — which is what separates a slow
+    // link from a slow server from a slow disk on this side.
+    const ms = Date.now() - t0;
+    log.debug('copy', `${n.rel} \u2192 ${to}`,
+      `${copied.bytes} B in ${ms} ms \u00b7 ${
+        ms > 0 ? (copied.bytes / 1048576 / (ms / 1000)).toFixed(1) : '\u221e'} MB/s`);
 
     return {
       bytes: copied.bytes, hash: copied.digest, algo,
@@ -911,11 +961,15 @@ class SyncRunner {
       this.phase = 'verify';
       this.current = '';
       this.emit(true, 'Verifying…');
+      log.info('verify', `reading back ${this.toVerify.length} file(s)`);
+      const vStart = Date.now();
+      let vBytes = 0;
       for (const item of this.toVerify) {
         await this.gate();
         this.current = item.rel;
         this.emit(true);
         const fsx = this.side(item.side).fs;
+        const vT0 = Date.now();
         try {
           const flushed = await fsx.flush(item.path);
           if (flushed === false && !this._flushWarned) {
@@ -928,6 +982,13 @@ class SyncRunner {
             b => { this.done.workBytes += b; this.meter.add(b); this.emit(false); }, this.token);
           if (back !== item.digest) throw new Error(`Checksum mismatch (${item.algo}).`);
           item.ok = true;
+          {
+            const ms = Date.now() - vT0;
+            vBytes += item.size || 0;
+            log.debug('verify', item.rel,
+              `${item.size || 0} B in ${ms} ms \u00b7 ${
+                ms > 0 ? ((item.size || 0) / 1048576 / (ms / 1000)).toFixed(1) : '\u221e'} MB/s`);
+          }
           if (this.cfg.writeChecksumList) {
             this.checksums[item.side].push({ rel: item.listRel || item.rel, hash: item.digest, size: item.size });
           }
@@ -947,7 +1008,13 @@ class SyncRunner {
       }
       // Not back to 'copy': what follows writes nothing, and the interface
       // must not flash green again as if a new file were being transferred.
+      {
+        const ms = Date.now() - vStart;
+        log.info('verify', `read back ${vBytes} B in ${Math.round(ms / 1000)} s \u00b7 ${
+          ms > 0 ? (vBytes / 1048576 / (ms / 1000)).toFixed(1) : '\u221e'} MB/s`);
+      }
       this.phase = 'cleanup';
+      log.info('sync', 'cleanup: removing emptied folders');
     }
 
     // 5. delete folders, deepest first
@@ -970,7 +1037,9 @@ class SyncRunner {
     //    half-written copies, never user data, and the comparison hides them —
     //    so nothing else would ever remove them. We hold the lock on both
     //    folders here, so no other machine is writing them right now.
+    log.info('sync', 'cleanup: sweeping leftovers from interrupted runs');
     await this.sweepLeftovers();
+    log.info('sync', 'cleanup: done');
 
     // Prune stale revisions once everything else is done.
     for (const side of ['left', 'right']) {

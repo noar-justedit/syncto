@@ -90,6 +90,7 @@ function checkForUpdate() {
 }
 
 const { MultiSession, verifyFolder, checkJobPaths, clearStaleLocks } = require('./core/session');
+const { log } = require('./log');
 const { FsPool } = require('./fs/afs');
 const { Prefs, defaultJob, loadJob, saveJob, jobNameFromPath, JOB_EXT, credentialMap,
         pushRecent: addRecent, removeRecent } = require('./config');
@@ -256,6 +257,26 @@ function buildMenu() {
 app.whenReady().then(() => {
   prefs = new Prefs(app.getPath('userData'));
   prefs.load();
+
+  // The journal, as early as possible: everything before this point is lost,
+  // so nothing important happens before it.
+  log.open(app.getPath('userData'), !!prefs.data.log);
+  log.header({
+    version : appVersion(),
+    platform: process.platform,
+    arch    : process.arch,
+    electron: process.versions.electron,
+    node    : process.versions.node,
+    userData: app.getPath('userData'),
+  });
+  logHeader = () => ({
+    version : appVersion(),
+    platform: process.platform,
+    arch    : process.arch,
+    electron: process.versions.electron,
+    node    : process.versions.node,
+    userData: app.getPath('userData'),
+  });
   // lastJobPath was written on every open and save and read by nobody, so a
   // restart detached the settings from their file: the title said "not saved
   // yet" and Ctrl+S asked for a name again — which is exactly how an existing
@@ -460,6 +481,47 @@ ipcMain.handle('ntfy-run', async (_, res, jobName) => {
 ipcMain.handle('reveal-path',  (_, p) => { try { shell.showItemInFolder(p); } catch (_) {} });
 ipcMain.handle('open-path',    (_, p) => shell.openPath(p));
 ipcMain.handle('open-external',(_, u) => openExternalSafely(u));
+
+// ── The diagnostic journal ─────────────────────────────────────────────────
+let logHeader = () => ({});
+ipcMain.handle('log-info', () => ({
+  file   : log.path(),
+  enabled: !!prefs.data.log,
+  text   : log.read(),
+}));
+ipcMain.handle('log-set', (_, on) => {
+  prefs.data.log = !!on;
+  prefs.save();
+  // Turning it on starts a fresh file: what gets sent is the reproduction the
+  // user just did, not whatever the app happened to be doing before.
+  log.setEnabled(!!on, logHeader());
+  return { enabled: log.enabled, text: log.read() };
+});
+ipcMain.handle('log-clear', () => { log.clear(); if (log.enabled) log.header(logHeader()); return log.read(); });
+ipcMain.handle('log-reveal', () => { try { shell.showItemInFolder(log.path()); } catch (_) {} });
+
+// Saved as plain .txt, not the .log file itself: the point is a file somebody
+// can attach to a message without their mail client arguing about it.
+ipcMain.handle('log-save', async () => {
+  const text = log.read();
+  if (!text) return { ok: false, error: 'The log is empty.' };
+  const d = new Date();
+  const p2 = n => String(n).padStart(2, '0');
+  const name = `syncto-log-${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}` +
+               `-${p2(d.getHours())}${p2(d.getMinutes())}.txt`;
+  const res = await dialog.showSaveDialog(win, {
+    title: 'Save the log',
+    defaultPath: path.join(app.getPath('documents'), name),
+    filters: [{ name: 'Text', extensions: ['txt'] }],
+  });
+  if (res.canceled || !res.filePath) return { ok: false, canceled: true };
+  try {
+    fs.writeFileSync(res.filePath, text, 'utf8');
+    return { ok: true, path: res.filePath };
+  } catch (err) {
+    return { ok: false, error: err.message || String(err) };
+  }
+});
 
 // Electron's own clipboard, deliberately, and not navigator.clipboard: the
 // renderer is loaded from file:// under a strict CSP, which is not a secure

@@ -570,6 +570,15 @@ font-size:12.5px;color:var(--text);font-family:var(--mono);outline:none;}
 padding:8px 10px;font-size:12.5px;color:var(--text);font-family:var(--mono);outline:none;
 min-height:74px;resize:vertical;}
 .set-hint{font-size:11.5px;color:var(--text3);line-height:1.55;margin:2px 0 12px 162px;}
+.log-box{background:var(--bg3);border:1px solid var(--border);border-radius:9px;
+padding:10px 12px;margin:0 0 4px;}
+.log-text{max-height:300px;overflow:auto;margin:0;font-family:var(--mono);font-size:11px;
+line-height:1.5;color:var(--text2);white-space:pre;background:var(--bg);
+border:1px solid var(--border);border-radius:6px;padding:9px 10px;}
+.log-text:empty::before{content:'Nothing recorded yet.';color:var(--text3);}
+.log-path{margin-top:8px;font-family:var(--mono);font-size:10.5px;color:var(--text3);
+overflow-wrap:anywhere;cursor:pointer;}
+.log-path:hover{color:var(--text2);}
 .set-hint code{font-family:var(--mono);color:var(--text2);background:var(--bg3);
 padding:1px 4px;border-radius:3px;}
 .switch{position:relative;display:inline-block;width:28px;height:16px;flex-shrink:0;}
@@ -1243,6 +1252,27 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
         <input type="text" id="st-rep-folder" placeholder="empty → Documents/syncto reports">
         <button class="br-btn" id="st-rep-browse">Browse</button></div>
       <div class="set-hint">Reports are kept outside the synchronized folders on purpose — a report written inside the target would be treated as a stray file and removed by the next mirror run.</div>
+    </div>
+
+    <div class="set-section">
+      <div class="set-sec-title">Diagnostics</div>
+      <div class="set-row"><label>Write a log</label>
+        <label class="switch"><input type="checkbox" id="st-log"><span class="slider"></span></label></div>
+      <div class="set-hint">Records every step of a comparison or a run, and every
+        request sent to a server, with how long each one took. Off by default. The
+        log is emptied each time syncto starts — turn it on, reproduce the problem,
+        then copy it below.</div>
+      <div class="log-box" id="st-log-box" style="display:none">
+        <div class="err-title" style="color:var(--text3);margin-bottom:7px"><span>Log</span>
+          <span style="display:flex;gap:6px">
+            <button class="err-copy" data-copy="st-log-text">COPY</button>
+            <button class="err-copy" id="st-log-save">SAVE .TXT</button>
+            <button class="err-copy" id="st-log-refresh">REFRESH</button>
+            <button class="err-copy" id="st-log-clear">CLEAR</button>
+          </span></div>
+        <pre id="st-log-text" class="log-text"></pre>
+        <div class="log-path" id="st-log-path"></div>
+      </div>
     </div>
 
     <div class="set-section" id="custom-section" style="display:none">

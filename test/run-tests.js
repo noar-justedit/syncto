@@ -2479,8 +2479,10 @@ async function testBundlesAndCopyLog() {
     const main   = fs.readFileSync(path.join(__dirname, '..', 'src/main/main.js'), 'utf8');
 
     const buttons = [...html.matchAll(/class="err-copy" data-copy="([^"]+)"/g)].map(m => m[1]);
-    eq(buttons.sort(), ['sum-errors-body', 'sum-notes-body', 'vf-bad-body'],
-       'every error panel carries a copy button');
+    // The diagnostic journal reuses the same button — it is the panel people
+    // are most often asked to copy.
+    eq(buttons.sort(), ['st-log-text', 'sum-errors-body', 'sum-notes-body', 'vf-bad-body'],
+       'every panel that has to be copied carries the button');
     for (const id of buttons) {
       ok(html.includes(`id="${id}"`), `the button for ${id} points at an element that exists`);
       ok(new RegExp(`setCopyBlock\\('${id}'`).test(appjs), `${id} is given something to copy`);
@@ -3185,6 +3187,335 @@ async function testLockTolerance() {
   }
 }
 
+// ══ 34. The diagnostic journal (0.6.3) ════════════════════════════════════
+// syncto wrote nothing at all — no console output, no file. A user reporting
+// "I press Synchronize and nothing happens" had nothing to send and there was
+// nothing to read. What matters about this thing is what it must NOT do: leak
+// a password, grow for ever, or take a run down with it.
+function testLog() {
+  console.log('\n\n34. The diagnostic journal (0.6.3)');
+
+  const { Logger, redact, MAX_BYTES } = require('../src/main/log');
+
+  // (a) Off by default, and silent when off.
+  {
+    const { dir } = scratch();
+    const l = new Logger().open(dir, false);
+    l.info('sync', 'this must not be written');
+    eq(l.enabled, false, 'a logger opened with the setting off stays off');
+    eq(l.read(), '', 'and writes nothing');
+    ok(!fs.existsSync(path.join(dir, 'logs', 'syncto.log')),
+       'the file is not even created');
+    const { defaultPrefs } = require('../src/main/config');
+    eq(defaultPrefs().log, false, 'the preference itself is off out of the box');
+  }
+
+  // (b) One session, one file: it is emptied at every launch.
+  {
+    const { dir } = scratch();
+    new Logger().open(dir, true).info('sync', 'run of yesterday');
+    const again = new Logger().open(dir, true);
+    eq(again.read(), '', 'the next launch starts on a clean page');
+    again.info('sync', 'run of today');
+    ok(/run of today/.test(again.read()), 'and records this session');
+    ok(!/run of yesterday/.test(again.read()), 'with nothing left of the last one');
+  }
+
+  // (c) Turning it on mid-session also starts fresh, so what gets sent is the
+  //     reproduction the user just did and not what came before.
+  {
+    const { dir } = scratch();
+    const l = new Logger().open(dir, true);
+    l.info('sync', 'before');
+    l.setEnabled(false);
+    l.info('sync', 'while off');
+    ok(!/while off/.test(l.read()), 'nothing is written while it is off');
+    l.setEnabled(true, { version: '0.6.3', platform: 'darwin', arch: 'arm64',
+                         electron: '43', node: '22', userData: dir });
+    ok(!/before/.test(l.read()), 'turning it back on clears what came before');
+    ok(/syncto 0\.6\.3 · darwin arm64/.test(l.read()), 'and writes a fresh header');
+    l.info('sync', 'after');
+    ok(/after/.test(l.read()), 'then records normally');
+  }
+
+  // (d) 🔴 NEVER A PASSWORD. A folder field accepts "sftp://user:secret@host",
+  //     and a log people send by email is the last place for it.
+  {
+    eq(redact('sftp://noar:hunter2@nas.local/vol1/RUSHES'),
+       'sftp://noar@nas.local/vol1/RUSHES', 'a password in a URL is removed');
+    eq(redact('failed on sftp://u:p@h/x — Permission denied'),
+       'failed on sftp://u@h/x — Permission denied', 'including inside a sentence');
+    eq(redact('ssh://a:b@c/d and sftp://e:f@g/h'),
+       'ssh://a@c/d and sftp://e@g/h', 'every one of them');
+    eq(redact('/Volumes/NAS/a:b/file.mov'), '/Volumes/NAS/a:b/file.mov',
+       'an ordinary path with a colon is left alone');
+    eq(redact(null), '', 'and nothing at all is not a crash');
+
+    const { dir } = scratch();
+    const l = new Logger().open(dir, true);
+    l.info('sync', 'pair 1: sftp://noar:hunter2@nas/vol → /local');
+    l.error('sftp', 'boom', 'sftp://noar:hunter2@nas/vol');
+    ok(!/hunter2/.test(l.read()), 'nothing that reaches the file carries the password');
+    ok(/noar@nas/.test(l.read()), 'while the rest of the address is still readable');
+  }
+
+  // (e) It stops at a ceiling instead of filling the disk, and says so.
+  {
+    const { dir } = scratch();
+    const l = new Logger().open(dir, true);
+    const big = 'x'.repeat(64 * 1024);
+    for (let i = 0; i < Math.ceil(MAX_BYTES / (64 * 1024)) + 2; i++) l.info('t', big);
+    ok(l.capped, 'it stops once the session has produced enough');
+    const st = fs.statSync(path.join(dir, 'logs', 'syncto.log'));
+    ok(st.size < MAX_BYTES * 1.1, 'the file does not run away');
+    ok(/stopped here/.test(l.read()), 'and the file says why it ends there');
+  }
+
+  // (f) A log that cannot be written must never take the run with it.
+  {
+    // A file where a directory is expected: mkdir under it is ENOTDIR on every
+    // platform, which is the cleanest way to make opening the log fail.
+    const { dir } = scratch();
+    const blocked = path.join(dir, 'not-a-folder');
+    fs.writeFileSync(blocked, 'x');
+    const l = new Logger().open(blocked, true);
+    eq(l.enabled, false, 'an unwritable profile simply disables it');
+    l.info('sync', 'still fine');           // must not throw
+    eq(l.read(), '', 'and reading it back is empty rather than an error');
+    ok(true, 'nothing threw');
+  }
+
+  // (g) begin/end is what answers "which request never came back": a start
+  //     line with no matching end line is the one that hung.
+  {
+    const { dir } = scratch();
+    const l = new Logger().open(dir, true);
+    const t = l.begin('sftp', 'stat /vol/x');
+    t.end();
+    const hung = l.begin('sftp', 'read /vol/huge.mov');   // deliberately never ended
+    ok(/→ stat \/vol\/x/.test(l.read()), 'a request is logged when it starts');
+    ok(/← stat \/vol\/x/.test(l.read()), 'and again when it comes back');
+    ok(/→ read \/vol\/huge\.mov/.test(l.read()), 'the one still in flight has its start line');
+    ok(!/← read \/vol\/huge\.mov/.test(l.read()), 'and no end line — which is the tell');
+    l.begin('sftp', 'unlink /vol/y').fail(Object.assign(new Error('Permission denied'), { code: 'EACCES' }));
+    ok(/failed: unlink \/vol\/y/.test(l.read()), 'a failure names the operation');
+    ok(/EACCES/.test(l.read()), 'with the code the server gave');
+    ok(hung, 'the timer object exists');
+  }
+
+  // (i) The three ways a run could sit there doing nothing while the buttons
+  //     did nothing either. All reported from a real transfer to a NAS.
+  {
+    const sync = fs.readFileSync(path.join(__dirname, '..', 'src/main/core/sync.js'), 'utf8');
+    const lock = fs.readFileSync(path.join(__dirname, '..', 'src/main/core/lock.js'), 'utf8');
+    const sess = fs.readFileSync(path.join(__dirname, '..', 'src/main/core/session.js'), 'utf8');
+
+    // PAUSE only worked BETWEEN files. On a server at 1.5 MB/s one 17 MB track
+    // is eleven seconds of a button that appears dead.
+    ok(/token\.paused && !held/.test(sync), 'pause is honoured during a file, not only between two');
+    ok(/rs\.pause\(\);/.test(sync) && /held = false; rs\.resume\(\);/.test(sync),
+       'the read is actually held and resumed');
+
+    // readLockInfo is a RAW stream: the 45 s deadline on queued requests does
+    // not cover it, and release() runs in a finally — so a read that never
+    // delivered left the whole run unsettled at 100%.
+    ok(/READ_LOCK_TIMEOUT_MS/.test(lock), 'reading a lock file cannot wait for ever');
+    ok(/\} finally \{[\s\S]{0,600}?await locks\.release\(\);/.test(sess),
+       'the locks are still released whatever happened');
+    ok(/Releasing the folder locks/.test(sess), 'and the window says so instead of a silent 100%');
+    ok(/cleanup: sweeping leftovers/.test(sync) && /cleanup: done/.test(sync),
+       'the finishing phase leaves a trail in the log');
+  }
+
+  // (h) The wiring: a switch in the settings, and the log readable and
+  //     copyable from that window rather than from a Finder window.
+  {
+    const html  = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/index.html'), 'utf8');
+    const appjs = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.js'), 'utf8');
+    const pre   = fs.readFileSync(path.join(__dirname, '..', 'src/main/preload.js'), 'utf8');
+    const main  = fs.readFileSync(path.join(__dirname, '..', 'src/main/main.js'), 'utf8');
+    ok(html.includes('id="st-log"'), 'the settings carry the switch');
+    ok(html.includes('id="st-log-text"'), 'and show the log');
+    ok(/data-copy="st-log-text"/.test(html), 'with the copy button the error panels use');
+    ok(/ipcMain\.handle\('log-set'/.test(main) && /ipcMain\.handle\('log-info'/.test(main),
+       'main answers on both channels');
+    ok(/logSet\s*:.*invoke\('log-set'/.test(pre), 'preload exposes the switch');
+    ok(/log\.open\(app\.getPath\('userData'\), !!prefs\.data\.log\)/.test(main),
+       'and the launch opens it according to the preference');
+    ok(/setCopyBlock\('st-log-text'/.test(appjs), 'the whole log is what gets copied');
+    // 🔴 The panel was filled once at launch and never again: it showed the
+    //    three header lines for the rest of the session while the file on disk
+    //    held the whole run, and Copy copied that stale snapshot.
+    ok(/startLogWatch\(\);/.test(appjs), 'opening the settings re-reads the log');
+    ok(/logWatchTimer = setInterval/.test(appjs),
+       'and it keeps re-reading, so a run in progress can be watched');
+    ok(/stopLogWatch\(\)/.test(appjs), 'stopped when the window closes');
+    ok(/const atBottom = /.test(appjs),
+       'a refresh does not yank the view back down while something is being read');
+    ok(html.includes('id="st-log-save"') && /ipcMain\.handle\('log-save'/.test(main),
+       'and it can be saved as a .txt to attach to a message');
+    // The engine writes it, not the window: what matters is what the server
+    // actually answered, not what the interface believed.
+    const sftp = fs.readFileSync(path.join(__dirname, '..', 'src/main/fs/sftp.js'), 'utf8');
+    ok(/log\.begin\('sftp'/.test(sftp), 'every server request is timed');
+    ok(/TIMED OUT/.test(sftp), 'and a request that never answers says so');
+    // A disconnection we asked for fires the same handler a dropped one does.
+    // Logged at ERROR, it sent the reader of a support log hunting for a fault
+    // that was never there.
+    ok(/this\.closing = true;/.test(sftp) && /if \(this\.closing\) log\.info/.test(sftp),
+       'a deliberate disconnection is not reported as an error');
+  }
+}
+
+// ══ 35. SFTP transfers, against a real server (0.6.5) ═════════════════════
+// Two users measured 1.5 MB/s at 22 ms of latency and 0.3 MB/s at 100 ms —
+// the same code, the same chunk, the ratio of their pings. ssh2's SFTP streams
+// issue ONE request and wait for its answer: SFTP.write() sends each piece of
+// a large buffer from the callback of the piece before it, and ReadStream does
+// the same. Throughput was therefore one chunk ÷ one round trip, which is
+// invisible on a LAN and ruinous on a real link.
+//
+// This section runs against a real SFTP server, in this process, serving a real
+// folder with a delay on every reply — because a bound that only shows up under
+// latency cannot be tested without latency.
+async function testSftpTransfer() {
+  console.log('\n\n35. SFTP transfers against a real server (0.6.5)');
+
+  const { startSftpServer } = require('./sftp-server');
+  const { SftpFs } = require('../src/main/fs/sftp');
+  const { XFER_CHUNK, XFER_CONCURRENCY } = require('../src/main/fs/sftp-pipe');
+  const { NativeFs } = require('../src/main/fs/native');
+  const { copyStream } = require('../src/main/core/sync');
+  const { createHasher, hashStream } = require('../src/main/core/hash');
+  const crypto = require('crypto');
+  const nfs = new NativeFs();
+  const sha = f => crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
+
+  // 8 ms per reply: enough for the difference to be unmistakable, small enough
+  // that the suite stays under a second here.
+  const LATENCY = 8;
+  const { dir } = scratch();
+  const remote = path.join(dir, 'server');
+  fs.mkdirSync(remote, { recursive: true });
+  const srv = await startSftpServer({ root: remote, latencyMs: LATENCY });
+  const sftp = new SftpFs({
+    host: srv.host, port: srv.port, username: srv.username, password: srv.password,
+  });
+
+  try {
+    await sftp.connect();
+    ok(true, 'the test server accepts a connection');
+
+    // Content that is different everywhere: a block delivered out of order, or
+    // one delivered twice, changes the hash. All-zeroes would hide both.
+    const SIZE = 2 * 1024 * 1024;
+    const buf = Buffer.alloc(SIZE);
+    for (let i = 0; i < SIZE; i += 4) buf.writeUInt32LE(i >>> 2, i);
+    const src = path.join(dir, 'clip.braw');
+    fs.writeFileSync(src, buf);
+
+    // (a) Upload: the bytes that arrive are the bytes that left.
+    {
+      const hasher = await createHasher('xxh64');
+      let seen = 0;
+      const res = await copyStream(nfs, src, sftp, '/clip.braw', hasher, b => { seen += b; }, {});
+      eq(res.bytes, SIZE, 'every byte was sent');
+      eq(seen, SIZE, 'and every byte was reported to the progress meter');
+      eq(fs.statSync(path.join(remote, 'clip.braw')).size, SIZE, 'the file on the server is the right size');
+      eq(sha(path.join(remote, 'clip.braw')), sha(src), 'and byte-for-byte the same');
+
+      // The fingerprint is computed WHILE the bytes go past. With many requests
+      // in flight the pieces come back out of order, so this is the assertion
+      // that the reorder buffer is doing its job — a hash of the right bytes in
+      // the wrong sequence is the kind of error that surfaces on restore day.
+      const again = await hashStream(nfs, src, await createHasher('xxh64'), null, {});
+      eq(res.digest, again, 'the fingerprint taken in flight matches a plain re-read');
+    }
+
+    // (b) Download: same, the other way.
+    {
+      const back = path.join(dir, 'back.braw');
+      const res = await copyStream(sftp, '/clip.braw', nfs, back, null, null, {});
+      eq(res.bytes, SIZE, 'every byte came back');
+      eq(sha(back), sha(src), 'and the downloaded file is identical');
+    }
+
+    // (c) A file smaller than one chunk, and an empty one: the edges of the
+    //     reorder logic, where an off-by-one shows up.
+    {
+      for (const [name, size] of [['tiny.bin', 17], ['empty.bin', 0], ['exact.bin', XFER_CHUNK]]) {
+        const p = path.join(dir, name);
+        fs.writeFileSync(p, Buffer.alloc(size, 0xab));
+        await copyStream(nfs, p, sftp, '/' + name, null, null, {});
+        eq(fs.statSync(path.join(remote, name)).size, size, `${name} (${size} B) uploads whole`);
+        const rt = path.join(dir, 'rt-' + name);
+        await copyStream(sftp, '/' + name, nfs, rt, null, null, {});
+        eq(sha(rt), sha(p), `${name} comes back identical`);
+      }
+    }
+
+    // (d) 🔴 THE POINT. Against ssh2's own stream, which issues one request at
+    //     a time, on the very same connection and the very same file.
+    {
+      const t0 = Date.now();
+      await new Promise((res, rej) => {
+        const rs = fs.createReadStream(src);
+        const ws = sftp.sftp.createWriteStream('/serial.bin');
+        rs.on('error', rej); ws.on('error', rej); ws.on('close', res);
+        rs.pipe(ws);
+      });
+      const serialMs = Date.now() - t0;
+
+      const t1 = Date.now();
+      await copyStream(nfs, src, sftp, '/pipelined.bin', null, null, {});
+      const pipelinedMs = Date.now() - t1;
+
+      eq(sha(path.join(remote, 'serial.bin')), sha(path.join(remote, 'pipelined.bin')),
+         'both paths produce the same file');
+      ok(pipelinedMs * 3 < serialMs,
+         `pipelining is at least three times faster (${serialMs} ms → ${pipelinedMs} ms at ${LATENCY} ms of latency)`);
+      ok(XFER_CONCURRENCY > 1, 'because more than one request is in flight');
+    }
+
+    // (e) Cancelling reaches a transfer in progress, and does not leave the
+    //     promise hanging — the whole reason a stuck run could not be stopped.
+    {
+      const big = path.join(dir, 'big.bin');
+      fs.writeFileSync(big, Buffer.alloc(24 * 1024 * 1024, 5));
+      const token = { cancelled: false, paused: false };
+      setTimeout(() => { token.cancelled = true; }, 120);
+      let msg = null;
+      const t0 = Date.now();
+      try { await copyStream(nfs, big, sftp, '/cancelled.bin', null, null, token); }
+      catch (err) { msg = err.message; }
+      const ms = Date.now() - t0;
+      eq(msg, 'Cancelled', 'the copy rejects rather than finishing');
+      ok(ms < 5000, `and it stops promptly (${ms} ms)`);
+    }
+
+    // (f) Pause holds the transfer INSIDE a file, and lets it finish after.
+    //     The drain handler used to resume unconditionally, so a paused
+    //     transfer restarted itself the moment the writer emptied — 29 MB went
+    //     through a "pause" in the run that caught it.
+    {
+      const big = path.join(dir, 'big.bin');
+      const token = { cancelled: false, paused: false };
+      let got = 0, atMark = 0;
+      setTimeout(() => { token.paused = true; }, 150);
+      setTimeout(() => { atMark = got; }, 400);
+      setTimeout(() => { token.paused = false; }, 900);
+      const res = await copyStream(nfs, big, sftp, '/paused.bin', null, b => { got += b; }, token);
+      ok(atMark > 0, 'the transfer had started before the pause');
+      eq(got, res.bytes, 'and finished after it');
+      eq(fs.statSync(path.join(remote, 'paused.bin')).size, 24 * 1024 * 1024,
+         'with the whole file on the server');
+    }
+  } finally {
+    try { await sftp.close(); } catch (_) {}
+    try { await srv.close(); } catch (_) {}
+  }
+}
+
 (async function main() {
   console.log('syncto engine tests');
   console.log('scratch: ' + ROOT);
@@ -3222,6 +3553,8 @@ async function testLockTolerance() {
     await testMissingRootWithHistory();
     await testCheckJobPaths();
     await testLockTolerance();
+    testLog();
+    await testSftpTransfer();
   } catch (err) {
     failed++;
     failures.push('UNCAUGHT: ' + (err.stack || err.message));

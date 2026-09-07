@@ -129,6 +129,9 @@ const PREFS_REVISION = 2;
 
 function defaultPrefs() {
   return {
+    // The diagnostic journal. Off by default, emptied at every launch, and
+    // read back in the settings window so it can be copied and sent.
+    log: false,
     revision: PREFS_REVISION,
     window: { width: 1280, height: 820 },
     lastJobPath: '',
