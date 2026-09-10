@@ -4,6 +4,39 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.6.7] — 2026-09-10
+
+The overview panel unfolds.
+
+### Added
+
+- **A folder in the overview can be opened to see what is inside it.** The
+  panel listed the top level and stopped there, so the only way to know what a
+  folder held was to click it and read the grid. Every folder now carries an
+  arrow: it opens ONE level, showing its direct contents — folders and files,
+  each with its own share, item count and size. Opening a child works the same
+  way, as deep as the tree goes.
+- **Clicking the row itself does both**: it opens the folder in the panel and
+  narrows the grid to it, as it already did. Clicking it again folds it back
+  and returns the grid to everything. The arrow alone opens the folder
+  *without* moving the grid, for reading down a tree while the grid stays put.
+- A folder with nothing to do offers no arrow, since unfolding it would open an
+  empty level. Ticking **Show identical** puts the whole tree back, arrows
+  included.
+- The share shown by a row stays a share of the **whole run**, never of its
+  level, so a bar does not change meaning as you unfold, and a folder keeps
+  totalling everything underneath it whether it is open or closed.
+
+### Changed
+
+- The overview columns are slightly tighter (share, items, size) to leave more
+  room for names now that they can be indented.
+
+### Notes
+
+- A new comparison starts folded, and what is open is never written to the job
+  file — it is a way of looking at one comparison, not part of it.
+
 ## [0.6.6] — 2026-09-07
 
 Two lines the log should not have written.

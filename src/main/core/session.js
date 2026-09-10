@@ -256,7 +256,7 @@ class Session {
 
   visibleIndices(view) { return this._visibleIndices(view); }
 
-  // ── Overview — one line per top-level item, like FreeFileSync's panel ────
+  // ── Overview — a tree of the compared folders, like FreeFileSync's panel ─
   // Sizes count every file underneath (the larger of the two sides, so a
   // half-copied folder is not under-reported); pct is the share of the total.
   // Zone 2: where the work of this run sits, folder by folder.
@@ -267,54 +267,98 @@ class Session {
   // and its size is the data that will really move, not the size of what is
   // already there. "Show identical" opts back into the whole tree, for when
   // you want to click a folder that is NOT changing and find it in the grid.
-  overview(view) {
+  overview(view, open) {
     const all = !!(view && view.showEqual);
-    const groups = new Map();   // top-level rel -> { name, type, items, bytes, idx, active }
+    // The folders the panel has unfolded. A row always totals everything
+    // underneath it; unfolding one adds its DIRECT contents as rows of their
+    // own, one level at a time — the panel is a tree, not a flat legend.
+    const opened = new Set(open || []);
+    const groups = new Map();   // displayed rel -> { name, type, items, bytes, idx, active }
     for (const n of this.nodes) {
-      const top = n.rel.includes('/') ? n.rel.slice(0, n.rel.indexOf('/')) : n.rel;
-      let g = groups.get(top);
-      if (!g) {
-        g = { name: top, type: n.rel === top ? n.type : 'folder', items: 0, bytes: 0, idx: -1, active: true, work: 0 };
-        groups.set(top, g);
-      }
-      // The top-level row itself is what the grid jumps to, so it is recorded
-      // whatever it does — a folder is almost always "equal" while its
-      // contents are not.
-      if (n.rel === top) {
-        g.idx = n.idx;
-        g.active = n.active;
-        if (n.type === 'folder') g.type = 'folder';
-      }
-
+      const parts = n.rel.split('/');
       const busy = n.active && n.op !== OP.NONE && n.op !== OP.DO_NOTHING &&
                    n.op !== OP.MOVE_LEFT_FROM && n.op !== OP.MOVE_RIGHT_FROM;
-      if (busy) g.work++;
-
-      if (all) {
-        if (n.rel !== top) g.items++;
-        else if (n.type !== 'folder') g.items = 1;
-        if (n.type !== 'folder') {
-          g.bytes += Math.max(n.left.exists ? n.left.size || 0 : 0,
-                              n.right.exists ? n.right.size || 0 : 0);
+      let key = '';
+      for (let i = 0; i < parts.length; i++) {
+        key = i ? key + '/' + parts[i] : parts[i];
+        let g = groups.get(key);
+        if (!g) {
+          g = { rel: key, name: parts[i], depth: i,
+                type: n.rel === key ? n.type : 'folder',
+                items: 0, bytes: 0, idx: -1, active: true, work: 0,
+                kidsAll: false, kidsWork: false };
+          groups.set(key, g);
         }
-      } else if (busy) {
-        g.items++;
-        // The bytes that will cross: the source side of a copy. A deletion
-        // moves nothing, and a detected move is a rename — counting either
-        // would inflate the bars with data that never travels.
-        if (n.type !== 'folder') {
-          if (n.op === OP.CREATE_RIGHT || n.op === OP.OVERWRITE_RIGHT) {
-            g.bytes += n.left.exists ? (n.left.size || 0) : 0;
-          } else if (n.op === OP.CREATE_LEFT || n.op === OP.OVERWRITE_LEFT) {
-            g.bytes += n.right.exists ? (n.right.size || 0) : 0;
+        // The row itself is recorded whatever it does — a folder is almost
+        // always "equal" while its contents are not.
+        if (n.rel === key) {
+          g.idx = n.idx;
+          g.active = n.active;
+          if (n.type === 'folder') g.type = 'folder';
+        } else {
+          g.kidsAll = true;
+          if (busy) g.kidsWork = true;
+        }
+
+        if (busy) g.work++;
+
+        if (all) {
+          if (n.rel !== key) g.items++;
+          else if (n.type !== 'folder') g.items = 1;
+          if (n.type !== 'folder') {
+            g.bytes += Math.max(n.left.exists ? n.left.size || 0 : 0,
+                                n.right.exists ? n.right.size || 0 : 0);
+          }
+        } else if (busy) {
+          g.items++;
+          // The bytes that will cross: the source side of a copy. A deletion
+          // moves nothing, and a detected move is a rename — counting either
+          // would inflate the bars with data that never travels.
+          if (n.type !== 'folder') {
+            if (n.op === OP.CREATE_RIGHT || n.op === OP.OVERWRITE_RIGHT) {
+              g.bytes += n.left.exists ? (n.left.size || 0) : 0;
+            } else if (n.op === OP.CREATE_LEFT || n.op === OP.OVERWRITE_LEFT) {
+              g.bytes += n.right.exists ? (n.right.size || 0) : 0;
+            }
           }
         }
+
+        // Anything deeper only exists on screen while this level is unfolded.
+        if (!opened.has(key)) break;
       }
     }
-    const rows = [...groups.values()].filter(g => all || g.work > 0);
-    const total = rows.reduce((s, g) => s + g.bytes, 0) || 1;
+
+    const keep = [...groups.values()].filter(g => all || g.work > 0);
+    // Whether the arrow is worth offering: a folder whose contents would all
+    // be filtered out unfolds to nothing, and an arrow that opens an empty
+    // level is worse than no arrow.
+    for (const g of keep) {
+      g.kids = g.type === 'folder' && (all ? g.kidsAll : g.kidsWork);
+      delete g.kidsAll; delete g.kidsWork;
+    }
+
+    // Children sit under their own parent, biggest first at every level.
+    const byParent = new Map();
+    for (const g of keep) {
+      const p = g.rel.includes('/') ? g.rel.slice(0, g.rel.lastIndexOf('/')) : '';
+      if (!byParent.has(p)) byParent.set(p, []);
+      byParent.get(p).push(g);
+    }
+    const rows = [];
+    const emit = parent => {
+      const list = (byParent.get(parent) || []).sort((a, b) => b.bytes - a.bytes);
+      for (const g of list) {
+        rows.push(g);
+        if (g.kids && opened.has(g.rel)) { g.open = true; emit(g.rel); }
+      }
+    };
+    emit('');
+
+    // The share is of the WHOLE run, never of the level: only top-level rows
+    // count towards the total, or a folder and its children would be added
+    // together and every bar would shrink as you unfold.
+    const total = rows.reduce((s, g) => s + (g.depth === 0 ? g.bytes : 0), 0) || 1;
     rows.forEach(g => { g.pct = Math.round((g.bytes / total) * 100); });
-    rows.sort((a, b) => b.bytes - a.bytes);
     return { rows, totalBytes: total === 1 ? 0 : total, identical: rows.length === 0 };
   }
 
@@ -841,16 +885,17 @@ class MultiSession {
     return out;
   }
 
-  overview(view) {
+  // `open` — [{ p, rel }], the folders unfolded in the panel, pair by pair.
+  overview(view, open) {
     const rows = [];
     let total = 0;
+    const opens = open || [];
     for (let p = 0; p < this.sessions.length; p++) {
-      const ov = this.sessions[p].overview(view);
-      // Biggest first WITHIN a pair, and pairs kept in their own order. Sorting
-      // every pair's folders into one list by size interleaved them with no
-      // visible clue where each came from, which read as a random jumble of
-      // root folders and sub-folders.
-      ov.rows.sort((a, b) => b.bytes - a.bytes);
+      const ov = this.sessions[p].overview(view, opens.filter(o => o && o.p === p).map(o => o.rel));
+      // The order comes from the pair's own tree — children under the folder
+      // they belong to, biggest first at each level. Sorting the merged list
+      // again would scatter the children away from their parent, and merging
+      // the pairs into one size order hides which pair a root came from.
       ov.rows.forEach((g, i) => {
         g.idx = g.idx >= 0 ? p * PAIR_BASE + g.idx : -1;
         g.pairIdx = p;

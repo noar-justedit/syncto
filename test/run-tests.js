@@ -3516,6 +3516,156 @@ async function testSftpTransfer() {
   }
 }
 
+
+// ══ 36. Unfolding a folder in the overview (0.6.7) ═════════════════════════
+// The panel listed the top level and nothing else, so the only way to see what
+// was inside a folder was to click it and read the grid. It now unfolds, one
+// level per click, and a level that is not open is never even built — a folded
+// panel costs exactly what the flat one did.
+async function testOverviewTree() {
+  console.log('\n\n36. Unfolding a folder in the overview (0.6.7)');
+
+  const build = async () => {
+    const { L, R } = scratch();
+    const t = Date.now() - 86400000;
+    // Day 1 carries the work, and it is two levels deep.
+    write(L, 'Rushes/DAY1/A001.mov', 'x'.repeat(900), Date.now());
+    write(L, 'Rushes/DAY1/CARD_B/B001.mov', 'y'.repeat(300), Date.now());
+    write(L, 'Rushes/DAY2/C001.mov', 'z'.repeat(100), Date.now());
+    // Audio is identical on both sides: nothing to do anywhere under it.
+    write(L, 'Audio/mix.wav', 'same', t); write(R, 'Audio/mix.wav', 'same', t);
+    const s = new Session();
+    await s.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: { cancelled: false } });
+    return s;
+  };
+
+  // (a) Folded, the panel is exactly what it was: one row per top-level entry.
+  {
+    const s = await build();
+    const ov = s.overview();
+    eq(ov.rows.length, 1, 'folded, only the top level is listed');
+    eq(ov.rows[0].name, 'Rushes', 'and it is the folder carrying the work');
+    eq(ov.rows[0].items, 7, 'totalling everything underneath it — files and folders alike');
+    eq(ov.rows[0].bytes, 1300, 'and all the bytes that will cross');
+    ok(ov.rows[0].kids, 'it says it can be unfolded');
+    ok(!ov.rows[0].open, 'and that it is not');
+    await s.close();
+  }
+
+  // (b) 🔴 THE POINT. Unfolding shows the DIRECT contents — one level, not the
+  //     whole subtree. A panel that dumped every descendant at the first click
+  //     would be the grid again, in a narrower column.
+  {
+    const s = await build();
+    const ov = s.overview({}, ['Rushes']);
+    const names = ov.rows.map(r => r.rel);
+    eq(names.join(' | '), 'Rushes | Rushes/DAY1 | Rushes/DAY2',
+       'the children arrive under their parent, biggest first');
+    ok(!names.includes('Rushes/DAY1/CARD_B'),
+       'and a grandchild stays hidden until its own parent is opened');
+    eq(ov.rows[1].depth, 1, 'a child is one level in');
+    ok(ov.rows[0].open, 'the folder is marked open');
+
+    // The parent's own figures do not move when it is unfolded: it still
+    // totals its whole subtree, so the number you were reading stays put.
+    const folded = (await (async () => { const s2 = await build(); const o = s2.overview(); await s2.close(); return o; })()).rows[0];
+    eq(ov.rows[0].items, folded.items, 'the parent still counts its whole subtree');
+    eq(ov.rows[0].bytes, folded.bytes, 'and still shows all of its bytes');
+    await s.close();
+  }
+
+  // (c) Two levels open at once, and the grandchild appears in its place.
+  {
+    const s = await build();
+    const ov = s.overview({}, ['Rushes', 'Rushes/DAY1']);
+    eq(ov.rows.map(r => r.rel).join(' | '),
+       'Rushes | Rushes/DAY1 | Rushes/DAY1/A001.mov | Rushes/DAY1/CARD_B | Rushes/DAY2',
+       'each open level inserts its own contents in place');
+    eq(ov.rows[2].type, 'file', 'files show as files');
+    eq(ov.rows[3].depth, 2, 'and a grandchild is two levels in');
+    await s.close();
+  }
+
+  // (d) The percentage is a share of the RUN, not of the level. Adding the
+  //     children into the total would shrink every bar as you unfold — the
+  //     panel would appear to change its mind about what is big.
+  {
+    const s = await build();
+    const folded = s.overview();
+    const open   = s.overview({}, ['Rushes']);
+    eq(open.rows[0].pct, folded.rows[0].pct, 'the parent bar does not move when it opens');
+    eq(open.rows[0].pct, 100, 'the only top-level row is the whole run');
+    ok(open.rows[1].pct < open.rows[0].pct, 'and a child is a slice of it');
+    eq(open.totalBytes, folded.totalBytes, 'the total is unchanged');
+    await s.close();
+  }
+
+  // (e) A folder with nothing to do offers no arrow: unfolding it would open
+  //     an empty level, which is worse than no arrow at all. Ticking "show
+  //     identical" is what puts it back.
+  {
+    const s = await build();
+    const all = s.overview({ showEqual: true });
+    const audio = all.rows.find(r => r.name === 'Audio');
+    ok(audio, 'with "show identical" the untouched folder is listed');
+    ok(audio.kids, 'and it can be unfolded, because now there is something inside');
+    const opened = s.overview({ showEqual: true }, ['Audio']);
+    eq(opened.rows.filter(r => r.rel.startsWith('Audio/')).length, 1,
+       'unfolding it lists the identical file');
+    // Without the switch it is not in the list at all, so there is nothing to
+    // unfold: asking anyway must not invent a row.
+    const none = s.overview({}, ['Audio']);
+    eq(none.rows.filter(r => r.rel.startsWith('Audio')).length, 0,
+       'and opening a folder with no work produces nothing');
+    await s.close();
+  }
+
+  // (f) Several pairs: what is open in pair 1 must not open the same name in
+  //     pair 2, and the tree order has to survive the merge — children stay
+  //     under their own parent instead of being re-sorted into the pile.
+  {
+    const a = scratch(), b = scratch();
+    write(a.L, 'Rushes/DAY1/A001.mov', 'x'.repeat(900), Date.now());
+    write(a.L, 'Rushes/DAY2/C001.mov', 'z'.repeat(100), Date.now());
+    write(b.L, 'Rushes/DAY1/B001.mov', 'y'.repeat(400), Date.now());
+    const job = makeJob('', '', { sync: { variant: 'mirror' } });
+    delete job.left; delete job.right;
+    job.pairs = [{ left: a.L, right: a.R }, { left: b.L, right: b.R }];
+    const m = new MultiSession();
+    await m.compare(job, { token: {} });
+
+    const ov = m.overview({}, [{ p: 0, rel: 'Rushes' }]);
+    const shape = ov.rows.map(r => r.pair + ':' + r.rel).join(' | ');
+    eq(shape, '1:Rushes | 1:Rushes/DAY1 | 1:Rushes/DAY2 | 2:Rushes',
+       'only the pair that was opened unfolds, and each pair keeps its block');
+    ok(ov.rows[3].kids, 'the same folder in the other pair is still closed');
+    ok(ov.rows[0].first && !ov.rows[1].first,
+       'the pair heading is still on the first row of each pair');
+    // A child of pair 1 is smaller than the root of pair 2; a global sort by
+    // size would have moved it out of its parent's block.
+    ok(ov.rows[2].bytes < ov.rows[3].bytes,
+       'a small child stays under its parent even next to a bigger root');
+    await m.close();
+  }
+
+  // (g) The window: the arrow is its own click target, and the row scopes on
+  //     the FULL path — inside an unfolded folder, the last segment alone
+  //     would point the grid, and the exclusion patterns, at the wrong level.
+  {
+    const html  = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/index.html'), 'utf8');
+    const appjs = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.js'), 'utf8');
+    ok(/getOverview\(state\.view,\s*open\)/.test(appjs), 'the window sends the open folders to the engine');
+    ok(/data-rel="\$\{esc\(g\.rel\)\}"/.test(appjs), 'every row carries its full path');
+    ok(/setScope\([\s\S]{0,80}?it\.dataset\.rel, label\)/.test(appjs), 'and the grid is scoped on that path');
+    ok(!/setScope\([\s\S]{0,80}?it\.dataset\.name/.test(appjs), 'never on the last segment alone');
+    ok(/rel: it\.dataset\.rel/.test(appjs), 'right-click builds its pattern from the full path too');
+    ok(/e\.target\.closest\('\.ov-twist'\)/.test(appjs), 'the arrow is handled before the row');
+    ok(/state\.ovOpen\.clear\(\)/.test(appjs), 'a new comparison starts folded');
+    ok(/\.ov-twist\.open\{transform:rotate\(90deg\)\}/.test(html.replace(/;\}/g, '}')),
+       'and the arrow turns when the folder is open');
+  }
+}
+
 (async function main() {
   console.log('syncto engine tests');
   console.log('scratch: ' + ROOT);
@@ -3555,6 +3705,7 @@ async function testSftpTransfer() {
     await testLockTolerance();
     testLog();
     await testSftpTransfer();
+    await testOverviewTree();
   } catch (err) {
     failed++;
     failures.push('UNCAUGHT: ' + (err.stack || err.message));

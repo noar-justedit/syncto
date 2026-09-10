@@ -138,13 +138,13 @@ overflow:hidden;text-overflow:ellipsis;}
 .recent-item.cur .recent-name{color:#c9b8ff;}
 /* Zone 2 — overview */
 #sb-overview{flex:1;min-height:0;}
-#ov-head{display:grid;grid-template-columns:48px 1fr 44px 66px;padding:6px 10px 4px;
+#ov-head{display:grid;grid-template-columns:44px 1fr 34px 60px;padding:6px 10px 4px;
 font-size:9.5px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:var(--text3);flex-shrink:0;}
 #ov-head .r{text-align:right;}
 #ov-list{flex:1;overflow-y:auto;padding:0 6px 8px;}
 #ov-list::-webkit-scrollbar{width:5px;}
 #ov-list::-webkit-scrollbar-thumb{background:var(--bg4);}
-.ov-row{display:grid;grid-template-columns:48px 1fr 44px 66px;align-items:center;
+.ov-row{display:grid;grid-template-columns:44px 1fr 34px 60px;align-items:center;
 gap:0;padding:4px 4px;border-radius:5px;font-size:12.5px;cursor:default;}
 .ov-row:hover{background:var(--bg3);}
 .ov-row.sel{background:var(--accent-d);}
@@ -154,8 +154,17 @@ border-radius:3px;overflow:hidden;margin-right:7px;}
 .ov-pct .bar{position:absolute;left:0;top:0;bottom:0;background:rgba(53,201,139,.35);}
 .ov-pct .lbl{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
 font-family:var(--mono);font-size:9.5px;font-weight:700;color:var(--text2);}
-.ov-name{display:flex;align-items:center;gap:6px;min-width:0;color:var(--text2);}
+.ov-name{display:flex;align-items:center;gap:5px;min-width:0;color:var(--text2);}
 .ov-name svg{width:13px;height:13px;flex-shrink:0;opacity:.5;}
+/* The unfold arrow. A folder with nothing to show keeps the empty slot so
+   every name in the panel starts at the same place. */
+.ov-twist{display:flex;align-items:center;justify-content:center;width:13px;height:13px;
+flex-shrink:0;border-radius:3px;transition:transform .12s ease;}
+.ov-twist svg{width:11px;height:11px;opacity:.75;}
+.ov-twist.open{transform:rotate(90deg);}
+.ov-twist.none{visibility:hidden;}
+.ov-twist:hover{background:var(--bg4);}
+.ov-twist:hover svg{opacity:1;}
 .ov-name span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono);font-size:12.5px;}
 .ov-items{text-align:right;font-family:var(--mono);font-size:11.5px;color:var(--text3);}
 .ov-bytes{text-align:right;font-family:var(--mono);font-size:11.5px;color:var(--text2);padding-right:2px;}

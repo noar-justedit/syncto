@@ -41,6 +41,10 @@ const state = {
   missingPaths: [],
   auto   : { nextAt: 0, tick: null },   // auto-sync scheduler
   selIdx : null,                        // selected grid row (node idx)
+  // Folders unfolded in the overview, as `${pairIndex}:${rel}`. Kept in the
+  // window, not in the job: it is a way of looking at one comparison, and a
+  // new comparison starts folded.
+  ovOpen : new Set(),
 };
 
 // A job always carries a pairs array; old shapes are migrated on sight.
@@ -429,6 +433,8 @@ async function renderWindow() {
 }
 
 const ICON_FOLDER = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>';
+// Lucide "chevron-right", rotated by CSS when the folder is open.
+const ICON_CHEV   = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>';
 const ICON_FILE   = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg>';
 
 // One pane cell: the item as it exists on that side, or blank when it does not
@@ -780,6 +786,7 @@ async function doCompare() {
 
   state.selIdx = null;      // the old selection indexes a tree about to vanish
   state.view.scope = null;  // and so does the scope
+  state.ovOpen.clear();     // and so do the folders unfolded in the overview
   renderScopeBar();
   state.busy = 'compare';
   state.speeds = [];
@@ -2117,7 +2124,13 @@ async function refreshOverview() {
     box.innerHTML = '<div class="ov-empty">Run a comparison to see the folder breakdown.</div>';
     return;
   }
-  const ov = await API.getOverview(state.view);
+  // The engine only expands a level it is told is open, so a folded panel
+  // costs exactly what it did before.
+  const open = [...state.ovOpen].map(k => {
+    const i = k.indexOf(':');
+    return { p: Number(k.slice(0, i)), rel: k.slice(i + 1) };
+  });
+  const ov = await API.getOverview(state.view, open);
   if (!ov || !ov.rows.length) {
     const nothing = state.stats.rows > 0;
     box.innerHTML = nothing
@@ -2136,14 +2149,19 @@ async function refreshOverview() {
       ? `<div class="ov-pairhead"><span class="n">${g.pair}</span>${esc(g.pairLabel)}</div>`
       : '';
     const scoped = state.view.scope && state.view.scope.p === g.pairIdx &&
-                   state.view.scope.rel === g.name;
+                   state.view.scope.rel === g.rel;
+    // The arrow is a real target of its own: it unfolds without moving the
+    // grid. An empty slot keeps every name on the same left edge.
+    const twist = g.kids
+      ? `<span class="ov-twist${g.open ? ' open' : ''}">${ICON_CHEV}</span>`
+      : '<span class="ov-twist none"></span>';
     return head + `
     <div class="ov-row${g.idx === state.selIdx ? ' sel' : ''}${g.active ? '' : ' off'}${scoped ? ' scoped' : ''}"
-         data-idx="${g.idx}" data-name="${esc(g.name)}" data-type="${g.type}"
-         data-pair="${g.pairIdx}" data-active="${g.active ? 1 : 0}"
-         data-tip="${g.pairLabel ? '[' + esc(g.pairLabel) + '] ' : ''}${esc(g.name)} — ${g.items} item${g.items === 1 ? '' : 's'}, ${esc(fmtBytes(g.bytes))}. Click to show its contents in the grid.">
+         data-idx="${g.idx}" data-name="${esc(g.name)}" data-rel="${esc(g.rel)}" data-type="${g.type}"
+         data-pair="${g.pairIdx}" data-active="${g.active ? 1 : 0}" data-kids="${g.kids ? 1 : 0}"
+         data-tip="${g.pairLabel ? '[' + esc(g.pairLabel) + '] ' : ''}${esc(g.rel)} — ${g.items} item${g.items === 1 ? '' : 's'}, ${esc(fmtBytes(g.bytes))}.${g.kids ? ' Click to open it here and show it in the grid.' : ' Click to show it in the grid.'}">
       <div class="ov-pct"><div class="bar" style="width:${g.pct}%"></div><div class="lbl">${g.pct}%</div></div>
-      <div class="ov-name">${g.type === 'folder' ? ICON_FOLDER : ICON_FILE}<span>${esc(g.name)}</span></div>
+      <div class="ov-name" style="padding-left:${g.depth * 11}px">${twist}${g.type === 'folder' ? ICON_FOLDER : ICON_FILE}<span>${esc(g.name)}</span></div>
       <div class="ov-items">${g.items}</div>
       <div class="ov-bytes">${esc(fmtBytes(g.bytes))}</div>
     </div>`;
@@ -2174,14 +2192,35 @@ async function setScope(pairIdx, rel, label) {
 // Selection + right-click in the overview: same behaviour as the grid.
 // Clicking a folder in the overview shows THAT folder in the grid — the
 // panel is a navigator, not just a legend. Clicking it again shows everything.
+//
+// It also unfolds, so one click answers "what is in there?" in both places at
+// once: the folder opens in the panel and the grid narrows to it. The arrow
+// alone unfolds WITHOUT touching the grid, for reading down a tree while the
+// grid stays where it is.
 $('ov-list').addEventListener('click', async e => {
   const it = e.target.closest('.ov-row');
   if (!it) return;
+  const key = it.dataset.pair + ':' + it.dataset.rel;
+  const kids = it.dataset.kids === '1';
+
+  if (e.target.closest('.ov-twist')) {
+    if (!kids) return;
+    if (state.ovOpen.has(key)) state.ovOpen.delete(key); else state.ovOpen.add(key);
+    await refreshOverview();
+    return;
+  }
+
   const idx = Number(it.dataset.idx);
   if (idx >= 0) state.selIdx = idx;
   const pairIdx = Number(it.dataset.pair);
   const label = it.dataset.tip.startsWith('[') ? it.dataset.tip.slice(1, it.dataset.tip.indexOf(']')) : '';
-  await setScope(Number.isNaN(pairIdx) ? 0 : pairIdx, it.dataset.name, label);
+  // `scoped` is what setScope is about to toggle off, so the folder folds on
+  // the same click that puts the grid back to everything.
+  if (kids) {
+    if (it.classList.contains('scoped')) state.ovOpen.delete(key);
+    else state.ovOpen.add(key);
+  }
+  await setScope(Number.isNaN(pairIdx) ? 0 : pairIdx, it.dataset.rel, label);
   await renderWindow();
 });
 
@@ -2195,7 +2234,9 @@ $('ov-list').addEventListener('contextmenu', async e => {
   await refreshOverview();
   await renderWindow();
   openCtx(e.clientX, e.clientY, {
-    idx, rel: it.dataset.name, name: it.dataset.name,
+    // rel is the path from the root of the pair — inside an unfolded folder
+    // the name alone would build an exclusion pattern for the wrong level.
+    idx, rel: it.dataset.rel, name: it.dataset.name,
     type: it.dataset.type, active: it.dataset.active === '1',
   });
 });
