@@ -138,13 +138,25 @@ overflow:hidden;text-overflow:ellipsis;}
 .recent-item.cur .recent-name{color:#c9b8ff;}
 /* Zone 2 — overview */
 #sb-overview{flex:1;min-height:0;}
-#ov-head{display:grid;grid-template-columns:44px 1fr 34px 60px;padding:6px 10px 4px;
+#ov-head{display:grid;grid-template-columns:17px 36px 1fr 38px 58px;padding:6px 10px 4px;
 font-size:9.5px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:var(--text3);flex-shrink:0;}
 #ov-head .r{text-align:right;}
+/* A grid cell that overflows prints straight over the next one: "Share" was
+   wider than the column it named and landed on top of "Folder". Clipping is
+   the safety net; the titles themselves are kept short. */
+#ov-head > div{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}
+#ov-head .pct{letter-spacing:0;}
+#ov-head [data-sort]{cursor:pointer;user-select:none;border-radius:3px;}
+#ov-head [data-sort]:hover{color:var(--text2);}
+/* The arrow only appears on the column actually in charge, so the header is
+   never a row of three competing hints. */
+#ov-head [data-sort].on{color:var(--accent);}
+#ov-head [data-sort].on::after{content:' \25B2';font-size:7px;vertical-align:middle;}
+#ov-head [data-sort].on[data-dir="desc"]::after{content:' \25BC';}
 #ov-list{flex:1;overflow-y:auto;padding:0 6px 8px;}
 #ov-list::-webkit-scrollbar{width:5px;}
 #ov-list::-webkit-scrollbar-thumb{background:var(--bg4);}
-.ov-row{display:grid;grid-template-columns:44px 1fr 34px 60px;align-items:center;
+.ov-row{display:grid;grid-template-columns:17px 36px 1fr 38px 58px;align-items:center;
 gap:0;padding:4px 4px;border-radius:5px;font-size:12.5px;cursor:default;}
 .ov-row:hover{background:var(--bg3);}
 .ov-row.sel{background:var(--accent-d);}
@@ -166,8 +178,8 @@ flex-shrink:0;border-radius:3px;transition:transform .12s ease;}
 .ov-twist:hover{background:var(--bg4);}
 .ov-twist:hover svg{opacity:1;}
 .ov-name span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono);font-size:12.5px;}
-.ov-items{text-align:right;font-family:var(--mono);font-size:11.5px;color:var(--text3);}
-.ov-bytes{text-align:right;font-family:var(--mono);font-size:11.5px;color:var(--text2);padding-right:2px;}
+.ov-items{text-align:right;font-family:var(--mono);font-size:11.5px;color:var(--text3);overflow:hidden;}
+.ov-bytes{text-align:right;font-family:var(--mono);font-size:11.5px;color:var(--text2);padding-right:2px;overflow:hidden;}
 .ov-empty{font-size:11.5px;color:var(--text3);padding:10px;line-height:1.5;}
 /* One heading per folder pair. Without it, a root folder of pair 2 sits
    between two root folders of pair 1 and the list looks arbitrary. */
@@ -179,6 +191,12 @@ color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 background:var(--accent-d);border:1px solid var(--accent-g);color:#c9b8ff;
 display:flex;align-items:center;justify-content:center;font-size:9.5px;letter-spacing:0;}
 .ov-row.scoped{background:var(--accent-d);border-color:var(--accent-g);}
+/* Selected for a batch. Deliberately not the same colour as "the grid is
+   showing this one": they answer different questions and can be true at once. */
+.ov-row.picked{background:var(--bg4);box-shadow:inset 2px 0 0 var(--accent-g);}
+.ov-row.picked.scoped{background:var(--accent-d);}
+.ov-chk{display:flex;align-items:center;}
+.ov-chk input{width:12px;height:12px;margin:0;cursor:pointer;accent-color:var(--accent);}
 
 /* Scope bar — what the grid is currently limited to. */
 #scope-bar{display:flex;align-items:center;gap:8px;padding:6px 10px;
@@ -851,6 +869,21 @@ background:var(--bg4);border:1px solid var(--border2);border-radius:9px;padding:
 box-shadow:0 14px 44px rgba(0,0,0,.55);}
 .ctx-it:hover > .ctx-sub{display:block;}
 .ctx-sub .ctx-it{font-family:var(--mono);font-size:11.5px;}
+/* A filter entry is three lines: what it does, how far it reaches, and the
+   pattern itself. The pattern alone was ambiguous — "KADAZ/" and
+   "/260628/KADAZ/" look like the same line twice unless you know that a
+   leading slash anchors it to the top of the pair. */
+.ctx-sub{min-width:250px;max-width:330px;}
+.ctx-sub .ctx-head{font-family:var(--font);font-size:9.5px;font-weight:800;
+letter-spacing:.1em;text-transform:uppercase;color:var(--text3);padding:4px 10px 6px;}
+.ctx-it.pat-it{align-items:flex-start;padding:7px 10px;white-space:normal;}
+.ctx-it.pat-it .lbl{display:flex;flex-direction:column;gap:2px;min-width:0;}
+.ctx-it.pat-it b{font-family:var(--font);font-size:12.5px;font-weight:600;color:var(--text);}
+.ctx-it.pat-it i{font-family:var(--font);font-style:normal;font-size:10.5px;color:var(--text3);}
+.ctx-it.pat-it code{font-family:var(--mono);font-size:11px;color:var(--accent);
+background:var(--bg);border:1px solid var(--border);border-radius:4px;
+padding:1px 5px;margin-top:3px;align-self:flex-start;max-width:100%;
+overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 /* Selected row */
 .grow.sel{box-shadow:inset 0 0 0 999px rgba(139,111,240,.13);}
 
@@ -924,7 +957,7 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
   <!-- Zone 2 — overview of the compared folders -->
   <div class="sb-panel" id="sb-overview">
     <div class="sb-hd"><h2>Overview</h2></div>
-    <div id="ov-head"><div>Share</div><div>Folder</div><div class="r">Items</div><div class="r">Size</div></div>
+    <div id="ov-head"><div></div><div class="pct">%</div><div data-sort="name" data-tip="Sort by name">Folder</div><div class="r" data-sort="items" data-tip="Sort by number of items">Items</div><div class="r on" data-sort="bytes" data-dir="desc" data-tip="Sort by size">Size</div></div>
     <div id="ov-list">
       <div class="ov-empty">Run a comparison to see the folder breakdown.</div>
     </div>

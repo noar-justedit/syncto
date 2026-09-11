@@ -4,6 +4,60 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.7.0] — 2026-09-11
+
+Ordering and batch selection in the overview, and a filter menu that says what
+it will do.
+
+### Added
+
+- **The overview can be ordered by name, by number of items or by size.** The
+  three column titles are controls: click one to order by it, click it again to
+  reverse. Only the column in charge carries an arrow. The order applies at
+  every level of the tree, so unfolding a folder arranges its contents the same
+  way. Names are compared naturally — A2 before A10, which a plain text sort
+  gets wrong as soon as clips are numbered. Equal values are settled by name, so
+  the list cannot reshuffle between two refreshes. The panel still opens sorted
+  by size, biggest first.
+- **Several folders can be picked at once and unticked in one gesture.** Click
+  selects a row, **Shift-click** takes everything between it and the last row
+  clicked *as drawn on screen*, **Cmd/Ctrl-click** adds or removes one. Neither
+  moves the grid: picking a batch is not the same gesture as asking to look at a
+  folder.
+- **Each overview row now has a tick box**, like the grid. Unticking one that
+  belongs to a selection unticks the whole selection — a single call to the
+  engine, not one per folder. Space and right-click › *Exclude temporarily* act
+  on the selection too.
+
+### Changed
+
+- **The overview obeys "Show excluded".** An unticked folder has no work left,
+  so its row used to leave the panel — taking with it the tick box you would use
+  to put it back. With the switch on, those rows stay, unticked and counting
+  nothing.
+- Working in the grid clears a selection made in the overview, so Space cannot
+  act on a batch you left highlighted behind you.
+- **The filter menu says what each pattern does, in words.** Right-clicking a
+  row offered a list of patterns and nothing else, so a folder's two
+  suggestions — `KADAZ/` and `/260628/KADAZ/` — read as the same line twice:
+  nothing said that the leading slash is what anchors a pattern to one place.
+  Each entry now leads with a sentence (*Every folder with this name* ·
+  *anywhere in this job, with its contents*) and keeps the pattern underneath,
+  since the pattern is what lands in the filter. The two parent entries say
+  which way the rule goes: **Keep — add to the include filter** and **Skip —
+  add to the exclude filter**.
+- **The submenu is placed rather than left to fall off.** Three-line entries are
+  tall, and near the bottom of the window the list used to run off the edge —
+  hiding *This one only*, the safest of the suggestions. It is measured each
+  time it opens, pulled back up, and flipped to the other side when there is no
+  room on the right.
+- The share column is narrower and the rows carry a tick box; names lose a
+  little more room, and the tooltip still gives the full path. That column is
+  now titled `%`: "Share" was wider than the column it named, and a grid cell
+  that overflows is drawn straight over its neighbour. Header titles are clipped
+  from now on, and the items and size columns were widened so a five-digit count
+  cannot do the same.
+
 ## [0.6.7] — 2026-09-10
 
 The overview panel unfolds.

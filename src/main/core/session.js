@@ -33,6 +33,30 @@ const { formatChecksumList, parseChecksumList, createHasher, hashStream } = requ
 const { acquireAll, clearStaleLock, DETECT_ABANDONED_MS } = require('./lock');
 const { log } = require('../log');
 
+// How the overview panel is ordered, at every level of its tree. Size,
+// descending, is the default and the one the panel was born with: the point of
+// zone 2 is "where is the weight of this run".
+//
+// Names go through a natural comparison — A002 before A010, which a plain
+// string sort gets wrong, and clip names are numbered.
+const OV_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+function overviewSorter(sort) {
+  const key = (sort && sort.key) || 'bytes';
+  const desc = (sort && sort.dir) ? sort.dir === 'desc' : true;
+  const sign = desc ? -1 : 1;
+  return (a, b) => {
+    let d = 0;
+    if (key === 'name') d = OV_COLLATOR.compare(a.name, b.name);
+    else if (key === 'items') d = a.items - b.items;
+    else d = a.bytes - b.bytes;
+    // Equal sizes are common (two folders with nothing but a rename), and an
+    // order that shuffles on every refresh is unusable. The name settles it.
+    if (d === 0) return OV_COLLATOR.compare(a.name, b.name);
+    return d * sign;
+  };
+}
+
 class Session {
   constructor() {
     this.pool   = new FsPool();
@@ -267,8 +291,14 @@ class Session {
   // and its size is the data that will really move, not the size of what is
   // already there. "Show identical" opts back into the whole tree, for when
   // you want to click a folder that is NOT changing and find it in the grid.
-  overview(view, open) {
+  overview(view, open, sort) {
     const all = !!(view && view.showEqual);
+    // Unticking a folder takes its work away, so the row would vanish from a
+    // panel that only lists work — and with it the tick box you would use to
+    // put it back. "Show excluded", the switch the grid already has, keeps
+    // those rows here too.
+    const showX = !!(view && view.showExcluded);
+    const cmp = overviewSorter(sort);
     // The folders the panel has unfolded. A row always totals everything
     // underneath it; unfolding one adds its DIRECT contents as rows of their
     // own, one level at a time — the panel is a tree, not a flat legend.
@@ -285,7 +315,7 @@ class Session {
         if (!g) {
           g = { rel: key, name: parts[i], depth: i,
                 type: n.rel === key ? n.type : 'folder',
-                items: 0, bytes: 0, idx: -1, active: true, work: 0,
+                items: 0, bytes: 0, idx: -1, active: true, work: 0, off: 0,
                 kidsAll: false, kidsWork: false };
           groups.set(key, g);
         }
@@ -301,6 +331,10 @@ class Session {
         }
 
         if (busy) g.work++;
+        // Excluded, but it would move something if it were not: `op` is
+        // DO_NOTHING for an inactive node, so the direction is what is left to
+        // read it by.
+        else if (!n.active && n.dir && n.dir !== 'none') g.off++;
 
         if (all) {
           if (n.rel !== key) g.items++;
@@ -328,7 +362,7 @@ class Session {
       }
     }
 
-    const keep = [...groups.values()].filter(g => all || g.work > 0);
+    const keep = [...groups.values()].filter(g => all || g.work > 0 || (showX && g.off > 0));
     // Whether the arrow is worth offering: a folder whose contents would all
     // be filtered out unfolds to nothing, and an arrow that opens an empty
     // level is worse than no arrow.
@@ -346,7 +380,7 @@ class Session {
     }
     const rows = [];
     const emit = parent => {
-      const list = (byParent.get(parent) || []).sort((a, b) => b.bytes - a.bytes);
+      const list = (byParent.get(parent) || []).sort(cmp);
       for (const g of list) {
         rows.push(g);
         if (g.kids && opened.has(g.rel)) { g.open = true; emit(g.rel); }
@@ -886,12 +920,13 @@ class MultiSession {
   }
 
   // `open` — [{ p, rel }], the folders unfolded in the panel, pair by pair.
-  overview(view, open) {
+  // `sort` — { key: 'name' | 'items' | 'bytes', dir: 'asc' | 'desc' }.
+  overview(view, open, sort) {
     const rows = [];
     let total = 0;
     const opens = open || [];
     for (let p = 0; p < this.sessions.length; p++) {
-      const ov = this.sessions[p].overview(view, opens.filter(o => o && o.p === p).map(o => o.rel));
+      const ov = this.sessions[p].overview(view, opens.filter(o => o && o.p === p).map(o => o.rel), sort);
       // The order comes from the pair's own tree — children under the folder
       // they belong to, biggest first at each level. Sorting the merged list
       // again would scatter the children away from their parent, and merging

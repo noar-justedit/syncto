@@ -3654,7 +3654,7 @@ async function testOverviewTree() {
   {
     const html  = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/index.html'), 'utf8');
     const appjs = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.js'), 'utf8');
-    ok(/getOverview\(state\.view,\s*open\)/.test(appjs), 'the window sends the open folders to the engine');
+    ok(/getOverview\(state\.view,\s*open,/.test(appjs), 'the window sends the open folders to the engine');
     ok(/data-rel="\$\{esc\(g\.rel\)\}"/.test(appjs), 'every row carries its full path');
     ok(/setScope\([\s\S]{0,80}?it\.dataset\.rel, label\)/.test(appjs), 'and the grid is scoped on that path');
     ok(!/setScope\([\s\S]{0,80}?it\.dataset\.name/.test(appjs), 'never on the last segment alone');
@@ -3663,6 +3663,206 @@ async function testOverviewTree() {
     ok(/state\.ovOpen\.clear\(\)/.test(appjs), 'a new comparison starts folded');
     ok(/\.ov-twist\.open\{transform:rotate\(90deg\)\}/.test(html.replace(/;\}/g, '}')),
        'and the arrow turns when the folder is open');
+  }
+}
+
+
+// ══ 37. Ordering and batch selection in the overview (0.6.8) ══════════════
+// Two requests on the same panel: order it by name or by count, not only by
+// size, and pick several folders at once to untick them in one go.
+async function testOverviewSortAndBatch() {
+  console.log('\n\n37. Ordering and batch selection in the overview (0.6.8)');
+
+  const build = async () => {
+    const { L, R } = scratch();
+    // Sizes, counts and names deliberately disagree, so each ordering produces
+    // a different list — a test where two columns agree proves nothing.
+    write(L, 'ZULU/big.mov', 'x'.repeat(5000), Date.now());
+    write(L, 'ZULU/small.mov', 'x'.repeat(10), Date.now());
+    write(L, 'A010/one.mov', 'y'.repeat(400), Date.now());
+    write(L, 'A002/a.mov', 'z'.repeat(100), Date.now());
+    write(L, 'A002/b.mov', 'z'.repeat(100), Date.now());
+    write(L, 'A002/c.mov', 'z'.repeat(100), Date.now());
+    const s = new Session();
+    await s.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: { cancelled: false } });
+    return s;
+  };
+  const names = ov => ov.rows.map(r => r.name).join(' ');
+
+  // (a) The default has not moved: biggest first.
+  {
+    const s = await build();
+    eq(names(s.overview()), 'ZULU A010 A002', 'by default the heaviest folder is still first');
+    await s.close();
+  }
+
+  // (b) By name, both ways — and A002 before A010, which a plain string sort
+  //     gets right by luck here and wrong as soon as a clip is numbered 2 and
+  //     another 10.
+  {
+    const s = await build();
+    eq(names(s.overview({}, [], { key: 'name', dir: 'asc' })), 'A002 A010 ZULU', 'by name, A→Z');
+    eq(names(s.overview({}, [], { key: 'name', dir: 'desc' })), 'ZULU A010 A002', 'and Z→A');
+    await s.close();
+  }
+
+  // (c) By number of items, which is a different order again.
+  {
+    const s = await build();
+    eq(names(s.overview({}, [], { key: 'items', dir: 'desc' })), 'A002 ZULU A010',
+       'by count, the folder with the most items leads');
+    eq(names(s.overview({}, [], { key: 'items', dir: 'asc' })), 'A010 ZULU A002', 'and the other way round');
+    await s.close();
+  }
+
+  // (d) 🔴 Natural order on names: A2 before A10.
+  {
+    const { L, R } = scratch();
+    for (const n of ['A10', 'A2', 'A1']) write(L, n + '/clip.mov', 'x', Date.now());
+    const s = new Session();
+    await s.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: { cancelled: false } });
+    eq(names(s.overview({}, [], { key: 'name', dir: 'asc' })), 'A1 A2 A10',
+       'numbered names sort like numbers, not like text');
+    await s.close();
+  }
+
+  // (e) The order applies INSIDE an unfolded folder too, and the children stay
+  //     under their own parent.
+  {
+    const { L, R } = scratch();
+    write(L, 'DAY1/B_small.mov', 'x'.repeat(10), Date.now());
+    write(L, 'DAY1/A_big.mov', 'x'.repeat(9000), Date.now());
+    write(L, 'DAY2/zzz.mov', 'x'.repeat(500), Date.now());
+    const s = new Session();
+    await s.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: { cancelled: false } });
+    eq(names(s.overview({}, ['DAY1'], { key: 'name', dir: 'asc' })), 'DAY1 A_big.mov B_small.mov DAY2',
+       'a level orders by the same column as the rest');
+    eq(names(s.overview({}, ['DAY1'], { key: 'bytes', dir: 'desc' })), 'DAY1 A_big.mov B_small.mov DAY2',
+       'and by size the heavy clip leads its own level');
+    await s.close();
+  }
+
+  // (f) Equal values must not shuffle between two refreshes: the name settles
+  //     it, whichever direction the column is sorted in.
+  {
+    const { L, R } = scratch();
+    for (const n of ['CARD_C', 'CARD_A', 'CARD_B']) write(L, n + '/clip.mov', 'x'.repeat(100), Date.now());
+    const s = new Session();
+    await s.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: { cancelled: false } });
+    eq(names(s.overview({}, [], { key: 'bytes', dir: 'desc' })), 'CARD_A CARD_B CARD_C',
+       'three folders of the same size keep a stable, alphabetical order');
+    eq(names(s.overview({}, [], { key: 'bytes', dir: 'asc' })), 'CARD_A CARD_B CARD_C',
+       'and the tie-break does not flip with the column');
+    await s.close();
+  }
+
+  // (g) Unticking a batch really reaches the engine: setActive takes a list,
+  //     and excluding a folder excludes everything under it.
+  {
+    const { L, R } = scratch();
+    write(L, 'A/1.mov', 'x', Date.now());
+    write(L, 'B/1.mov', 'x', Date.now());
+    write(L, 'C/1.mov', 'x', Date.now());
+    const s = new Session();
+    await s.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: { cancelled: false } });
+    const ov = s.overview();
+    const two = ov.rows.filter(r => r.name === 'A' || r.name === 'B').map(r => r.idx);
+    eq(two.length, 2, 'two folders picked');
+    const st = s.setActive(two, false);
+    eq(s.overview().rows.length, 1, 'the panel is left with the one still ticked');
+    eq(s.overview().rows[0].name, 'C', 'and it is the right one');
+    ok(st.excluded >= 4, 'everything under the two folders went with them');
+    // And back on: a batch must be reversible in one gesture too.
+    s.setActive(two, true);
+    eq(s.overview().rows.length, 3, 'ticking them again brings all three back');
+    await s.close();
+  }
+
+  // (h) Unticking a folder takes its work away, so its row would leave a panel
+  //     that only lists work — taking the tick box you would use to put it
+  //     back with it. "Show excluded" keeps those rows.
+  {
+    const { L, R } = scratch();
+    write(L, 'A/1.mov', 'x'.repeat(100), Date.now());
+    write(L, 'B/1.mov', 'x'.repeat(100), Date.now());
+    const s = new Session();
+    await s.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: { cancelled: false } });
+    const a = s.overview().rows.find(r => r.name === 'A');
+    s.setActive([a.idx], false);
+    eq(s.overview().rows.map(r => r.name).join(' '), 'B',
+       'by default an excluded folder leaves the panel, as it always did');
+    const withX = s.overview({ showExcluded: true });
+    eq(withX.rows.map(r => r.name).join(' '), 'B A', 'with "show excluded" it is still there');
+    eq(withX.rows.find(r => r.name === 'A').active, false, 'shown unticked');
+    eq(withX.rows.find(r => r.name === 'A').bytes, 0, 'and counting nothing, because nothing will move');
+    await s.close();
+  }
+
+  // (i) 🔴 The filter submenu listed patterns and nothing else, so the two
+  //     lines for a folder — `KADAZ/` and `/260628/KADAZ/` — read as the same
+  //     thing twice. Nothing said that a leading slash is what anchors a
+  //     pattern to this one place. Each entry now leads with a sentence.
+  {
+    const appjs = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.js'), 'utf8');
+    // Pull the real function out of the renderer and run it: a wording check
+    // that reads the source is a check on the comment, not on the menu.
+    const src = appjs.slice(appjs.indexOf('function filterVariants(r) {'));
+    const body = src.slice(0, src.indexOf('\n}') + 2);
+    const filterVariants = eval('(' + body.replace('function filterVariants', 'function') + ')');
+
+    const folder = filterVariants({ type: 'folder', name: 'KADAZ', rel: '260628/KADAZ' });
+    eq(folder.length, 2, 'a folder offers two patterns');
+    eq(folder[0].p, 'KADAZ/', 'the loose one is the bare name');
+    eq(folder[0].lbl, 'Every folder with this name', 'and it says so in words');
+    ok(/anywhere/.test(folder[0].sub), 'stating how far it reaches');
+    eq(folder[1].p, '/260628/KADAZ/', 'the anchored one carries the whole path');
+    eq(folder[1].lbl, 'This folder only', 'and says it applies to this one only');
+    ok(/exact path/.test(folder[1].sub), 'naming what makes it different');
+    ok(folder.every(v => /contents/.test(v.sub)), 'both say that the contents go with it');
+
+    const file = filterVariants({ type: 'file', name: 'A001.mov', rel: 'DAY1/A001.mov' });
+    eq(file.map(v => v.p).join(' '), '*.mov A001.mov /DAY1/A001.mov', 'a file offers three, widest first');
+    eq(file[0].lbl, 'All .mov files', 'by extension');
+    eq(file[2].lbl, 'This file only', 'and the last one is the safest');
+    ok(file.every(v => v.lbl && v.sub), 'every entry has a sentence and a reach');
+
+    // The pattern itself stays visible: it is what lands in the filter box.
+    ok(/<code>\$\{esc\(v\.p\)\}<\/code>/.test(appjs), 'the pattern is still shown under the sentence');
+    ok(/data-p="\$\{esc\(v\.p\)\}"/.test(appjs), 'and it is the pattern that is applied');
+    ok(/Keep — add to the include filter/.test(appjs) && /Skip — add to the exclude filter/.test(appjs),
+       'the two parents say which way the rule goes');
+    // Three-line entries are tall: near the bottom of the screen the submenu
+    // used to run off, hiding "this one only" — the safest suggestion.
+    ok(/function placeSub\(sub\)/.test(appjs), 'the submenu is placed rather than left to fall off');
+    ok(/sub\.parentElement\.addEventListener\('mouseenter', \(\) => placeSub\(sub\)\)/.test(appjs),
+       'measured each time it opens');
+  }
+
+  // (j) The window: the header sorts, the tick box works on the selection,
+  //     and a Shift range is measured in the order rows are DRAWN — sorting
+  //     by name and shift-clicking must select what is between them on
+  //     screen, not what would have been between them by size.
+  {
+    const html  = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/index.html'), 'utf8');
+    const appjs = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.js'), 'utf8');
+    for (const k of ['name', 'items', 'bytes']) {
+      ok(html.includes(`data-sort="${k}"`), `the ${k} column title is a sort control`);
+    }
+    ok(/getOverview\(state\.view,\s*open,\s*state\.ovSort\)/.test(appjs), 'the window sends its ordering to the engine');
+    ok(/state\.ovOrder = ov\.rows\.map/.test(appjs), 'it remembers the order rows were drawn in');
+    ok(/state\.ovOrder\.slice\(Math\.min\(a, b\), Math\.max\(a, b\) \+ 1\)/.test(appjs),
+       'and a Shift range is taken from that order');
+    ok(/e\.shiftKey/.test(appjs) && /e\.metaKey \|\| e\.ctrlKey/.test(appjs), 'Shift and Cmd/Ctrl are both handled');
+    ok(/ovIndicesFor\(key\)/.test(appjs), 'a tick box acts on the whole selection when the row is in it');
+    ok(/API\.setActive\(idxs, on\)/.test(appjs), 'through one call, not one per folder');
+    ok(/if \(state\.ovSel\.size\) \{ clearOvSel\(\); refreshOverview\(\); \}/.test(appjs),
+       'working in the grid drops the batch, so Space cannot act on a selection you left behind');
+    ok(/ovSort : \{ key: 'bytes', dir: 'desc' \}/.test(appjs), 'and the panel still opens sorted by size');
+    // A grid cell that overflows prints over its neighbour: "Share" was wider
+    // than the 36 px column it named and landed on top of "Folder".
+    ok(/#ov-head > div\{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;\}/.test(html),
+       'a header title too wide for its column is clipped, never drawn over the next one');
+    ok(!/<div>Share<\/div>/.test(html), 'and the narrow first column is not titled with a word that cannot fit');
   }
 }
 
@@ -3706,6 +3906,7 @@ async function testOverviewTree() {
     testLog();
     await testSftpTransfer();
     await testOverviewTree();
+    await testOverviewSortAndBatch();
   } catch (err) {
     failed++;
     failures.push('UNCAUGHT: ' + (err.stack || err.message));

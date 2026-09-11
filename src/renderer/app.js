@@ -45,6 +45,13 @@ const state = {
   // window, not in the job: it is a way of looking at one comparison, and a
   // new comparison starts folded.
   ovOpen : new Set(),
+  // How zone 2 is ordered, and what is selected in it. Also window-only: the
+  // job file describes two folders, not a way of looking at them.
+  ovSort : { key: 'bytes', dir: 'desc' },
+  ovSel  : new Set(),      // keys of the selected rows
+  ovAnchor: null,          // where a Shift range starts
+  ovOrder: [],             // the keys in the order they are drawn
+  ovByKey: new Map(),      // key -> the row the engine sent
 };
 
 // A job always carries a pairs array; old shapes are migrated on sight.
@@ -488,6 +495,9 @@ const DIR_CYCLE = { right: 'left', left: 'none', none: 'right', conflict: 'right
 $('gridbody').addEventListener('click', async e => {
   const row = e.target.closest('.grow');
   if (!row || row.dataset.idx == null) return;   // pair headers are inert
+  // Working in the grid ends the batch: a highlighted selection in zone 2 that
+  // Space would still act on, while you are looking elsewhere, is a trap.
+  if (state.ovSel.size) { clearOvSel(); refreshOverview(); }
   const idx = Number(row.dataset.idx);
   const hit = e.target.closest('[data-act]');
   const act = hit ? hit.dataset.act : '';
@@ -513,18 +523,49 @@ function closeCtx() {
   if (m) m.remove();
 }
 
+// A submenu opens where its parent line is, which is fine until the parent is
+// near the bottom of the screen: three-line entries run off the edge and the
+// last suggestion — "this one only", the safest of them — is the one you cannot
+// read. Measured and pulled back when it opens, and flipped to the other side
+// when there is no room on the right.
+function placeSub(sub) {
+  sub.style.top = '-6px';
+  sub.style.left = ''; sub.style.right = ''; sub.style.marginLeft = ''; sub.style.marginRight = '';
+  // A hidden element has no size: show it to measure, then hand it back to the
+  // stylesheet, which keeps it open while the parent is hovered.
+  sub.style.display = 'block';
+  const r = sub.getBoundingClientRect();
+  let top = -6;
+  const over = r.bottom - (window.innerHeight - 8);
+  if (over > 0) top -= over;
+  if (r.top + (top + 6) < 8) top = 8 - r.top - 6;
+  sub.style.top = top + 'px';
+  if (r.right > window.innerWidth - 8) {
+    sub.style.left = 'auto'; sub.style.right = '100%';
+    sub.style.marginLeft = '0'; sub.style.marginRight = '2px';
+  }
+  sub.style.display = '';
+}
+
 // The filter suggestions for one item, most specific last — same spirit as
 // FreeFileSync's submenu: by extension, by name anywhere, by exact path.
+// The three shapes a pattern can take, and — the part that was missing — what
+// each one does said in words. A leading slash anchors the pattern to the top
+// of the pair; without it, the name matches at any depth. Nothing on screen
+// said so, so "KADAZ/" and "/260628/KADAZ/" read as the same line twice.
 function filterVariants(r) {
   const out = [];
   if (r.type !== 'folder') {
     const dot = r.name.lastIndexOf('.');
-    if (dot > 0) out.push('*' + r.name.slice(dot));   // every file with this extension, anywhere
-    out.push(r.name);                                  // every item with this exact name, anywhere
-    out.push('/' + r.rel);                             // this one item only
+    if (dot > 0) {
+      const ext = r.name.slice(dot);
+      out.push({ p: '*' + ext, lbl: `All ${ext} files`, sub: 'anywhere in this job' });
+    }
+    out.push({ p: r.name, lbl: 'Every file with this name', sub: 'anywhere in this job' });
+    out.push({ p: '/' + r.rel, lbl: 'This file only', sub: 'at this exact path' });
   } else {
-    out.push(r.name + '/');                            // every folder with this name, anywhere
-    out.push('/' + r.rel + '/');                       // this one folder only
+    out.push({ p: r.name + '/', lbl: 'Every folder with this name', sub: 'anywhere in this job, with its contents' });
+    out.push({ p: '/' + r.rel + '/', lbl: 'This folder only', sub: 'at this exact path, with its contents' });
   }
   return out;
 }
@@ -549,7 +590,7 @@ async function addFilterPattern(kind, pattern) {
 }
 
 async function toggleExcludeTemp(idx) {
-  state.stats = await API.toggleActive([idx]);
+  state.stats = await API.toggleActive(Array.isArray(idx) ? idx : [idx]);
   afterEdit();
   await refreshOverview();
 }
@@ -575,8 +616,12 @@ async function revealNode(idx, side) {
 function openCtx(x, y, r) {
   closeCtx();
   const variants = filterVariants(r);
+  // The pattern is still shown — it is what lands in the filter, and people
+  // check it — but underneath the sentence, not instead of it.
   const sub = kind => variants.map(v =>
-    `<div class="ctx-it" data-k="${kind}" data-p="${esc(v)}"><span class="lbl">${esc(v)}</span></div>`).join('');
+    `<div class="ctx-it pat-it" data-k="${kind}" data-p="${esc(v.p)}">
+       <span class="lbl"><b>${esc(v.lbl)}</b><i>${esc(v.sub)}</i><code>${esc(v.p)}</code></span>
+     </div>`).join('');
 
   // A row is two places on disk, not one, so there are two entries. A side the
   // item is not on is greyed rather than hidden: a menu whose shape changes
@@ -595,14 +640,17 @@ function openCtx(x, y, r) {
   m.innerHTML = reveal +
     `<div class="ctx-it" data-k="temp">${r.active ? CTX_SQ : CTX_SQ_CHK}<span class="lbl">Exclude temporarily</span><span class="key">Space</span></div>` +
     `<div class="ctx-sep"></div>` +
-    `<div class="ctx-it">${CTX_OK}<span class="lbl">Include via filter</span><span class="sub-arrow">▶</span><div class="ctx-sub">${sub('include')}</div></div>` +
-    `<div class="ctx-it">${CTX_KO}<span class="lbl">Exclude via filter</span><span class="sub-arrow">▶</span><div class="ctx-sub">${sub('exclude')}</div></div>`;
+    `<div class="ctx-it">${CTX_OK}<span class="lbl">Keep — add to the include filter</span><span class="sub-arrow">▶</span><div class="ctx-sub"><div class="ctx-head">Keep, from now on…</div>${sub('include')}</div></div>` +
+    `<div class="ctx-it">${CTX_KO}<span class="lbl">Skip — add to the exclude filter</span><span class="sub-arrow">▶</span><div class="ctx-sub"><div class="ctx-head">Skip, from now on…</div>${sub('exclude')}</div></div>`;
   document.body.appendChild(m);
 
   // Keep it on screen.
   const rct = m.getBoundingClientRect();
   m.style.left = Math.min(x, window.innerWidth - rct.width - 8) + 'px';
   m.style.top  = Math.min(y, window.innerHeight - rct.height - 8) + 'px';
+  for (const sub of m.querySelectorAll('.ctx-sub')) {
+    sub.parentElement.addEventListener('mouseenter', () => placeSub(sub));
+  }
 
   m.addEventListener('click', async e => {
     const it = e.target.closest('.ctx-it[data-k]');
@@ -612,7 +660,7 @@ function openCtx(x, y, r) {
     if (it.classList.contains('off')) return;
     if (it.dataset.k === 'rv-left')       await revealNode(r.idx, 'left');
     else if (it.dataset.k === 'rv-right') await revealNode(r.idx, 'right');
-    else if (it.dataset.k === 'temp')     await toggleExcludeTemp(r.idx);
+    else if (it.dataset.k === 'temp')     await toggleExcludeTemp(r.batch && r.batch.length > 1 ? r.batch : r.idx);
     else await addFilterPattern(it.dataset.k, it.dataset.p);
   });
 }
@@ -663,14 +711,18 @@ document.addEventListener('mousedown', e => { if (!e.target.closest('.ctx')) clo
 window.addEventListener('blur', closeCtx);
 document.addEventListener('scroll', closeCtx, true);
 
-// Space = exclude/include the selected row temporarily, like FFS.
+// Space = exclude/include what is selected, like FFS. A selection made in the
+// overview wins, because it is the one you can see highlighted.
 document.addEventListener('keydown', async e => {
-  if (e.key !== ' ' || state.selIdx == null) return;
+  if (e.key !== ' ') return;
+  const picked = state.ovSel.size ? [...state.ovSel].map(k => state.ovByKey.get(k))
+                                      .filter(g => g && g.idx >= 0).map(g => g.idx) : [];
+  if (!picked.length && state.selIdx == null) return;
   const a = document.activeElement;
   if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT')) return;
   if (document.querySelector('.ov.open')) return;
   e.preventDefault();
-  await toggleExcludeTemp(state.selIdx);
+  await toggleExcludeTemp(picked.length ? picked : state.selIdx);
 });
 
 async function afterEdit() {
@@ -787,6 +839,7 @@ async function doCompare() {
   state.selIdx = null;      // the old selection indexes a tree about to vanish
   state.view.scope = null;  // and so does the scope
   state.ovOpen.clear();     // and so do the folders unfolded in the overview
+  clearOvSel();             // and the selection made inside it
   renderScopeBar();
   state.busy = 'compare';
   state.speeds = [];
@@ -2130,7 +2183,7 @@ async function refreshOverview() {
     const i = k.indexOf(':');
     return { p: Number(k.slice(0, i)), rel: k.slice(i + 1) };
   });
-  const ov = await API.getOverview(state.view, open);
+  const ov = await API.getOverview(state.view, open, state.ovSort);
   if (!ov || !ov.rows.length) {
     const nothing = state.stats.rows > 0;
     box.innerHTML = nothing
@@ -2144,6 +2197,11 @@ async function refreshOverview() {
   // saying so — which reads as an arbitrary mix of roots and sub-folders.
   // Each pair now gets its own heading.
   const multi = ov.pairs > 1;
+  // Drawn order and a lookup by key: a Shift range is "everything between
+  // these two ON SCREEN", which only the drawn order knows.
+  state.ovOrder = ov.rows.map(g => g.pairIdx + ':' + g.rel);
+  state.ovByKey = new Map(ov.rows.map(g => [g.pairIdx + ':' + g.rel, g]));
+  for (const k of [...state.ovSel]) if (!state.ovByKey.has(k)) state.ovSel.delete(k);
   box.innerHTML = ov.rows.map(g => {
     const head = (multi && g.first)
       ? `<div class="ov-pairhead"><span class="n">${g.pair}</span>${esc(g.pairLabel)}</div>`
@@ -2155,11 +2213,13 @@ async function refreshOverview() {
     const twist = g.kids
       ? `<span class="ov-twist${g.open ? ' open' : ''}">${ICON_CHEV}</span>`
       : '<span class="ov-twist none"></span>';
+    const key = g.pairIdx + ':' + g.rel;
     return head + `
-    <div class="ov-row${g.idx === state.selIdx ? ' sel' : ''}${g.active ? '' : ' off'}${scoped ? ' scoped' : ''}"
+    <div class="ov-row${g.idx === state.selIdx ? ' sel' : ''}${g.active ? '' : ' off'}${scoped ? ' scoped' : ''}${state.ovSel.has(key) ? ' picked' : ''}"
          data-idx="${g.idx}" data-name="${esc(g.name)}" data-rel="${esc(g.rel)}" data-type="${g.type}"
          data-pair="${g.pairIdx}" data-active="${g.active ? 1 : 0}" data-kids="${g.kids ? 1 : 0}"
          data-tip="${g.pairLabel ? '[' + esc(g.pairLabel) + '] ' : ''}${esc(g.rel)} — ${g.items} item${g.items === 1 ? '' : 's'}, ${esc(fmtBytes(g.bytes))}.${g.kids ? ' Click to open it here and show it in the grid.' : ' Click to show it in the grid.'}">
+      <div class="ov-chk"><input type="checkbox" ${g.active ? 'checked' : ''} data-act="toggle"></div>
       <div class="ov-pct"><div class="bar" style="width:${g.pct}%"></div><div class="lbl">${g.pct}%</div></div>
       <div class="ov-name" style="padding-left:${g.depth * 11}px">${twist}${g.type === 'folder' ? ICON_FOLDER : ICON_FILE}<span>${esc(g.name)}</span></div>
       <div class="ov-items">${g.items}</div>
@@ -2167,6 +2227,45 @@ async function refreshOverview() {
     </div>`;
   }).join('');
 }
+
+// What a gesture on ONE row applies to: the whole selection when that row is
+// part of it, the row alone otherwise. Rows with no node of their own (never
+// seen in practice) are dropped rather than sent to the engine as -1.
+function ovIndicesFor(key) {
+  const keys = state.ovSel.has(key) && state.ovSel.size > 1 ? [...state.ovSel] : [key];
+  return keys.map(k => state.ovByKey.get(k))
+             .filter(g => g && g.idx >= 0)
+             .map(g => g.idx);
+}
+
+function clearOvSel() {
+  state.ovSel.clear();
+  state.ovAnchor = null;
+}
+
+// Clicking a column title orders the panel by it, at every level of the tree.
+// First click on a name reads A→Z; first click on a number puts the biggest
+// first, which is what a size column is usually asked for.
+function renderOvHead() {
+  const s = state.ovSort;
+  for (const cell of document.querySelectorAll('#ov-head [data-sort]')) {
+    const on = cell.dataset.sort === s.key;
+    cell.classList.toggle('on', on);
+    cell.dataset.dir = on ? s.dir : '';
+  }
+}
+
+$('ov-head').addEventListener('click', async e => {
+  const cell = e.target.closest('[data-sort]');
+  if (!cell) return;
+  const k = cell.dataset.sort;
+  const s = state.ovSort;
+  state.ovSort = s.key === k
+    ? { key: k, dir: s.dir === 'asc' ? 'desc' : 'asc' }
+    : { key: k, dir: k === 'name' ? 'asc' : 'desc' };
+  renderOvHead();
+  await refreshOverview();
+});
 
 // The bar above the grid that says what it is currently showing, and how to
 // get back to everything.
@@ -2203,6 +2302,39 @@ $('ov-list').addEventListener('click', async e => {
   const key = it.dataset.pair + ':' + it.dataset.rel;
   const kids = it.dataset.kids === '1';
 
+  // The tick box. Inside a selection it applies to the WHOLE selection — that
+  // is the batch this panel was missing: ten camera folders out of a run used
+  // to be ten trips through the grid.
+  const box = e.target.closest('[data-act="toggle"]');
+  if (box) {
+    const on = !!box.checked;
+    const idxs = ovIndicesFor(key);
+    if (!idxs.length) return;
+    state.stats = await API.setActive(idxs, on);
+    afterEdit();
+    await refreshOverview();
+    return;
+  }
+
+  // Shift extends from the last row clicked, Cmd/Ctrl adds or removes one.
+  // Neither moves the grid: picking a batch is not the same gesture as asking
+  // to look at a folder.
+  if (e.shiftKey && state.ovAnchor && state.ovByKey.has(state.ovAnchor)) {
+    const a = state.ovOrder.indexOf(state.ovAnchor);
+    const b = state.ovOrder.indexOf(key);
+    if (a >= 0 && b >= 0) {
+      state.ovSel = new Set(state.ovOrder.slice(Math.min(a, b), Math.max(a, b) + 1));
+      await refreshOverview();
+    }
+    return;
+  }
+  if (e.metaKey || e.ctrlKey) {
+    if (state.ovSel.has(key)) state.ovSel.delete(key); else state.ovSel.add(key);
+    state.ovAnchor = key;
+    await refreshOverview();
+    return;
+  }
+
   if (e.target.closest('.ov-twist')) {
     if (!kids) return;
     if (state.ovOpen.has(key)) state.ovOpen.delete(key); else state.ovOpen.add(key);
@@ -2212,6 +2344,10 @@ $('ov-list').addEventListener('click', async e => {
 
   const idx = Number(it.dataset.idx);
   if (idx >= 0) state.selIdx = idx;
+  // A plain click restarts the selection on this row — the anchor a Shift
+  // range will measure from.
+  state.ovSel = new Set([key]);
+  state.ovAnchor = key;
   const pairIdx = Number(it.dataset.pair);
   const label = it.dataset.tip.startsWith('[') ? it.dataset.tip.slice(1, it.dataset.tip.indexOf(']')) : '';
   // `scoped` is what setScope is about to toggle off, so the folder folds on
@@ -2233,11 +2369,16 @@ $('ov-list').addEventListener('contextmenu', async e => {
   state.selIdx = idx;
   await refreshOverview();
   await renderWindow();
+  const key = it.dataset.pair + ':' + it.dataset.rel;
+  if (!state.ovSel.has(key)) { state.ovSel = new Set([key]); state.ovAnchor = key; }
+  await refreshOverview();
   openCtx(e.clientX, e.clientY, {
     // rel is the path from the root of the pair — inside an unfolded folder
     // the name alone would build an exclusion pattern for the wrong level.
     idx, rel: it.dataset.rel, name: it.dataset.name,
     type: it.dataset.type, active: it.dataset.active === '1',
+    // Right-clicking inside a selection excludes the whole selection.
+    batch: ovIndicesFor(key),
   });
 });
 

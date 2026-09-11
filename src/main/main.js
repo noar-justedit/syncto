@@ -699,7 +699,7 @@ ipcMain.handle('compare', async (_, job) => {
 ipcMain.handle('compare-cancel', () => { tokens.compare.cancelled = true; return true; });
 
 ipcMain.handle('get-rows', (_, offset, limit, view) => session.rows(offset, limit, view));
-ipcMain.handle('get-overview', (_, view, open) => session.overview(view, open));
+ipcMain.handle('get-overview', (_, view, open, sort) => session.overview(view, open, sort));
 
 // Right-click → Reveal. The window sends a row index and a side; the path is
 // resolved here, where the pairs, the two roots and each side's own spelling of
