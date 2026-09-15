@@ -3866,6 +3866,88 @@ async function testOverviewSortAndBatch() {
   }
 }
 
+
+// ══ 38. Getting out of a narrowed view, and what a run looks like (0.7.1) ══
+// Five things Noar hit in a row on the 0.7.0, four of them about a window that
+// stops answering: a grid left empty with no way back, an unreachable
+// scrollbar, a run whose figures sat in a strip at the bottom, and a wait after
+// the run with nothing on screen at all.
+function testNarrowedViewAndRunUi() {
+  console.log('\n\n38. Getting out of a narrowed view, and what a run looks like (0.7.1)');
+
+  const html  = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/index.html'), 'utf8');
+  const appjs = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.js'), 'utf8');
+
+  // (a) 🔴 Unticking the folder the grid is scoped to empties the grid: the
+  //     rows are still there, they just stopped being work. The window used to
+  //     sit on that emptiness until you found the "Show everything" button.
+  ok(/async function dropScopeIfEmpty\(\)/.test(appjs), 'an empty scope is dropped rather than left');
+  ok(/const res = await API\.getRows\(0, 1, state\.view\);[\s\S]{0,80}if \(res && res\.total > 0\) return false;/.test(appjs),
+     'and the window asks the engine rather than guessing');
+  // Both ways of unticking have to do it: the tick box and Space.
+  const boxPath = appjs.slice(appjs.indexOf('const box = e.target.closest'), appjs.indexOf('// Shift extends from the last row'));
+  ok(/await dropScopeIfEmpty\(\)/.test(boxPath), 'the tick box refreshes the view it just emptied');
+  const togglePath = appjs.slice(appjs.indexOf('async function toggleExcludeTemp'));
+  ok(/await dropScopeIfEmpty\(\)/.test(togglePath.slice(0, 400)), 'and so does Space, and the context menu');
+
+  // (b) The empty space of the overview is the way back to everything — and it
+  //     says so, but only while there is something to go back from.
+  ok(/async function showEverything\(\)/.test(appjs), 'there is one way back, not two implementations');
+  ok(/if \(!it\) \{[\s\S]{0,260}if \(viewIsNarrowed\(\)\) await showEverything\(\);/.test(appjs),
+     'clicking the empty part of the panel takes it');
+  ok(/if \(k === 'clear'\) \{\s*\n\s*await showEverything\(\);/.test(appjs),
+     'and the button in the middle of the empty grid calls the same thing');
+  ok(/const back = viewIsNarrowed\(\)/.test(appjs) && /ov-reset/.test(appjs),
+     'the panel says it, rather than hiding a target');
+  ok(/#ov-list\.can-reset\{cursor:pointer;\}/.test(html.replace(/\s+/g, '').replace(/#ov-list\.can-reset\{cursor:pointer;\}/, '#ov-list.can-reset{cursor:pointer;}')) ||
+     /can-reset\{cursor:pointer/.test(html), 'and the pointer changes over it');
+
+  // (c) Scrollbars you can catch: 5 px of a colour one step off the background
+  //     is not a control. One rule for every panel, with a floor on the thumb
+  //     so a list of ten thousand rows still gives you something to hold.
+  ok(!/::-webkit-scrollbar\{width:5px;\}/.test(html), 'no 5 px scrollbar is left anywhere');
+  ok(/::-webkit-scrollbar\{width:13px;height:13px;\}/.test(html), 'they are wide enough to grab');
+  ok(/min-height:40px/.test(html), 'and the thumb cannot shrink to nothing on a long list');
+  ok(/-webkit-scrollbar-thumb:hover/.test(html), 'with a hover state, like any other control');
+
+  // (d) During a run the progress panel takes the working area. Same elements,
+  //     same ids — only the shape changes, so every line that updates them
+  //     keeps working whichever form they are wearing.
+  ok(/\$\('bottombar'\)\.classList\.toggle\('kiosk', !!\(on && steps\)\);/.test(appjs),
+     'a run gets the big view');
+  ok(/classList\.toggle\('running', !!\(on && steps\)\)/.test(appjs), 'and the window says it is running');
+  ok(/#app\.running #statusbar\{display:none;\}/.test(html), 'the chips describing the old comparison go away');
+  ok(/#app\.running #sidebar\{pointer-events:none;\}/.test(html),
+     'and the sidebar stops taking clicks, since they would change the plan and not the run');
+  ok(/#bottombar\.kiosk\{position:absolute;inset:0;/.test(html), 'the panel covers the working area');
+  // Frosted rather than opaque: the comparison stays visible underneath, so
+  // the run reads as something happening ON the window, not a second screen.
+  const kioskCss = html.slice(html.indexOf('#bottombar.kiosk{position:absolute'), html.indexOf('#bottombar.kiosk .pb-track-top'));
+  const alpha = /background:rgba\(\d+,\d+,\d+,\.(\d+)\)/.exec(kioskCss);
+  ok(alpha && Number('0.' + alpha[1]) < 0.75, 'its background lets the window show through');
+  ok(/backdrop-filter:blur\(\d+px\)/.test(kioskCss) && /-webkit-backdrop-filter:blur/.test(kioskCss),
+     'and what shows through is blurred, on both spellings of the property');
+  // Order matters: `#bottombar.open` sets a fixed height, so the kiosk rule has
+  // to come after it or the panel stays a 196 px strip.
+  ok(html.indexOf('#bottombar.open{height:196px;}') < html.indexOf('#bottombar.kiosk{position:absolute'),
+     'and its rule comes after the one that fixes the strip height');
+  // A comparison keeps the strip: the grid behind it is filling up.
+  ok(/setBusyUi\(true, 'Comparing…'\)/.test(appjs) || /setBusyUi\(true, title\)/.test(appjs) ||
+     /setBusyUi\(true, 'Checking the result…'\)/.test(appjs), 'a comparison is still announced in the strip');
+
+  // (e) 🔴 The wait after a run had no name. syncto compares both folders again
+  //     to confirm the result — seconds of a window answering to nothing, right
+  //     after a run, which reads as a crash.
+  const quiet = appjs.slice(appjs.indexOf('async function doCompareQuiet'));
+  ok(/setBusyUi\(true, 'Checking the result…'\)/.test(quiet.slice(0, 1200)), 'the re-comparison shows itself');
+  ok(/setRecheck\('busy'/.test(appjs), 'and the summary card says what is still happening');
+  ok(/Compared again: both folders now match/.test(appjs), 'then what it found');
+  ok(/still need attention/.test(appjs), 'including when something is left');
+  ok(/setRecheck\(null\);/.test(appjs), 'a line from the previous run never describes this one');
+  ok(/finally \{\s*\n\s*state\.busy = null;[\s\S]{0,140}setBusyUi\(false\);/.test(appjs),
+     'and the strip closes even if that comparison fails');
+}
+
 (async function main() {
   console.log('syncto engine tests');
   console.log('scratch: ' + ROOT);
@@ -3907,6 +3989,7 @@ async function testOverviewSortAndBatch() {
     await testSftpTransfer();
     await testOverviewTree();
     await testOverviewSortAndBatch();
+    testNarrowedViewAndRunUi();
   } catch (err) {
     failed++;
     failures.push('UNCAUGHT: ' + (err.stack || err.message));

@@ -4,6 +4,46 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.7.1] — 2026-09-14
+
+Getting out of a narrowed view, and a run you can read from across the room.
+
+### Fixed
+
+- **Unticking a folder in the overview left the grid empty**, with the
+  "Show everything" button as the only way out. Unticking takes the work away
+  from that folder, so a grid scoped to it has nothing left to show. The window
+  now asks the engine what is left and drops a scope that has nothing to
+  display — from the tick box, from Space and from the context menu alike.
+- **The wait at the end of a run had no name.** syncto compares both folders
+  again to confirm the result; that ran with nothing at all on screen, which
+  reads as a frozen window. It announces itself in the progress strip, and the
+  summary card carries a line that says what is happening and then what it
+  found: *both folders now match*, or how many items still need attention.
+
+### Added
+
+- **The empty space of the overview is the way back to everything** — and the
+  panel says so, with a reminder under the list that appears only while a
+  folder, a chip or a search is narrowing the view.
+- **During a run the progress panel takes the working area**: a ring you can
+  read from across the room, the passes, the file, the two buttons and the six
+  figures, on a frosted background that leaves the comparison visible
+  underneath. The chips describing the old comparison are hidden while it runs,
+  and the sidebar stops taking clicks — unticking a folder mid-run would change
+  the plan on screen and nothing in the run.
+- **A lane between the two folders shows which way the files are going.** The
+  engine now reports the side it is writing to (or reading back from), so in a
+  two-way run the chevrons turn round between two files. They follow the colour
+  of the pass, freeze on PAUSE, and empty during the tail of the run.
+
+### Changed
+
+- **Scrollbars can be caught.** They were 5 to 9 px wide in a colour one step
+  off the background. Every scrolling panel now uses one rule: wider, lighter,
+  with a hover state and a minimum thumb height, so a job of forty thousand rows
+  still gives you something to hold.
+
 ## [0.7.0] — 2026-09-11
 
 Ordering and batch selection in the overview, and a filter menu that says what

@@ -124,8 +124,7 @@ white-space:nowrap;cursor:pointer;transition:all .13s;}
 .job-actions button:disabled:hover{color:var(--text3);border-color:var(--border);}
 .job-actions button svg{width:16px;height:16px;}
 .recent-list{flex:1;min-height:0;overflow-y:auto;padding:4px 6px 8px;}
-.recent-list::-webkit-scrollbar{width:5px;}
-.recent-list::-webkit-scrollbar-thumb{background:var(--bg4);}
+/* Scrollbars — see the shared rule further down. */
 .recent-empty{font-size:11.5px;color:var(--text3);padding:8px 8px 10px;line-height:1.5;}
 .recent-item{display:flex;align-items:center;gap:7px;padding:5px 7px;border-radius:6px;
 cursor:pointer;transition:background .12s;}
@@ -154,8 +153,7 @@ font-size:9.5px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;col
 #ov-head [data-sort].on::after{content:' \25B2';font-size:7px;vertical-align:middle;}
 #ov-head [data-sort].on[data-dir="desc"]::after{content:' \25BC';}
 #ov-list{flex:1;overflow-y:auto;padding:0 6px 8px;}
-#ov-list::-webkit-scrollbar{width:5px;}
-#ov-list::-webkit-scrollbar-thumb{background:var(--bg4);}
+
 .ov-row{display:grid;grid-template-columns:17px 36px 1fr 38px 58px;align-items:center;
 gap:0;padding:4px 4px;border-radius:5px;font-size:12.5px;cursor:default;}
 .ov-row:hover{background:var(--bg3);}
@@ -181,6 +179,16 @@ flex-shrink:0;border-radius:3px;transition:transform .12s ease;}
 .ov-items{text-align:right;font-family:var(--mono);font-size:11.5px;color:var(--text3);overflow:hidden;}
 .ov-bytes{text-align:right;font-family:var(--mono);font-size:11.5px;color:var(--text2);padding-right:2px;overflow:hidden;}
 .ov-empty{font-size:11.5px;color:var(--text3);padding:10px;line-height:1.5;}
+/* The panel's empty space is a target: clicking it puts the grid back to
+   everything. Said out loud, because an invisible target is not one — and
+   only while there is something to go back FROM. */
+#ov-list{cursor:default;}
+#ov-list.can-reset{cursor:pointer;}
+.ov-reset{margin:10px 4px 4px;padding:7px 9px;border-radius:6px;font-size:10.5px;
+line-height:1.45;color:var(--text3);background:var(--bg3);border:1px dashed var(--border2);
+text-align:center;}
+#ov-list.can-reset:hover .ov-reset{color:var(--text2);border-color:var(--text3);}
+.ov-reset b{color:var(--text2);font-weight:700;}
 /* One heading per folder pair. Without it, a root folder of pair 2 sits
    between two root folders of pair 1 and the list looks arbitrary. */
 .ov-pairhead{display:flex;align-items:center;gap:7px;margin:10px 0 4px;padding:0 4px;
@@ -422,8 +430,7 @@ font-size:9.5px;font-weight:800;letter-spacing:.11em;text-transform:uppercase;co
    progress panel during a comparison — ring, counters, elapsed time, Cancel —
    which is exactly what you are looking at while a comparison runs. */
 #gridscroll{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;position:relative;}
-#gridscroll::-webkit-scrollbar{width:9px;}
-#gridscroll::-webkit-scrollbar-thumb{background:var(--bg4);border-radius:5px;}
+
 #gridspacer{position:relative;width:100%;}
 #gridbody{position:absolute;left:0;right:0;top:0;}
 .grow{height:var(--rowh);font-size:12.5px;border-bottom:1px solid rgba(255,255,255,.035);cursor:default;}
@@ -491,6 +498,29 @@ background:var(--bg3);border:1px solid var(--border);border-radius:6px;
 padding:6px 12px;cursor:pointer;font-family:inherit;}
 #ge-act:hover{color:var(--text1);border-color:var(--text3);}
 
+/* ── Scrollbars ───────────────────────────────────
+   They were 5 to 9 px of a colour one step off the background: hard to see,
+   harder to catch with a mouse. One rule for every scrolling panel now, wide
+   enough to grab and light enough to find, with a floor on the thumb so a
+   list of ten thousand rows still gives you something to hold. */
+#gridscroll::-webkit-scrollbar,#ov-list::-webkit-scrollbar,
+.recent-list::-webkit-scrollbar,.mcard::-webkit-scrollbar,
+.srv-tree::-webkit-scrollbar,.err-body::-webkit-scrollbar,
+.log-text::-webkit-scrollbar{width:13px;height:13px;}
+#gridscroll::-webkit-scrollbar-track,#ov-list::-webkit-scrollbar-track,
+.recent-list::-webkit-scrollbar-track,.mcard::-webkit-scrollbar-track,
+.srv-tree::-webkit-scrollbar-track,.err-body::-webkit-scrollbar-track,
+.log-text::-webkit-scrollbar-track{background:transparent;}
+#gridscroll::-webkit-scrollbar-thumb,#ov-list::-webkit-scrollbar-thumb,
+.recent-list::-webkit-scrollbar-thumb,.mcard::-webkit-scrollbar-thumb,
+.srv-tree::-webkit-scrollbar-thumb,.err-body::-webkit-scrollbar-thumb,
+.log-text::-webkit-scrollbar-thumb{background:#454956;border-radius:8px;
+border:3px solid transparent;background-clip:content-box;min-height:40px;}
+#gridscroll::-webkit-scrollbar-thumb:hover,#ov-list::-webkit-scrollbar-thumb:hover,
+.recent-list::-webkit-scrollbar-thumb:hover,.mcard::-webkit-scrollbar-thumb:hover,
+.srv-tree::-webkit-scrollbar-thumb:hover,.err-body::-webkit-scrollbar-thumb:hover,
+.log-text::-webkit-scrollbar-thumb:hover{background:#6a6f80;background-clip:content-box;}
+
 /* ── Status strip ─────────────────────────────── */
 #statusbar{flex-shrink:0;display:flex;align-items:center;gap:7px;padding:8px 16px;
 border-top:1px solid var(--border);background:var(--bg2);flex-wrap:wrap;min-height:41px;}
@@ -512,6 +542,95 @@ background:rgba(14,15,19,.72);backdrop-filter:blur(28px) saturate(150%);
 -webkit-backdrop-filter:blur(28px) saturate(150%);transition:height .3s ease;
 display:flex;flex-direction:column;flex-shrink:0;}
 #bottombar.open{height:196px;}
+/* During a RUN the progress panel stops being a strip at the bottom and takes
+   the working area: one big ring, the passes, the file, the figures and the
+   two buttons, centred, readable from across the room. Same elements and the
+   same ids as the strip — only the shape changes, so nothing that updates
+   them has to know which form they are wearing. */
+#content{position:relative;}
+/* Frosted, not opaque: the comparison stays visible underneath, blurred, so
+   the run reads as something happening ON the window rather than a different
+   screen that replaced it. */
+#bottombar.kiosk{position:absolute;inset:0;z-index:40;height:auto;border-top:none;
+background:rgba(12,13,17,.58);backdrop-filter:blur(9px) saturate(120%);
+-webkit-backdrop-filter:blur(9px) saturate(120%);transition:none;}
+#bottombar.kiosk .pb-track-top{position:absolute;top:0;left:0;right:0;height:5px;}
+#bottombar.kiosk .pb-inner{justify-content:center;align-items:center;gap:0;
+padding:30px 40px;overflow:auto;}
+#bottombar.kiosk .pb-hd{flex-direction:column;align-items:center;gap:0;width:100%;max-width:760px;}
+#bottombar.kiosk .pb-pct-ring{width:210px;height:210px;}
+#bottombar.kiosk .ring-fill,#bottombar.kiosk .ring-track{stroke-width:4;}
+#bottombar.kiosk .ring-txt{font-size:40px;letter-spacing:-.02em;}
+#bottombar.kiosk .pb-hd-text{text-align:center;width:100%;margin-top:18px;}
+#bottombar.kiosk .pb-title{font-size:26px;}
+#bottombar.kiosk .pb-steps{justify-content:center;margin:12px 0 10px;}
+#bottombar.kiosk .pb-step{font-size:11px;padding:4px 12px;}
+#bottombar.kiosk .pb-file{font-size:13px;margin-top:0;}
+/* Two folder names and a lane between them. Hidden in the strip at the bottom
+   of a comparison — there is no direction of travel during a comparison. */
+.pb-flow{display:none;}
+#bottombar.kiosk .pb-flow{display:flex;align-items:center;justify-content:center;
+gap:14px;margin-top:18px;width:100%;}
+.pf-end{display:flex;align-items:center;gap:7px;padding:7px 13px;border-radius:8px;
+background:var(--bg3);border:1px solid var(--border);max-width:32%;transition:all .25s;}
+.pf-end svg{width:14px;height:14px;flex-shrink:0;opacity:.6;}
+.pf-name{font-family:var(--mono);font-size:12.5px;color:var(--text2);
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+/* The side being written to right now lights up — the animation says which
+   way, this says where it lands. */
+.pb-flow.to-right #pf-right,.pb-flow.to-left #pf-left{
+border-color:var(--flow-color,var(--green));background:var(--flow-dim,var(--green-d));}
+.pb-flow.to-right #pf-right .pf-name,.pb-flow.to-left #pf-left .pf-name{color:var(--text);}
+.pf-lane{position:relative;flex:1;max-width:260px;height:20px;overflow:hidden;}
+/* Three chevrons crossing the lane one after the other. They are drawn with
+   borders rather than an image so the colour follows the pass — green while
+   copying, blue while reading back. */
+.pf-lane::before{content:'';position:absolute;left:0;right:0;top:50%;height:1px;
+background:var(--border2);}
+.pf-chev{position:absolute;top:50%;width:9px;height:9px;margin-top:-5px;
+border-top:2px solid var(--flow-color,var(--green));
+border-right:2px solid var(--flow-color,var(--green));
+transform:rotate(45deg);opacity:0;}
+.pb-flow.to-right .pf-chev{animation:flowR 1.5s linear infinite;}
+.pb-flow.to-left  .pf-chev{animation:flowL 1.5s linear infinite;}
+.pb-flow.paused .pf-chev{animation-play-state:paused;opacity:.25;}
+.pf-chev:nth-child(2){animation-delay:.5s;}
+.pf-chev:nth-child(3){animation-delay:1s;}
+@keyframes flowR{
+  0%  {left:-6%;  opacity:0;}
+  15% {opacity:1;}
+  85% {opacity:1;}
+  100%{left:100%; opacity:0;}
+}
+@keyframes flowL{
+  0%  {left:100%; opacity:0;}
+  15% {opacity:1;}
+  85% {opacity:1;}
+  100%{left:-6%;  opacity:0;}
+}
+@media (prefers-reduced-motion:reduce){.pf-chev{animation:none!important;opacity:.7;left:46%;}}
+#bottombar.kiosk .pb-btns{margin-top:22px;}
+#bottombar.kiosk .pb-btns .tbtn{font-size:13px;padding:10px 26px;}
+#bottombar.kiosk .pb-stats{width:100%;max-width:880px;margin-top:26px;
+display:grid;grid-template-columns:repeat(6,1fr);gap:10px;}
+#bottombar.kiosk .sbox{padding:10px 12px;}
+#bottombar.kiosk .slabel{font-size:10.5px;}
+#bottombar.kiosk .sval{font-size:20px;}
+/* The chips under the grid describe a comparison that is no longer what is
+   happening. While a run is on, the run is the only thing on screen. */
+#app.running #statusbar{display:none;}
+/* The sidebar stays readable — you can still see which folders are being
+   copied — but it stops taking clicks: unticking a folder in the middle of a
+   run changes the plan on screen and nothing in the run, which is the worst of
+   both. The jobs panel dims, because opening another job now is meaningless. */
+#app.running #sidebar{pointer-events:none;}
+#app.running #sb-jobs{opacity:.45;}
+@media (max-height:720px){
+  #bottombar.kiosk .pb-pct-ring{width:150px;height:150px;}
+  #bottombar.kiosk .ring-txt{font-size:30px;}
+  #bottombar.kiosk .pb-stats{margin-top:16px;}
+  #bottombar.kiosk .pb-btns{margin-top:14px;}
+}
 .pb-track-top{height:4px;background:var(--bg3);overflow:hidden;flex-shrink:0;}
 .pb-fill{height:100%;background:linear-gradient(90deg,var(--pb-color,var(--green)),var(--pb-color2,#00ffaa));
 transition:width .4s ease,background .3s ease;box-shadow:0 0 8px var(--pb-glow,var(--green-g));}
@@ -572,8 +691,7 @@ width:640px;max-width:92vw;max-height:84vh;overflow-y:auto;padding:24px;
 box-shadow:0 24px 80px rgba(0,0,0,.6);animation:popIn .22s ease;}
 .mcard.sm{width:440px;}
 @keyframes popIn{from{opacity:0;transform:scale(.97)}to{opacity:1;transform:scale(1)}}
-.mcard::-webkit-scrollbar{width:8px;}
-.mcard::-webkit-scrollbar-thumb{background:var(--bg4);border-radius:4px;}
+
 .m-h1{font-family:var(--font-display);font-size:19px;font-weight:700;margin-bottom:4px;}
 .m-sub{font-size:12.5px;color:var(--text3);margin-bottom:18px;line-height:1.5;}
 .set-section{margin:0 0 16px;padding-bottom:14px;border-bottom:1px solid var(--border);}
@@ -708,8 +826,7 @@ font-size:11.5px;cursor:pointer;padding:0;}
 .srv-crumbs .cur{color:var(--text);}
 .srv-tree{background:var(--bg);border:1px solid var(--border);border-radius:6px;
 height:218px;overflow-y:auto;padding:4px;}
-.srv-tree::-webkit-scrollbar{width:6px;}
-.srv-tree::-webkit-scrollbar-thumb{background:var(--bg4);border-radius:3px;}
+
 .tnode{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:5px;
 cursor:pointer;font-family:var(--mono);font-size:12px;color:var(--text2);
 border:1px solid transparent;width:100%;background:none;text-align:left;}
@@ -784,6 +901,13 @@ flex-shrink:0;border:1px solid transparent;}
 .sum-h1{font-size:20px;font-weight:700;}
 .sum-h2{font-size:13px;color:var(--text3);margin-top:2px;}
 .sum-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px;margin-bottom:14px;}
+.sum-recheck{display:flex;align-items:center;gap:9px;margin-bottom:14px;padding:8px 11px;
+border-radius:var(--rs);background:var(--bg3);border:1px solid var(--border);
+font-size:12px;color:var(--text3);}
+.sum-recheck .dot{width:8px;height:8px;border-radius:50%;background:var(--text3);flex-shrink:0;}
+.sum-recheck.busy .dot{background:var(--blue);animation:pbpulse 1.2s ease-in-out infinite;}
+.sum-recheck.ok .dot{background:var(--green);}
+.sum-recheck.ko .dot{background:var(--orange);}
 .srow{background:var(--bg3);border-radius:var(--rs);padding:8px 10px;}
 .sr-lbl{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.09em;}
 .sr-val{font-size:17px;font-weight:600;margin-top:3px;font-family:var(--mono);}
@@ -1133,6 +1257,16 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
              appears out of nowhere and looks like a stall. -->
         <div class="pb-steps" id="pb-steps"></div>
         <div class="pb-file" id="pb-file">—</div>
+        <!-- Which way the files are going, right now. In a two-way run the
+             direction changes from one file to the next, and no number on
+             this screen says which way the last one went. -->
+        <div class="pb-flow" id="pb-flow">
+          <div class="pf-end" id="pf-left"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg><span class="pf-name" id="pf-left-name">—</span></div>
+          <div class="pf-lane" id="pf-lane">
+            <span class="pf-chev"></span><span class="pf-chev"></span><span class="pf-chev"></span>
+          </div>
+          <div class="pf-end" id="pf-right"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg><span class="pf-name" id="pf-right-name">—</span></div>
+        </div>
       </div>
       <div class="pb-btns">
         <button class="tbtn" id="btn-pause">
@@ -1537,6 +1671,10 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
       </span>
     </div>
     <div class="sum-grid" id="sum-grid"></div>
+    <!-- The run is over, but syncto compares both folders again to confirm the
+         result. That took seconds with nothing on screen, which reads as a
+         frozen window. It says so here now, and then says what it found. -->
+    <div class="sum-recheck" id="sum-recheck" style="display:none"><span class="dot"></span><span id="sum-recheck-txt"></span></div>
     <div class="err-block" id="sum-errors" style="display:none">
       <div class="err-title"><span>Errors</span>
         <button class="err-copy" data-copy="sum-errors-body">COPY</button></div>

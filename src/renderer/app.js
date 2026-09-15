@@ -387,14 +387,47 @@ function renderEmptyState(res) {
     { label: 'Show the identical files', key: 'equal' });
 }
 
+// Everything, again: no folder scope, no chip, no search. One function,
+// because the button in the middle of an empty grid and the empty space in the
+// overview are the same request asked from two places.
+function viewIsNarrowed() {
+  return !!(state.view.scope || state.view.onlyOperation || state.view.onlyCategory ||
+            (state.view.search || '').trim());
+}
+
+async function showEverything() {
+  state.view.onlyOperation = '';
+  state.view.onlyCategory  = '';
+  state.view.search = '';
+  state.view.scope = null;
+  const sf = $('search'); if (sf) sf.value = '';
+  clearOvSel();
+  renderScopeBar();
+  renderStats();
+  await refreshGrid(true);
+  await refreshOverview();
+}
+
+// Excluding the folder the grid is looking at empties the grid: the rows are
+// still there, they just stopped being work. The window used to sit on that
+// emptiness until you found the "Show everything" button. If a scope has
+// nothing left to show, it has done its job — it goes.
+async function dropScopeIfEmpty() {
+  if (!state.view.scope) return false;
+  const res = await API.getRows(0, 1, state.view);
+  if (res && res.total > 0) return false;
+  state.view.scope = null;
+  renderScopeBar();
+  renderStats();
+  await refreshGrid(true);
+  return true;
+}
+
 $('ge-act').addEventListener('click', async () => {
   const k = $('ge-act').dataset.act;
   if (k === 'clear') {
-    state.view.onlyOperation = '';
-    state.view.onlyCategory  = '';
-    state.view.search = '';
-    state.view.scope = null;
-    const sf = $('search'); if (sf) sf.value = '';
+    await showEverything();
+    return;
   } else if (k === 'equal') {
     state.view.showEqual = true;
     const sw = $('chk-equal'); if (sw) sw.checked = true;
@@ -592,6 +625,7 @@ async function addFilterPattern(kind, pattern) {
 async function toggleExcludeTemp(idx) {
   state.stats = await API.toggleActive(Array.isArray(idx) ? idx : [idx]);
   afterEdit();
+  await dropScopeIfEmpty();
   await refreshOverview();
 }
 
@@ -1235,6 +1269,7 @@ async function doSync() {
     return;
   }
   showSummary(res);
+  setRecheck('busy', 'Comparing both folders again to confirm the result…');
   await doCompareQuiet();
   // Last, so the countdown is drawn over the summary.
   await afterRun(res);
@@ -1244,6 +1279,16 @@ async function doSync() {
 // of the user's intent. Silent: no dialogs. Guarded: it must never race a run
 // the user just started, and the previous selection indexes a tree that no
 // longer exists.
+// The line on the summary card that says the folders are being compared again.
+function setRecheck(stateName, text) {
+  const box = $('sum-recheck');
+  if (!box) return;
+  if (!stateName) { box.style.display = 'none'; return; }
+  box.style.display = '';
+  box.className = 'sum-recheck ' + stateName;
+  $('sum-recheck-txt').textContent = text;
+}
+
 async function doCompareQuiet() {
   if (state.busy) return;
   // It never claimed the busy flag, so COMPARE and SYNCHRONIZE were live while
@@ -1254,20 +1299,37 @@ async function doCompareQuiet() {
   $('btn-compare').disabled = true;
   $('btn-sync').disabled = true;
   state.selIdx = null;
+  // It used to run with nothing on screen at all: a few seconds — minutes on a
+  // big tree — of a window that answers to nothing, right after a run, which
+  // reads as a crash. It is a comparison, so it says so, in the strip.
+  setBusyUi(true, 'Checking the result…');
+  $('pb-ring').classList.add('spin');
+  $('pb-pct').textContent = '';
+  setStatLabels('Items scanned', 'Data read', 'Scan rate', 'Elapsed');
+  { const del = $('s-del-box'); if (del) del.style.display = 'none'; }
   let res;
   try {
     res = await API.compare(state.job);
   } finally {
     state.busy = null;
+    $('pb-ring').classList.remove('spin');
+    setBusyUi(false);
   }
-  if (!res || !res.ok || res.cancelled) { invalidateComparison('Compare again to synchronize.'); return; }
+  if (!res || !res.ok || res.cancelled) {
+    invalidateComparison('Compare again to synchronize.');
+    setRecheck('ko', 'The folders could not be compared again — press Compare when you are ready.');
+    return;
+  }
   state.stats = res.stats;
   state.comparedPairs = pairsKey(completePairs());
   renderStats();
-  setBusyUi(false);
   await refreshGrid(true);
   await refreshOverview();
   renderAutoUi();
+  const left = res.stats.filesToProcess + (res.stats.conflicts || 0);
+  setRecheck(left ? 'ko' : 'ok', left
+    ? `Compared again: ${left} item${left > 1 ? 's' : ''} still need attention.`
+    : 'Compared again: both folders now match.');
 }
 
 // ── Progress panel ─────────────────────────────────────────────────────────
@@ -1275,6 +1337,12 @@ const RING_LEN = 182.2;
 
 function setBusyUi(on, title, steps) {
   $('bottombar').classList.toggle('open', on);
+  // A RUN — the thing with passes — gets the whole working area and hides the
+  // chips describing a comparison that is no longer what is happening. A
+  // comparison keeps the strip at the bottom: the grid behind it is filling up
+  // and that is worth watching.
+  $('bottombar').classList.toggle('kiosk', !!(on && steps));
+  document.getElementById('app').classList.toggle('running', !!(on && steps));
   // Only a synchronization has passes. A comparison is one sweep, and drawing
   // a "Verify" step beside it would promise something that is not happening.
   $('pb-steps').style.display = (on && steps) ? '' : 'none';
@@ -1290,6 +1358,8 @@ function setBusyUi(on, title, steps) {
     $('s-spd').textContent = '—'; $('s-eta').textContent = '—';
     $('s-del').textContent = '0'; $('s-err').textContent = '0';
     $('pb-file').textContent = '—';
+    flowPair = -1;
+    { const fl = $('pb-flow'); if (fl) { fl.className = 'pb-flow'; } }
     if (title) $('pb-title').textContent = title;
     state.paused = false;
     const bar = $('bottombar');
@@ -1388,9 +1458,46 @@ API.onCompareProgress(p => {
   }
 });
 
+// The last segment of a path — a folder field can hold a whole URL, and what
+// identifies a side on screen is its folder, not its address.
+function tailName(p) {
+  const s = String(p || '').replace(/[\\/]+$/, '');
+  const i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+  return (i >= 0 ? s.slice(i + 1) : s) || s || '—';
+}
+
+// The direction of travel, drawn from what the engine is doing right now.
+// `way` is the side being written to (or read back from), so in a two-way run
+// the chevrons turn round between two files — which is exactly the thing no
+// counter on this screen can tell you.
+let flowPair = -1;
+function renderFlow(p) {
+  const box = $('pb-flow');
+  if (!box) return;
+  const pairs = (state.job && state.job.pairs) || [];
+  const pair = pairs[(p.pair || 1) - 1] || pairs[0];
+  if (pair && flowPair !== (p.pair || 1)) {
+    flowPair = p.pair || 1;
+    $('pf-left-name').textContent  = tailName(pair.left);
+    $('pf-right-name').textContent = tailName(pair.right);
+    $('pf-left').dataset.tip  = pair.left || '';
+    $('pf-right').dataset.tip = pair.right || '';
+  }
+  const verifying = p.pass === 'verify';
+  box.style.setProperty('--flow-color', verifying ? 'var(--blue)' : 'var(--green)');
+  box.style.setProperty('--flow-dim',   verifying ? 'var(--blue-d)' : 'var(--green-d)');
+  // Nothing is moving during the tail of a run, so the lane empties rather
+  // than animating over it. A PAUSE keeps the direction — it is still the way
+  // the files are going — and freezes the chevrons where they are.
+  const way = p.pass === 'cleanup' ? '' : p.way;
+  box.className = 'pb-flow' + (way === 'right' ? ' to-right' : way === 'left' ? ' to-left' : '')
+                + (p.paused ? ' paused' : '');
+}
+
 API.onSyncProgress(p => {
   // Waiting on another machine's lock: no throughput to show, just who and how long.
   if (p.phase === 'lock') {
+    renderFlow(Object.assign({}, p, { way: '' }));
     $('pb-title').textContent = 'Waiting for another machine…';
     $('pb-file').textContent  = p.current || '';
     $('pb-pct').textContent   = '…';
@@ -1413,6 +1520,7 @@ API.onSyncProgress(p => {
   bar.style.setProperty('--pb-color2', verifying ? '#7bc8ff' : '#00ffaa');
   bar.style.setProperty('--pb-glow',   verifying ? 'rgba(77,144,240,.45)' : 'var(--green-g)');
   renderSteps(p.pass);
+  renderFlow(p);
   $('s-files').innerHTML   = `${p.filesDone}<span class="stot"> / ${p.filesTotal}</span>`;
   $('s-size').textContent  = fmtBytes(Math.max(0, p.bytesTotal - p.bytesDone));
   $('s-spd').textContent   = fmtSpeed(p.bytesPerSec);
@@ -1528,6 +1636,8 @@ function renderVerifyLine(res) {
 }
 
 function showSummary(res) {
+  // A line left over from the previous run would describe the wrong one.
+  setRecheck(null);
   const failed = res.errors.length;
   const stopped = !!(res.stopped || res.lockLost);
   const kind = res.cancelled ? 'cancel' : (failed || stopped) ? 'err' : 'ok';
@@ -2202,6 +2312,11 @@ async function refreshOverview() {
   state.ovOrder = ov.rows.map(g => g.pairIdx + ':' + g.rel);
   state.ovByKey = new Map(ov.rows.map(g => [g.pairIdx + ':' + g.rel, g]));
   for (const k of [...state.ovSel]) if (!state.ovByKey.has(k)) state.ovSel.delete(k);
+  // Said only when there is something to go back from, so it is never noise.
+  const back = viewIsNarrowed()
+    ? '<div class="ov-reset">Click the empty space below to <b>show everything</b> again.</div>'
+    : '';
+  box.classList.toggle('can-reset', viewIsNarrowed());
   box.innerHTML = ov.rows.map(g => {
     const head = (multi && g.first)
       ? `<div class="ov-pairhead"><span class="n">${g.pair}</span>${esc(g.pairLabel)}</div>`
@@ -2225,7 +2340,9 @@ async function refreshOverview() {
       <div class="ov-items">${g.items}</div>
       <div class="ov-bytes">${esc(fmtBytes(g.bytes))}</div>
     </div>`;
-  }).join('');
+  // The hint sits at the END of the list, next to the empty space it is
+  // talking about, not above the rows where it would push them down.
+  }).join('') + back;
 }
 
 // What a gesture on ONE row applies to: the whole selection when that row is
@@ -2298,7 +2415,12 @@ async function setScope(pairIdx, rel, label) {
 // grid stays where it is.
 $('ov-list').addEventListener('click', async e => {
   const it = e.target.closest('.ov-row');
-  if (!it) return;
+  // Nothing under the pointer: the empty part of the panel is the way back to
+  // the whole run.
+  if (!it) {
+    if (viewIsNarrowed()) await showEverything();
+    return;
+  }
   const key = it.dataset.pair + ':' + it.dataset.rel;
   const kids = it.dataset.kids === '1';
 
@@ -2312,6 +2434,7 @@ $('ov-list').addEventListener('click', async e => {
     if (!idxs.length) return;
     state.stats = await API.setActive(idxs, on);
     afterEdit();
+    await dropScopeIfEmpty();
     await refreshOverview();
     return;
   }

@@ -224,6 +224,11 @@ class SyncRunner {
     this.onProgress({
       phase: 'sync',
       pass : this.phase,                       // 'copy' | 'verify' | 'cleanup'
+      // Which side is being written to (or read back from) right now. The
+      // window draws the direction of travel from it, and in a two-way run
+      // that direction changes from one file to the next — nothing else in
+      // this payload could tell you which way the last file went.
+      way  : this.way || '',
       current: current || this.current || '',
       // Attempted, not succeeded: the ring has to reach the end of the plan
       // even when some files failed, while `done.files` stays the honest
@@ -462,6 +467,7 @@ class SyncRunner {
     const tmp = failSafe ? dst + TEMP_EXT : dst;
 
     this.current = n.rel;
+    this.way = to;
     this.emit(true);
 
     const t0 = Date.now();
@@ -669,6 +675,7 @@ class SyncRunner {
     const to   = this.absNode(n, side);
 
     this.current = `${fromRel} → ${n.rel}`;
+    this.way = side;
     this.emit(true);
 
     const st = await fsx.stat(from);
@@ -890,6 +897,7 @@ class SyncRunner {
     if (!this.stopped) for (const { n, side } of plan.del) {
       await this.gate();
       this.current = n.rel;
+      this.way = side;
       try {
         const how = await this.withRetry(n.rel, () => this.dispose(side, n, false));
         this.done.deleted++;
@@ -908,6 +916,7 @@ class SyncRunner {
     if (!this.stopped) for (const { n, side } of plan.mkdir) {
       await this.gate();
       this.current = n.rel;
+      this.way = side;
       const fsx = this.side(side).fs;
       try {
         await this.withRetry(n.rel, () => fsx.mkdir(this.absNode(n, side)));
@@ -967,6 +976,7 @@ class SyncRunner {
       for (const item of this.toVerify) {
         await this.gate();
         this.current = item.rel;
+        this.way = item.side;
         this.emit(true);
         const fsx = this.side(item.side).fs;
         const vT0 = Date.now();
