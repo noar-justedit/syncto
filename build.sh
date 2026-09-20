@@ -58,9 +58,16 @@ if ! command -v node &>/dev/null; then
   echo "${RED}  Node.js not found. Install it from https://nodejs.org${NC}"; exit 1
 fi
 
-if [ ! -d "node_modules" ]; then
+# The folder is not the question: an interrupted install, or a copy made from a
+# network share (which does not carry the shortcuts npm puts in .bin), leaves a
+# node_modules that exists and cannot build.
+if [ ! -x "node_modules/.bin/electron-builder" ]; then
   echo "  Installing dependencies..."
   npm install
+fi
+if [ ! -x "node_modules/.bin/electron-builder" ]; then
+  echo "${RED}  electron-builder is missing after npm install. If this folder is on a"
+  echo "  network share, copy it to the internal disk first.${NC}"; exit 1
 fi
 
 case "$1" in

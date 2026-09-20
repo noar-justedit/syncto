@@ -3204,8 +3204,7 @@ function testLog() {
     l.info('sync', 'this must not be written');
     eq(l.enabled, false, 'a logger opened with the setting off stays off');
     eq(l.read(), '', 'and writes nothing');
-    ok(!fs.existsSync(path.join(dir, 'logs', 'syncto.log')),
-       'the file is not even created');
+    ok(!fs.existsSync(l.path()), 'the file is not even created');
     const { defaultPrefs } = require('../src/main/config');
     eq(defaultPrefs().log, false, 'the preference itself is off out of the box');
   }
@@ -3266,7 +3265,7 @@ function testLog() {
     const big = 'x'.repeat(64 * 1024);
     for (let i = 0; i < Math.ceil(MAX_BYTES / (64 * 1024)) + 2; i++) l.info('t', big);
     ok(l.capped, 'it stops once the session has produced enough');
-    const st = fs.statSync(path.join(dir, 'logs', 'syncto.log'));
+    const st = fs.statSync(l.path());
     ok(st.size < MAX_BYTES * 1.1, 'the file does not run away');
     ok(/stopped here/.test(l.read()), 'and the file says why it ends there');
   }
@@ -3948,6 +3947,344 @@ function testNarrowedViewAndRunUi() {
      'and the strip closes even if that comparison fails');
 }
 
+
+// ══ 39. What the run panel is allowed to claim (0.7.2) ════════════════════
+// Two figures that were not what their labels said, and two files two copies
+// of syncto would have fought over.
+async function testRunFiguresAndLogPerProcess() {
+  console.log('\n\n39. What the run panel is allowed to claim (0.7.2)');
+
+  // (a) 🔴 "Data remaining" counted the read-back pass too, so it read about
+  //     twice the size of the folder the overview had just listed: 563 GB
+  //     against 285 GB on screen. The ring is right to count both passes; the
+  //     tile is not, and the tile is the one people compare with the listing.
+  {
+    const { L, R } = scratch();
+    const SIZE = 4096;
+    for (const n of ['a.mov', 'b.mov', 'c.mov']) write(L, n, 'x'.repeat(SIZE), Date.now());
+    const total = SIZE * 3;
+
+    const s = new Session();
+    const token = { cancelled: false, paused: false };
+    const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+    await s.compare(job, { token });
+    const seen = [];
+    await s.sync(job, { token, appVersion: 'test', onProgress: p => seen.push(p) });
+    await s.close();
+
+    const copies = seen.filter(p => p.pass === 'copy');
+    const checks = seen.filter(p => p.pass === 'verify');
+    ok(copies.length && checks.length, 'the run went through both passes');
+    eq(copies[copies.length - 1].passBytesTotal, total,
+       'while copying, the tile counts the bytes of the copy — the size of the folder');
+    eq(checks[checks.length - 1].passBytesTotal, total,
+       'while reading back, it counts the bytes being read back');
+    eq(copies[0].bytesTotal, total * 2,
+       'the ring still counts both passes, because both take time');
+    const last = seen[seen.length - 1];
+    eq(last.passBytesTotal - last.passBytesDone, 0, 'the run ends with nothing left to copy');
+    ok(copies.every(p => p.passBytesDone <= total), 'and the tile never counts past the folder');
+  }
+
+  // (b) The window says which pass the figure belongs to, rather than one word
+  //     that is wrong half the time.
+  {
+    const appjs = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.js'), 'utf8');
+    ok(/passBytesTotal \|\| 0\) - \(p\.passBytesDone \|\| 0\)/.test(appjs), 'the tile reads the pass figures');
+    ok(/'Left to verify' : 'Left to copy'/.test(appjs), 'and its label follows the pass');
+    ok(!/'Data remaining'/.test(appjs), 'the word that covered both is gone');
+  }
+
+  // (c) 🔴 Two copies of syncto, two jobs, two NAS: both load the preferences
+  //     at launch and both write the whole file back, so the second to save
+  //     erased what the first had changed — a server password added in one
+  //     window, gone the moment the other saved its job.
+  {
+    const { Prefs } = require('../src/main/config');
+    const { dir } = scratch();
+    const A = new Prefs(dir); A.load();
+    const B = new Prefs(dir); B.load();
+
+    A.save({ servers: [{ id: 's1', name: 'NAS', host: 'nas.local', username: 'noar' }] });
+    B.save({ job: { name: 'Pair 2' } });
+
+    const onDisk = new Prefs(dir); onDisk.load();
+    eq((onDisk.data.servers || []).length, 1, "the other window's server survives a save");
+    eq(onDisk.data.job.name, 'Pair 2', 'and the job that was just saved is there too');
+
+    A.save({ ui: { showEqual: true } });
+    const again = new Prefs(dir); again.load();
+    eq(again.data.job.name, 'Pair 2', 'a later save does not roll the other one back');
+    eq(again.data.ui.showEqual, true, 'while its own change lands');
+
+    // What a window changed itself still wins over the file: this is a merge,
+    // not a surrender.
+    B.save({ ui: { showEqual: false } });
+    const lastRead = new Prefs(dir); lastRead.load();
+    eq(lastRead.data.ui.showEqual, false, 'the most recent explicit change is the one kept');
+  }
+
+  // (d) 🔴 Two copies of syncto running side by side shared one log file. It
+  //     is emptied at launch, so the second to start wiped the first one's and
+  //     the two then wrote into it at once.
+  {
+    const { Logger } = require('../src/main/log');
+    const { dir } = scratch();
+    const l = new Logger().open(dir, true);
+    l.info('t', 'hello');
+    ok(l.path().includes(String(process.pid)), 'the log file carries the process id');
+    ok(/hello/.test(l.read()), 'and is written normally');
+
+    const logs = path.join(dir, 'logs');
+    const dead = path.join(logs, 'syncto-999999.log');
+    fs.writeFileSync(dead, 'from a run that is over');
+    new Logger().open(dir, true);
+    ok(!fs.existsSync(dead), 'the log of a process that has ended is removed');
+    ok(fs.existsSync(l.path()), 'and the one of a process that is running is not');
+
+    const theirs = path.join(logs, 'notes.txt');
+    fs.writeFileSync(theirs, 'not mine');
+    new Logger().open(dir, true);
+    ok(fs.existsSync(theirs), 'and a file that is not a syncto log is never touched');
+  }
+
+  // (e) The menu entry that starts a second copy, and the reason it spawns the
+  //     executable itself: on macOS the system launcher would just bring the
+  //     running copy to the front, which is the behaviour being worked around.
+  {
+    const mainjs = fs.readFileSync(path.join(__dirname, '..', 'src/main/main.js'), 'utf8');
+    ok(/label: 'New syncto window'/.test(mainjs), 'the File menu can start another copy');
+    ok(/spawn\(process\.execPath/.test(mainjs), 'by running the executable directly');
+    ok(/detached: true/.test(mainjs) && /child\.unref\(\)/.test(mainjs),
+       'and letting it live on its own, so closing this window never takes it down');
+    ok(/app\.isPackaged \? \[\] : \[app\.getAppPath\(\)\]/.test(mainjs),
+       'which also works from a checkout, where the executable is electron itself');
+  }
+}
+
+
+// ══ 40. Why FileZilla was faster, and what was done about it (0.7.2) ══════
+// A user measured syncto against FileZilla over SFTP and FileZilla won by a
+// long way. Three causes, all measured against a real server with injected
+// latency: syncto asked the server ten questions per file, copied one file at
+// a time on one connection, and read every byte back.
+async function testSftpSpeed() {
+  console.log('\n\n40. SFTP speed: chatter, lanes, and the read-back (0.7.2)');
+
+  const { startSftpServer } = require('./sftp-server');
+  const { SftpFs } = require('../src/main/fs/sftp');
+
+  // (a) 🔴 A folder confirmed once is not confirmed again. mkdir used to walk
+  //     the whole path stat'ing every segment, for EVERY file.
+  {
+    const { dir } = scratch();
+    const remote = path.join(dir, 'server');
+    fs.mkdirSync(remote, { recursive: true });
+    const srv = await startSftpServer({ root: remote });
+    const sftp = new SftpFs({ host: srv.host, port: srv.port, username: srv.username, password: srv.password });
+    await sftp.connect();
+
+    let stats = 0;
+    const realQ = sftp._q.bind(sftp);
+    sftp._q = (label, fn) => { if (/^stat /.test(label)) stats++; return realQ(label, fn); };
+
+    const deep = '/volume1/PROJET/01_RUSHES/DAY1';
+    await sftp.mkdir(deep);
+    ok(stats >= 4, `the first time, every level is checked (${stats} stats)`);
+
+    stats = 0;
+    for (let i = 0; i < 10; i++) await sftp.mkdir(deep);
+    eq(stats, 0, 'the next ten files ask nothing at all');
+
+    await sftp.rmdir(deep);
+    stats = 0;
+    await sftp.mkdir(deep);
+    ok(stats > 0, 'a folder that was removed is checked again');
+    ok(await sftp.exists(deep), 'and recreated');
+
+    await sftp.close();
+    await srv.close();
+  }
+
+  // (b) The engine asks for less per file. Counted on a real run, through the
+  //     real code path, because this is a claim about round trips.
+  {
+    const { dir } = scratch();
+    const remote = path.join(dir, 'server');
+    const deep = 'volume1/PROJET/01_RUSHES/DAY1';
+    fs.mkdirSync(path.join(remote, deep), { recursive: true });
+    const L = path.join(dir, 'src', deep);
+    fs.mkdirSync(L, { recursive: true });
+    for (let i = 0; i < 6; i++) write(L, `clip${i}.mov`, 'x'.repeat(4096), Date.now());
+
+    const srv = await startSftpServer({ root: remote });
+    const tally = new Map();
+    const origQ = SftpFs.prototype._q;
+    SftpFs.prototype._q = function (label, fn) {
+      const k = String(label).split(' ')[0];
+      tally.set(k, (tally.get(k) || 0) + 1);
+      return origQ.call(this, label, fn);
+    };
+    try {
+      const job = makeJob(L, `sftp://${srv.username}:${srv.password}@${srv.host}:${srv.port}/${deep}`,
+        { sync: { variant: 'mirror', lockFolders: false, transferLanes: 1 } });
+      const s = new Session();
+      const token = { cancelled: false, paused: false };
+      await s.compare(job, { token });
+      tally.clear();
+      const run = await s.sync(job, { token, appVersion: 'test' });
+      await s.close();
+      eq(run.counters.files, 6, 'the six files were copied');
+      const total = [...tally.values()].reduce((a, b) => a + b, 0);
+      // It was 10.2 requests per file before this release, 8.1 of them stats.
+      ok(total / 6 <= 6, `a copied file costs at most six requests (${(total / 6).toFixed(1)})`);
+      ok((tally.get('stat') || 0) / 6 <= 3.5,
+         `of which at most three and a half stats (${((tally.get('stat') || 0) / 6).toFixed(1)})`);
+    } finally {
+      SftpFs.prototype._q = origQ;
+      await srv.close();
+    }
+  }
+
+  // (c) 🔴 Lanes: several files at once, each on its own connection. One
+  //     connection cannot beat the SSH window (2 MB, a constant inside ssh2)
+  //     divided by the round trip, so this is the only way past it.
+  {
+    const { dir } = scratch();
+    const remote = path.join(dir, 'server');
+    fs.mkdirSync(remote, { recursive: true });
+    const L = path.join(dir, 'src');
+    fs.mkdirSync(L, { recursive: true });
+    for (let i = 0; i < 12; i++) write(L, `clip${i}.mov`, 'x'.repeat(256 * 1024), Date.now());
+    const srv = await startSftpServer({ root: remote, latencyMs: 12 });
+    const addr = `sftp://${srv.username}:${srv.password}@${srv.host}:${srv.port}/`;
+
+    const run = async lanes => {
+      fs.rmSync(remote, { recursive: true, force: true });
+      fs.mkdirSync(remote, { recursive: true });
+      const job = makeJob(L, addr, { sync: { variant: 'mirror', lockFolders: false, transferLanes: lanes } });
+      const s = new Session();
+      const token = { cancelled: false, paused: false };
+      await s.compare(job, { token });
+      const t0 = Date.now();
+      const res = await s.sync(job, { token, appVersion: 'test' });
+      const ms = Date.now() - t0;
+      await s.close();
+      eq(res.counters.files, 12, `${lanes} lane(s): every file arrived`);
+      eq(res.errors.length, 0, `${lanes} lane(s): without an error`);
+      for (let i = 0; i < 12; i++) {
+        eq(fs.statSync(path.join(remote, `clip${i}.mov`)).size, 256 * 1024, `${lanes} lane(s): clip${i} is whole`);
+      }
+      return ms;
+    };
+
+    const one = await run(1);
+    const four = await run(4);
+    ok(four < one, `four lanes beat one (${one} ms → ${four} ms at 12 ms of latency)`);
+    await srv.close();
+  }
+
+  // (d) 🔴 Cancelling a run with four files in flight — exactly where a cancel
+  //     can leave a promise hanging, or a half-written file wearing a final
+  //     name.
+  {
+    const { dir } = scratch();
+    const remote = path.join(dir, 'server');
+    fs.mkdirSync(remote, { recursive: true });
+    const L = path.join(dir, 'src');
+    fs.mkdirSync(L, { recursive: true });
+    for (let i = 0; i < 16; i++) write(L, `clip${i}.mov`, 'x'.repeat(512 * 1024), Date.now());
+    const srv = await startSftpServer({ root: remote, latencyMs: 5 });
+    const job = makeJob(L, `sftp://${srv.username}:${srv.password}@${srv.host}:${srv.port}/`,
+      { sync: { variant: 'mirror', lockFolders: false, transferLanes: 4 } });
+    const s = new Session();
+    const token = { cancelled: false, paused: false };
+    await s.compare(job, { token });
+    setTimeout(() => { token.cancelled = true; }, 250);
+    const t0 = Date.now();
+    const res = await s.sync(job, { token, appVersion: 'test' });
+    const ms = Date.now() - t0;
+    await s.close();
+    ok(res.cancelled, 'the run reports itself cancelled');
+    ok(ms < 20000, `and settles promptly (${ms} ms) rather than hanging on four workers`);
+    const left = fs.readdirSync(remote);
+    eq(left.filter(f => f.endsWith('.syncto_tmp')).length, 0,
+       'no half-written file is left behind under its temporary name');
+    for (const f of left) {
+      if (f.startsWith('.syncto')) continue;          // the database, not a copy
+      eq(fs.statSync(path.join(remote, f)).size, 512 * 1024,
+         `${f} carries its final name only because it is whole`);
+    }
+    await srv.close();
+  }
+
+  // (e) The read-back can be turned off FOR A SERVER, and for nothing else.
+  {
+    const { L, R } = scratch();
+    write(L, 'a.mov', 'x'.repeat(4096), Date.now());
+    const s = new Session();
+    const token = { cancelled: false, paused: false };
+    const job = makeJob(L, R, { sync: { variant: 'mirror', verifyRemote: false } });
+    await s.compare(job, { token });
+    const res = await s.sync(job, { token, appVersion: 'test' });
+    await s.close();
+    eq(res.verified, 1, 'a local copy is verified whatever the server setting says');
+  }
+
+  // (f) On a server, off means off: nothing is read back, and the ring stops
+  //     promising a second pass.
+  {
+    const { dir } = scratch();
+    const remote = path.join(dir, 'server');
+    fs.mkdirSync(remote, { recursive: true });
+    const L = path.join(dir, 'src');
+    fs.mkdirSync(L, { recursive: true });
+    write(L, 'a.mov', 'x'.repeat(8192), Date.now());
+    const srv = await startSftpServer({ root: remote });
+    const addr = `sftp://${srv.username}:${srv.password}@${srv.host}:${srv.port}/`;
+
+    const go = async (verifyRemote) => {
+      fs.rmSync(remote, { recursive: true, force: true });
+      fs.mkdirSync(remote, { recursive: true });
+      const job = makeJob(L, addr, { sync: { variant: 'mirror', lockFolders: false, verifyRemote } });
+      const s = new Session();
+      const token = { cancelled: false, paused: false };
+      await s.compare(job, { token });
+      const seen = [];
+      const res = await s.sync(job, { token, appVersion: 'test', onProgress: p => seen.push(p) });
+      await s.close();
+      return { res, seen };
+    };
+
+    const off = await go(false);
+    eq(off.res.counters.files, 1, 'the file is copied');
+    eq(off.res.verified, 0, 'and nothing is read back');
+    eq(fs.readFileSync(path.join(remote, 'a.mov'), 'utf8').length, 8192, 'the file on the server is whole');
+    ok(off.seen.every(p => p.pass !== 'verify'), 'there is no verification pass at all');
+    ok(off.seen.every(p => p.willVerify === false), 'and the run says so, so the window drops the step');
+    eq(off.seen[0].bytesTotal, 8192, 'the ring counts one pass, not two');
+
+    const on = await go(true);
+    eq(on.res.verified, 1, 'with it on, the file is read back');
+    eq(on.seen[0].bytesTotal, 8192 * 2, 'and the ring counts both passes again');
+    await srv.close();
+  }
+
+  // (g) The window and the settings, wired.
+  {
+    const html  = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/index.html'), 'utf8');
+    const appjs = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.js'), 'utf8');
+    const { defaultJob } = require('../src/main/config');
+    eq(defaultJob().sync.verifyRemote, true, 'the read-back is on out of the box');
+    eq(defaultJob().sync.transferLanes, 4, 'and four files at a time on a server');
+    ok(/id="st-verify-remote"/.test(html) && /id="st-lanes"/.test(html), 'both settings are in the window');
+    ok(/j\.sync\.verifyRemote\s*=\s*\$\('st-verify-remote'\)\.checked/.test(appjs), 'the switch reaches the job');
+    ok(/j\.sync\.transferLanes\s*=\s*Number\(\$\('st-lanes'\)\.value\)/.test(appjs), 'and so does the count');
+    ok(/copied — not read back/.test(appjs), 'a run with no read-back says so on the summary card');
+    ok(/renderSteps\(p\.pass, p\.willVerify\)/.test(appjs), 'and the steps drop the pass that will not happen');
+  }
+}
+
 (async function main() {
   console.log('syncto engine tests');
   console.log('scratch: ' + ROOT);
@@ -3990,6 +4327,8 @@ function testNarrowedViewAndRunUi() {
     await testOverviewTree();
     await testOverviewSortAndBatch();
     testNarrowedViewAndRunUi();
+    await testRunFiguresAndLogPerProcess();
+    await testSftpSpeed();
   } catch (err) {
     failed++;
     failures.push('UNCAUGHT: ' + (err.stack || err.message));

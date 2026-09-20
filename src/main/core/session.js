@@ -78,6 +78,10 @@ class Session {
     if (!l.path || !r.path) throw new Error('Both folders must be set.');
     this.left  = await this.pool.open(l);
     this.right = await this.pool.open(r);
+    // Kept so a run can ask the pool for more connections to the same server
+    // without parsing the address — and without going near the credentials a
+    // second time.
+    this.leftLoc = l; this.rightLoc = r;
     this.leftPhrase  = l.phrase;
     this.rightPhrase = r.phrase;
   }
@@ -469,6 +473,30 @@ class Session {
     }
   }
 
+  // Extra connections for a run that copies several files at once. One per
+  // lane, per server side. A connection that cannot be opened is not an error:
+  // the run simply uses fewer lanes, which is slower and never wrong.
+  async _openLanes(job) {
+    const want = Math.max(1, Math.min(8, Number((job.sync || {}).transferLanes) || 1));
+    const out = { left: [this.left], right: [this.right] };
+    if (want <= 1) return out;
+    for (const which of ['left', 'right']) {
+      const side = this[which];
+      const loc = which === 'left' ? this.leftLoc : this.rightLoc;
+      if (!side || side.kind !== 'sftp' || !loc) continue;
+      for (let i = 1; i < want; i++) {
+        try {
+          out[which].push(await this.pool.openLane(loc, i));
+        } catch (err) {
+          log.warn('sync', `only ${out[which].length} connection(s) to the ${which} server: ${err.message || err}`);
+          break;
+        }
+      }
+      log.info('sync', `${which}: ${out[which].length} connection(s) for the transfer`);
+    }
+    return out;
+  }
+
   // ── Synchronize ──────────────────────────────────────────────────────────
   // opts.skipReport: MultiSession aggregates one report across pairs itself.
   async sync(job, opts) {
@@ -495,14 +523,24 @@ class Session {
 
     const startedAt = Date.now();
 
+    const lanes = await this._openLanes(job);
     const runner = new SyncRunner({
       left: this.left, right: this.right,
       nodes: this.nodes,
       leftovers: this.leftovers || [],
       config: Object.assign({}, job.sync),
+      lanes,
       token, onProgress, trashItem,
     });
-    const run = await runner.run();
+    let run;
+    try {
+      run = await runner.run();
+    } finally {
+      // The extra connections exist for the transfer and nothing else: holding
+      // four idle sessions open on someone's NAS between two runs is rude, and
+      // a server with a session limit would refuse the next job.
+      try { await this.pool.closeLanes(); } catch (_) {}
+    }
     const endedAt = Date.now();
 
     // Checksum sidecars, one per side that actually received data. The list is

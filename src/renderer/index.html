@@ -869,6 +869,10 @@ display:flex;align-items:center;justify-content:center;margin-top:1px;}
 .sum-verify.good .sv-ico{background:rgba(53,201,139,.2);color:var(--green);}
 .sum-verify.good b{color:var(--green);}
 .sum-verify.plain .sv-ico{background:var(--bg4);color:var(--text2);}
+/* Copied, but nothing read it back. Not an error — a promise not made. */
+.sum-verify.warn{border-color:rgba(230,160,60,.45);background:rgba(230,160,60,.10);}
+.sum-verify.warn .sv-ico{background:rgba(230,160,60,.2);color:var(--orange);}
+.sum-verify.warn b{color:var(--orange);}
 .sum-verify.bad{border-color:rgba(242,85,90,.45);background:var(--red-d);}
 .sum-verify.bad .sv-ico{background:rgba(242,85,90,.2);color:var(--red);}
 .sum-verify.bad b{color:var(--red);}
@@ -1331,6 +1335,34 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
       <div class="set-hint">A renamed or moved file is recognized by its file id and simply renamed on the other side — a 100&nbsp;GB folder rename takes a second instead of a re-copy. Needs one previous run of this pair (the ids come from the sync database), works on local disks and mounted shares, not over SFTP.</div>
     </div>
 
+
+    <div class="set-section">
+      <div class="set-sec-title">Servers (SFTP)</div>
+      <div class="set-row"><label>Files at a time</label>
+        <select id="st-lanes">
+          <option value="1">1 — one after another</option>
+          <option value="2">2</option>
+          <option value="4">4 (recommended)</option>
+          <option value="6">6</option>
+          <option value="8">8</option>
+        </select></div>
+      <div class="set-hint">One connection cannot go faster than <b>2&nbsp;MB divided by the round
+      trip</b> — that is the SSH window, and no setting anywhere changes it: 20&nbsp;MB/s at
+      100&nbsp;ms of latency, whatever the fibre. syncto opens one connection per file in flight,
+      which is how a file transfer client goes faster than a single stream. Above 4 the gain
+      flattens on most servers, and each connection costs memory here and a session over there.
+      Local disks and mounted shares are not affected: they always copy one file at a time.</div>
+
+      <div class="set-row"><label>Read files back on a server</label>
+        <label class="switch"><input type="checkbox" id="st-verify-remote" checked><span class="slider"></span></label>
+        <span style="font-size:11.5px;color:var(--text3)">the proof, at the price of a second trip</span></div>
+      <div class="set-hint">Every copied file is normally read back from where it landed and
+      compared with the fingerprint taken while writing. On a server that means the file crosses
+      the link <b>twice</b>, so turning this off roughly halves the time — and leaves you with a
+      copy nothing has checked, which is what an ordinary FTP client gives you. Local disks keep
+      their verification whatever this says, and no checksum list is written for a side that was
+      not read back.</div>
+    </div>
 
     <div class="set-section">
       <div class="set-sec-title">Deletion</div>

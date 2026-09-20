@@ -98,6 +98,16 @@ function defaultJob() {
         maxAgeDays : 0, countMin: 0, countMax: 0,
       },
       lockFolders    : true,            // .syncto.lock — one machine at a time
+      // Reading every file back is what syncto is for. Over SFTP it is also
+      // the whole file travelling a second time, in the other direction, which
+      // is why it can be turned off for servers alone — and only for servers.
+      verifyRemote   : true,
+      // Files copied at the same time, on a server. Each one needs its own
+      // connection: the SSH channel window is 2 MB and a single connection
+      // cannot go faster than that window divided by the round trip, whatever
+      // the link. Local disks are left alone at 1 — a spinning drive asked for
+      // four files at once seeks instead of reading.
+      transferLanes  : 4,
       failSafe       : true,
       preserveTimes  : true,
       copyPermissions: false,
@@ -299,17 +309,49 @@ function merge(base, over) {
   return out;
 }
 
+// What THIS process has changed since it last read the file. Everything else
+// in the file belongs to whoever else is running, and must survive our write.
+// Arrays and scalars are whole values: a list of servers that differs from the
+// one we started with is ours, entry by entry is not a question we can answer.
+function changesSince(base, cur) {
+  const out = {};
+  for (const k of Object.keys(cur)) {
+    const b = base ? base[k] : undefined;
+    const c = cur[k];
+    if (c && typeof c === 'object' && !Array.isArray(c) &&
+        b && typeof b === 'object' && !Array.isArray(b)) {
+      const sub = changesSince(b, c);
+      if (Object.keys(sub).length) out[k] = sub;
+    } else if (JSON.stringify(b) !== JSON.stringify(c)) {
+      out[k] = c;
+    }
+  }
+  return out;
+}
+
+const clone = o => JSON.parse(JSON.stringify(o));
+
 class Prefs {
   constructor(userDataDir) {
     this.file = path.join(userDataDir, 'preferences.json');
     this.data = defaultPrefs();
+    // The state of the file as we last saw it. The difference between this and
+    // `data` is what we are entitled to write.
+    this.baseline = clone(this.data);
   }
   load() {
+    this.data = this.read();
+    this.baseline = clone(this.data);
+    return this.data;
+  }
+
+  // The file as it is on disk right now, defaults filled in. Never throws: a
+  // profile that cannot be read is a fresh one.
+  read() {
     try {
       const raw = JSON.parse(fs.readFileSync(this.file, 'utf8'));
-      this.data = merge(defaultPrefs(), migratePrefs(raw));
-    } catch (_) { this.data = defaultPrefs(); }
-    return this.data;
+      return merge(defaultPrefs(), migratePrefs(raw));
+    } catch (_) { return defaultPrefs(); }
   }
   // Returns true when the file really reached the disk. Every caller used to
   // announce success regardless: "server saved, password remembered" while
@@ -318,15 +360,31 @@ class Prefs {
   // ever while the window showed migrated entries.
   save(patch) {
     if (patch) this.data = merge(this.data, patch);
+    // Two copies of syncto can be open at once — two jobs, two NAS. Both load
+    // this file at launch and both write the whole of it back, so the second
+    // to save used to erase whatever the first had changed in the meantime: a
+    // server password added in one window, gone when the other saved its job.
+    //
+    // So: re-read the file, and lay ONLY our own changes over it. What we did
+    // not touch keeps whatever the other copy put there.
+    //
+    // The patch itself always counts as ours, even when it happens to match
+    // what we loaded: asking for a value that another window has since changed
+    // is still asking for it. Without this, setting a switch back to its
+    // default silently did nothing while the other copy was running.
+    const mine = merge(changesSince(this.baseline, this.data), patch || {});
+    const next = merge(this.read(), mine);
     // The renderer can send arbitrary patches through save-prefs. This is the
     // one gate every write passes through, so it is where the promise "no
     // readable password is ever written to disk" is actually kept — not in the
     // callers, which would only have to forget once.
-    scrubSecrets(this.data);
+    scrubSecrets(next);
     this.lastSaveError = null;
     try {
       fs.mkdirSync(path.dirname(this.file), { recursive: true });
-      writeFileAtomic(this.file, JSON.stringify(this.data, null, 2));
+      writeFileAtomic(this.file, JSON.stringify(next, null, 2));
+      this.data = next;
+      this.baseline = clone(next);
     } catch (err) {
       this.lastSaveError = err.message || String(err);
     }

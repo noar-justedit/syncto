@@ -69,8 +69,8 @@ echo -e "${GREEN}✓ Node.js $(node --version)${NC}"
 
 # ── 2. Dependencies ─────────────────────────────────────────────
 echo -e "${BLUE}[2/4]${NC} Checking dependencies…"
-if [ ! -d "node_modules" ]; then
-  echo "      First run — downloading dependencies (2-3 minutes)…"
+if [ ! -x "node_modules/.bin/electron-builder" ]; then
+  echo "      Installing dependencies…"
   npm install
 fi
 echo -e "${GREEN}✓ Dependencies ready${NC}"

@@ -237,6 +237,27 @@ class SftpFs {
 
   async exists(p) { return (await this.stat(p)) !== null; }
 
+  // Folders known to exist on this connection, for the run that is using it.
+  _remember(dir) {
+    if (!this._dirs) this._dirs = new Set();
+    // A ceiling, so a job with a hundred thousand folders cannot turn a saving
+    // into a memory problem. Dropping the lot costs one stat, not an error.
+    if (this._dirs.size > 20000) this._dirs.clear();
+    this._dirs.add(dir);
+  }
+
+  // A folder we just removed, or renamed away, must not stay in that set.
+  _forget(dir) {
+    if (!this._dirs) return;
+    const pre = String(dir) + '/';
+    for (const k of this._dirs) if (k === dir || k.startsWith(pre)) this._dirs.delete(k);
+  }
+
+  // SFTP has no stable identifier for a file: the server returns none, so
+  // there is nothing to read back after a copy. Saying so lets the engine skip
+  // a round trip per file.
+  get hasFileIds() { return false; }
+
   async readdir(p) {
     const dir = normalize(p);
     const list = await this._q(`readdir ${p}`, () => new Promise((resolve, reject) => {
@@ -309,14 +330,26 @@ class SftpFs {
     }));
   }
 
+  // Every copied file asks for its parent folder, and this used to walk the
+  // whole path stat'ing every segment — five round trips to rediscover a
+  // folder it had just written four hundred files into. On a link with 100 ms
+  // of latency that is half a second per file before a single byte moves, and
+  // it is the main reason a plain FTP client looked so much faster.
+  //
+  // The folders this connection has already confirmed are remembered. The set
+  // only ever says "this existed a moment ago, on this connection"; a folder
+  // that disappears underneath us fails at the write, which is where such a
+  // thing has to be caught anyway.
   async mkdir(p) {
     const full = normalize(p);
+    if (this._dirs && this._dirs.has(full)) return;
     const parts = full.split('/').filter(Boolean);
     let cur = '';
     for (const part of parts) {
       cur += '/' + part;
+      if (this._dirs && this._dirs.has(cur)) continue;
       const st = await this.stat(cur);
-      if (st) continue;
+      if (st) { this._remember(cur); continue; }
       try {
         await this._q(`mkdir ${cur}`, () => new Promise((resolve, reject) => {
           this.sftp.mkdir(cur, err => err ? reject(err) : resolve());
@@ -324,6 +357,7 @@ class SftpFs {
       } catch (e) {
         if (!(await this.stat(cur))) throw e;   // lost a race, that is fine
       }
+      this._remember(cur);
     }
   }
 
@@ -334,6 +368,7 @@ class SftpFs {
   }
 
   async rmdir(p) {
+    this._forget(normalize(p));
     return this._q(`rmdir ${p}`, () => new Promise((resolve, reject) => {
       this.sftp.rmdir(normalize(p), err => err ? reject(err) : resolve());
     }));
@@ -347,6 +382,7 @@ class SftpFs {
 
   async rename(from, to) {
     const src = normalize(from), dst = normalize(to);
+    this._forget(src);          // a folder that moves takes its name with it
     try {
       await this._rawRename(src, dst);
       return;

@@ -141,6 +141,39 @@ class FsPool {
     return { fs: backend, path: backend.resolve(loc.path), kind: 'sftp' };
   }
 
+  // An extra connection to the same server, for a run that copies several
+  // files at once. They are kept in the same map — under a key of their own —
+  // so nothing can leak them, and closeLanes() lets a finished run hand them
+  // back without waiting for the session to end.
+  async openLane(loc, i) {
+    if (loc.kind === 'native' || !i) return this.open(loc);
+    const key = `${loc.username}@${loc.host}:${loc.port}#${i}`;
+    let backend = this.sftp.get(key);
+    if (backend && backend.dead) {
+      try { await backend.close(); } catch (_) {}
+      this.sftp.delete(key);
+      backend = null;
+    }
+    if (!backend) backend = new SftpFs(loc);
+    try {
+      await backend.connect();
+    } catch (err) {
+      try { await backend.close(); } catch (_) {}
+      this.sftp.delete(key);
+      throw err;
+    }
+    this.sftp.set(key, backend);
+    return { fs: backend, path: backend.resolve(loc.path), kind: 'sftp' };
+  }
+
+  async closeLanes() {
+    for (const [key, b] of [...this.sftp.entries()]) {
+      if (!key.includes('#')) continue;
+      try { await b.close(); } catch (_) {}
+      this.sftp.delete(key);
+    }
+  }
+
   async closeAll() {
     for (const b of this.sftp.values()) { try { await b.close(); } catch (_) {} }
     this.sftp.clear();

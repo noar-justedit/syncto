@@ -47,6 +47,17 @@ echo -e "${BOLD}${CYAN}         syncto v$VERSION — Build for macOS            
 echo -e "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 
+# Never as root. A build run with sudo leaves every cache owned by root, and
+# every later build — the normal ones — then fails on permissions in a place
+# that has nothing to do with the cause.
+if [ "$(id -u)" = "0" ]; then
+  echo -e "${RED}✗ Do not run this build with sudo.${NC}"
+  echo "  It would leave the npm and Electron caches owned by root, and every"
+  echo "  later build would fail. If that has already happened, run once:"
+  echo "    sudo chown -R \$(whoami) ~/.npm ~/Library/Caches/electron ~/Library/Caches/electron-builder"
+  read -p "Press Enter to exit..."; exit 1
+fi
+
 # ── 1. Node.js ──────────────────────────────────────────────────
 echo -e "${BLUE}[1/5]${NC} Checking Node.js…"
 if ! command -v node &>/dev/null; then
@@ -56,10 +67,23 @@ fi
 echo -e "${GREEN}✓ Node.js $(node --version)${NC}"
 
 # ── 2. Dependencies ─────────────────────────────────────────────
+# The FOLDER is not the question: an interrupted install, or a copy made from a
+# network share (which does not carry the symbolic links npm puts in .bin),
+# leaves a node_modules that exists and cannot build. Ask for the tool itself.
 echo -e "${BLUE}[2/5]${NC} Checking dependencies…"
-if [ ! -d "node_modules" ]; then
-  echo "      First run — downloading dependencies (2-3 minutes)…"
+if [ ! -x "node_modules/.bin/electron-builder" ]; then
+  if [ -d "node_modules" ]; then
+    echo "      node_modules is there but incomplete — installing again…"
+  else
+    echo "      First run — downloading dependencies (2-3 minutes)…"
+  fi
   npm install
+fi
+if [ ! -x "node_modules/.bin/electron-builder" ]; then
+  echo -e "${RED}✗ electron-builder is still missing after npm install.${NC}"
+  echo "  If this folder sits on a NAS or a network share, copy it to the"
+  echo "  internal disk and try again: npm cannot create its shortcuts there."
+  read -p "Press Enter to exit..."; exit 1
 fi
 echo -e "${GREEN}✓ Dependencies ready${NC}"
 

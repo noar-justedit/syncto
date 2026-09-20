@@ -225,6 +225,8 @@ function jobToUi() {
   renderFilterBtn();
 
   // Versioning is no longer exposed: a job that carried it falls back to trash.
+  $('st-lanes').value = String(j.sync.transferLanes || 4);
+  $('st-verify-remote').checked = j.sync.verifyRemote !== false;
   $('st-deletion').value  = j.sync.deletion === 'versioning' ? 'recycler' : j.sync.deletion;
   $('st-perm-fallback').checked = !!j.sync.permanentFallback;
 
@@ -272,6 +274,8 @@ function uiToJob() {
   j.compare.includeFilter = $('st-include').value || '*';
   j.compare.excludeFilter = $('st-exclude').value || '';
 
+  j.sync.transferLanes = Number($('st-lanes').value) || 1;
+  j.sync.verifyRemote  = $('st-verify-remote').checked;
   j.sync.deletion = $('st-deletion').value;
   j.sync.permanentFallback = $('st-perm-fallback').checked;
 
@@ -1253,7 +1257,7 @@ async function doSync() {
   setBusyUi(true, 'Synchronizing…', true);
   $('pb-title').textContent = 'Synchronizing…';
   $('pb-ring').classList.remove('spin');
-  setStatLabels('Files', 'Data remaining', 'Speed', 'ETA');
+  setStatLabels('Files', 'Left to copy', 'Speed', 'ETA');
   { const del = $('s-del-box'); if (del) del.style.display = ''; }
 
   const res = await API.sync(state.job);
@@ -1508,7 +1512,10 @@ API.onSyncProgress(p => {
   $('pb-pct').textContent = Math.round(pct) + '%';
   $('pb-ring').setAttribute('stroke-dashoffset', RING_LEN * (1 - pct / 100));
   $('pb-fill').style.width = pct + '%';
-  $('pb-file').textContent = (p.pairs > 1 ? `[${p.pair}/${p.pairs}] ` : '') + (p.current || '—');
+  // With several files in flight, naming one of them and nothing else would
+  // read as a single slow file. Say how many are going at once.
+  $('pb-file').textContent = (p.pairs > 1 ? `[${p.pair}/${p.pairs}] ` : '') + (p.current || '—')
+    + (p.inFlight > 1 ? `   + ${p.inFlight - 1} more at the same time` : '');
 
   // The verification pass gets its own identity, like ingesto: blue everywhere
   // — title, ring, top bar and the step chips — so a read-back is never
@@ -1519,10 +1526,14 @@ API.onSyncProgress(p => {
   bar.style.setProperty('--pb-color',  verifying ? 'var(--blue)' : 'var(--green)');
   bar.style.setProperty('--pb-color2', verifying ? '#7bc8ff' : '#00ffaa');
   bar.style.setProperty('--pb-glow',   verifying ? 'rgba(77,144,240,.45)' : 'var(--green-g)');
-  renderSteps(p.pass);
+  renderSteps(p.pass, p.willVerify);
   renderFlow(p);
   $('s-files').innerHTML   = `${p.filesDone}<span class="stot"> / ${p.filesTotal}</span>`;
-  $('s-size').textContent  = fmtBytes(Math.max(0, p.bytesTotal - p.bytesDone));
+  // The bytes of the pass that is running, not of the whole run: the ring
+  // counts the copy and the read-back together, so this tile used to read
+  // twice the size of the folder the overview had just listed.
+  $('s-size').textContent  = fmtBytes(Math.max(0, (p.passBytesTotal || 0) - (p.passBytesDone || 0)));
+  $('s-size-lbl').textContent = verifying ? 'Left to verify' : 'Left to copy';
   $('s-spd').textContent   = fmtSpeed(p.bytesPerSec);
   $('s-eta').textContent   = fmtEta(p.etaSec);
   $('s-del').textContent   = String(p.deleted || 0);
@@ -1562,10 +1573,12 @@ const RUN_STEPS = [
 ];
 
 // pass: 'copy' | 'verify' | 'cleanup' | null (nothing running yet)
-function renderSteps(pass) {
+// verifying: false when the read-back is off for this run — the step is then
+// dropped rather than drawn and never reached.
+function renderSteps(pass, verifying) {
   const box = $('pb-steps');
   if (!box) return;
-  const steps = RUN_STEPS;
+  const steps = verifying === false ? RUN_STEPS.filter(s => s.key !== 'verify') : RUN_STEPS;
   const at = steps.findIndex(s => s.key === pass);
   box.innerHTML = steps.map((s, i) => {
     const state_ = at < 0 ? '' : i < at ? 'done' : i === at ? 'on' : '';
@@ -1609,6 +1622,7 @@ function renderVerifyLine(res) {
 
   const ICO_SHIELD = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg>';
   const ICO_X = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
+  const ICO_WARN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>';
 
   const verifyFailures = (res.errors || []).filter(e => /checksum mismatch/i.test(e.message || '')).length;
   let kind, ico, head, sub;
@@ -1623,6 +1637,15 @@ function renderVerifyLine(res) {
     head = `${verified} file${verified > 1 ? 's' : ''} read back and verified`;
     sub = 'Every file was copied, then read from its final location and compared with the '
         + 'xxHash64 fingerprint taken while writing. Not one differed.';
+  } else if (copied) {
+    // Files were copied and nothing read them back: the read-back is off for
+    // servers in the settings. This line is the one people trust after a long
+    // backup, so it has to say plainly that there is no proof this time.
+    kind = 'warn'; ico = ICO_WARN;
+    head = `${copied} file${copied > 1 ? 's' : ''} copied — not read back`;
+    sub = 'Reading files back is turned off for servers in the settings, so these copies were '
+        + 'checked for their size only, like any ordinary transfer. Turn it back on for a run '
+        + 'you need proof of.';
   } else {
     kind = 'good'; ico = ICO_SHIELD;
     head = 'Nothing needed copying';

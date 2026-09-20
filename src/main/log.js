@@ -63,6 +63,23 @@ function stamp() {
   return new Date().toISOString().replace('T', ' ').replace('Z', '');
 }
 
+// The logs of copies of syncto that are no longer running. Keeping one file
+// per process would otherwise leave one behind at every launch; the same
+// liveness check the lock protocol uses says which ones are finished with.
+function sweepDeadLogs(dir) {
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch (_) { return; }
+  for (const name of names) {
+    const m = /^syncto-(\d+)\.log$/.exec(name);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    if (pid === process.pid) continue;
+    try { process.kill(pid, 0); continue; }        // still running: leave it alone
+    catch (err) { if (err.code === 'EPERM') continue; }
+    try { fs.unlinkSync(path.join(dir, name)); } catch (_) {}
+  }
+}
+
 class Logger {
   constructor() {
     this.dir = null;
@@ -74,12 +91,18 @@ class Logger {
 
   // Called once the app knows where its profile lives. `on` is the setting.
   // The file is TRUNCATED here: one session, one log.
+  //
+  // It carries the process id because two copies of syncto can run side by
+  // side — two jobs, two NAS. With one shared name the second to start would
+  // wipe the first one's log and the two would then write into the same file,
+  // interleaved: the one thing a diagnostic log must never do.
   open(userDataDir, on) {
     try {
       this.dir = path.join(userDataDir, 'logs');
-      this.file = path.join(this.dir, 'syncto.log');
+      this.file = path.join(this.dir, `syncto-${process.pid}.log`);
       if (!on) { this.enabled = false; return this; }
       fs.mkdirSync(this.dir, { recursive: true });
+      sweepDeadLogs(this.dir);
       fs.writeFileSync(this.file, '');      // a new session starts on a clean page
       this.enabled = true;
       this.bytes = 0;

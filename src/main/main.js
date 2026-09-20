@@ -131,6 +131,21 @@ function openExternalSafely(u) {
 }
 
 // ── Window ─────────────────────────────────────────────────────────────────
+// Starts a second copy of syncto. The executable is spawned directly rather
+// than handed to the system launcher: on macOS `open` would simply bring the
+// running copy to the front, which is the behaviour we are working around.
+function launchAnother() {
+  try {
+    const { spawn } = require('child_process');
+    const args = app.isPackaged ? [] : [app.getAppPath()];
+    const child = spawn(process.execPath, args, { detached: true, stdio: 'ignore' });
+    child.unref();
+    log.info('app', 'started another copy of syncto');
+  } catch (err) {
+    log.error('app', `could not start another copy: ${err.message || err}`);
+  }
+}
+
 function createWindow() {
   const w = (prefs.data.window && prefs.data.window.width)  || 1280;
   const h = (prefs.data.window && prefs.data.window.height) || 820;
@@ -216,6 +231,12 @@ function buildMenu() {
       label: 'File',
       submenu: [
         { label: 'New job',      accelerator: 'CmdOrCtrl+N', click: send('job-new') },
+        // Two jobs at once means two copies of syncto: each has its own engine
+        // and its own folder locks, and the lock protocol already treats the
+        // other one as a live process rather than as a leftover. On macOS the
+        // Dock and the Finder refuse to open a second copy, which is what this
+        // entry is for.
+        { label: 'New syncto window', accelerator: 'CmdOrCtrl+Alt+N', click: () => launchAnother() },
         { label: 'Open job…',    accelerator: 'CmdOrCtrl+O', click: send('job-open') },
         { label: 'Save job',     accelerator: 'CmdOrCtrl+S', click: send('job-save') },
         { label: 'Save job as…', accelerator: 'CmdOrCtrl+Shift+S', click: send('job-save-as') },

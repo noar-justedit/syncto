@@ -188,14 +188,77 @@ class SyncRunner {
     // Every byte written is also read back, so the real work is twice the
     // data. Counting only the writes made the ring freeze during
     // verification — the pass was invisible.
-    this.verifyFactor = 2;
+
     this.done.workBytes = 0;      // written + read back
     this.plan.workBytes = 0;
+    this.plan.verifyBytes = 0;
+    this.inFlight = 0;            // files being copied or read back right now
     this.phase = 'copy';          // 'copy' | 'verify' | 'cleanup' — drives the colours
     this._lastEmit = 0;
   }
 
   side(which) { return which === 'left' ? this.left : this.right; }
+
+  // The connection a given lane works on. Lane 0 is the one everything else
+  // uses; the others exist only while a run is copying several files at once,
+  // and only for a server — two lanes on one local disk would just make it
+  // seek. Anything not opened falls back to lane 0, so a missing lane is slow,
+  // never wrong.
+  fsFor(which, lane) {
+    const set = this.lanes && this.lanes[which];
+    const alt = set && lane ? set[lane] : null;
+    return (alt && alt.fs) || this.side(which).fs;
+  }
+
+  // How many files may be in flight at once. Only when a side of the copy is a
+  // server: that is where one connection is capped by the SSH window (2 MB, a
+  // constant inside ssh2) divided by the round trip, and where more
+  // connections is the only way past it — which is exactly what a transfer
+  // client does to go faster.
+  laneCount(to, from) {
+    const n = Math.max(1, Math.min(8, Number(this.cfg.transferLanes) || 1));
+    if (n === 1) return 1;
+    // A local side never limits anything: the same NativeFs serves every lane,
+    // and reading four files at once from a disk is free. Only a server needs
+    // a connection per lane, so only a server can cap the count.
+    let remote = false;
+    let avail = n;
+    for (const which of [to, from]) {
+      if (this.side(which).kind !== 'sftp') continue;
+      remote = true;
+      const set = (this.lanes && this.lanes[which]) || [];
+      avail = Math.min(avail, Math.max(1, set.length));
+    }
+    return remote ? Math.max(1, avail) : 1;
+  }
+
+  // Runs `worker` over `items`, `k` at a time, each worker on its own lane.
+  // A worker stops taking new items as soon as the run is stopped or
+  // cancelled, so "stop at the first error" still stops everything — the files
+  // already in flight finish or fail on their own terms, which is the same
+  // thing that happens to the single file in flight without lanes.
+  async runLanes(items, k, worker) {
+    if (k <= 1) {
+      for (const item of items) {
+        if (this.stopped || this.token.cancelled) break;
+        await worker(item, 0);
+      }
+      return;
+    }
+    let next = 0;
+    const lanes = [];
+    for (let lane = 0; lane < k; lane++) {
+      lanes.push((async () => {
+        for (;;) {
+          if (this.stopped || this.token.cancelled) return;
+          const i = next++;
+          if (i >= items.length) return;
+          await worker(items[i], lane);
+        }
+      })());
+    }
+    await Promise.all(lanes);
+  }
   other(which) { return which === 'left' ? 'right' : 'left'; }
 
   abs(which, rel) {
@@ -215,6 +278,20 @@ class SyncRunner {
   absNode(node, side) { return this.abs(side, this.relOn(node, side)); }
 
 
+  // Whether a copy landing on this side will be read back and compared.
+  //
+  // On a server the read-back is the whole file crossing the link a second
+  // time, in the other direction — the single biggest reason a run takes twice
+  // as long as the same transfer in an FTP client. It can be turned off for
+  // servers, and for servers only: a local disk keeps its proof whatever the
+  // setting says, because there the read costs almost nothing.
+  verifies(side) {
+    const s = this.side(side);
+    if (!s) return true;
+    if (s.kind !== 'sftp') return true;
+    return this.cfg.verifyRemote !== false;
+  }
+
   emit(force, current) {
     const t = now();
     if (!force && t - this._lastEmit < 120) return;
@@ -230,11 +307,23 @@ class SyncRunner {
       // this payload could tell you which way the last file went.
       way  : this.way || '',
       current: current || this.current || '',
+      inFlight: this.inFlight || 0,
+      // Whether this run will read anything back. With the read-back off for a
+      // server there is no second pass, and the window must not draw a step
+      // that is never going to light up.
+      willVerify: this.plan.verifyBytes > 0,
       // Attempted, not succeeded: the ring has to reach the end of the plan
       // even when some files failed, while `done.files` stays the honest
       // count of files that really landed.
       filesDone: this.done.files + (this.done.failed || 0), filesTotal: this.plan.files,
       bytesDone: this.done.workBytes, bytesTotal: this.plan.workBytes,
+      // What the CURRENT pass has left to move, separately from the ring.
+      // The ring counts the copy AND the read-back, so "remaining" over the
+      // whole run is about twice the size of the folder — which is not what
+      // anyone expects to read next to a listing that says 285 GB.
+      passBytesDone : this.phase === 'verify'
+        ? Math.max(0, this.done.workBytes - this.done.bytes) : this.done.bytes,
+      passBytesTotal: this.phase === 'verify' ? this.plan.verifyBytes : this.plan.bytes,
       copiedBytes: this.done.bytes,
       deleted: this.done.deleted, deletionsTotal: this.plan.deletions,
       foldersDone: this.done.folders, foldersTotal: this.plan.folders,
@@ -319,7 +408,12 @@ class SyncRunner {
     this.plan.folders   = mkdir.length;
     this.plan.moves     = moves.length;
     this.plan.bytes     = copy.reduce((s, c) => s + (c.n[c.from].size || 0), 0);
-    this.plan.workBytes = this.plan.bytes * this.verifyFactor;
+    // Only the copies that will be read back count twice. With the read-back
+    // off for a server, the ring and the ETA stop promising a second pass that
+    // is not going to happen.
+    this.plan.verifyBytes = copy.reduce(
+      (s, c) => s + (this.verifies(c.to) ? (c.n[c.from].size || 0) : 0), 0);
+    this.plan.workBytes = this.plan.bytes + this.plan.verifyBytes;
     return { del, mkdir, copy, rmdir, moves };
   }
 
@@ -457,12 +551,14 @@ class SyncRunner {
   }
 
   // ── Copy one file ────────────────────────────────────────────────────────
-  async copyOne(item) {
+  async copyOne(item, lane) {
     const { n, to, from } = item;
-    const srcFs = this.side(from).fs, dstFs = this.side(to).fs;
+    const srcFs = this.fsFor(from, lane), dstFs = this.fsFor(to, lane);
     const src   = this.absNode(n, from);
     const dst   = this.absNode(n, to);
-    const algo  = algoFor();
+    // No fingerprint when nothing is going to compare it: hashing a file we
+    // will not read back costs CPU and buys nothing.
+    const algo  = this.verifies(to) ? algoFor() : null;
     const failSafe = this.cfg.failSafe !== false;
     const tmp = failSafe ? dst + TEMP_EXT : dst;
 
@@ -552,14 +648,19 @@ class SyncRunner {
     // source has a file. The temporary file would be written happily and the
     // rename onto it would then fail with a bare errno, leaving the .syncto_tmp
     // behind. Clear it first, through the deletion policy like everything else.
-    {
-      const cur = await dstFs.stat(dst);
-      if (cur && cur.type === 'folder') await this.dispose(to, n, true);
+    //
+    // This one stat answers two questions — is a folder in the way, and is
+    // there an old version to put aside — which used to cost two round trips
+    // per file on a server.
+    let existed = await dstFs.stat(dst);
+    if (existed && existed.type === 'folder') {
+      await this.dispose(to, n, true);
+      existed = null;
     }
 
     // An existing target is put aside before being replaced, so "overwrite"
     // never means "lose the previous version" when versioning is on.
-    if (!failSafe && await dstFs.exists(dst)) await this.archiveExisting(to, n);
+    if (!failSafe && existed) await this.archiveExisting(to, n);
 
     const hasher = algo ? await createHasher(algo) : null;
     let copied;
@@ -595,7 +696,7 @@ class SyncRunner {
     if (failSafe) {
       // Archive BEFORE the rename, and let a refusal abort the copy: the
       // temporary file is cleaned up and the target keeps its old content.
-      if (await dstFs.exists(dst)) {
+      if (existed) {
         try {
           await this.archiveExisting(to, n);
         } catch (err) {
@@ -637,8 +738,12 @@ class SyncRunner {
     // the database must record what is actually on disk — recording the wish
     // instead would make the next run see a spurious change and copy again.
     let dstId = null, dstMtime = srcStat.mtime;
+    // One more round trip per file, for two answers we may already have: the
+    // file id (which SFTP servers do not give at all) and the date really on
+    // disk (which we only need when preserving it failed or was never tried).
+    const needsRead = !mtimeKept || dstFs.hasFileIds !== false;
     try {
-      const st = await dstFs.stat(dst);
+      const st = needsRead ? await dstFs.stat(dst) : null;
       // `mtimeKept` is false both when preserving the date FAILED and when it
       // was never attempted (preserveTimes off). Either way the copy carries
       // its own date, and that is what the database has to record. The extra
@@ -935,10 +1040,14 @@ class SyncRunner {
     }
 
     // 3. copy files
-    if (!this.stopped) for (const item of plan.copy) {
+    if (!this.stopped) await this.runLanes(plan.copy, this.laneCount(
+      plan.copy.length ? plan.copy[0].to : 'right',
+      plan.copy.length ? plan.copy[0].from : 'left'), async (item, lane) => {
       await this.gate();
+      if (this.stopped || this.token.cancelled) return;
+      this.inFlight++;
       try {
-        const res = await this.withRetry(item.n.rel, () => this.copyOne(item));
+        const res = await this.withRetry(item.n.rel, () => this.copyOne(item, lane));
         this.done.files++;
         this.record(item.n, true, {
           side: item.to, bytes: res.bytes, hash: res.hash, algo: res.algo,
@@ -957,9 +1066,25 @@ class SyncRunner {
         // the number of files that actually landed appearing nowhere.
         this.done.failed = (this.done.failed || 0) + 1;
         this.record(item.n, false, { side: item.to, error: err.message || String(err) });
-        if (this.halt(err)) break;
+        this.halt(err);          // sets `stopped`; the lanes stop taking work
+      } finally {
+        this.inFlight--;
       }
       this.emit(false);
+    });
+
+    // A checksum list is a list of fingerprints that were CHECKED. With the
+    // read-back off for a server, nothing checked anything on that side, so
+    // there is no list to write — and saying so is the point: a sidecar full
+    // of fingerprints nobody verified is exactly the false proof this program
+    // exists to avoid.
+    if (this.cfg.writeChecksumList && !this.stopped) {
+      for (const which of ['left', 'right']) {
+        if (this.verifies(which)) continue;
+        if (!plan.copy.some(c => c.to === which)) continue;
+        this.notes.push('No checksum list was written for the server side: reading files back is ' +
+          'turned off for servers, so nothing was checked there. Turn it back on to get a list.');
+      }
     }
 
     // 4. verify — one pass over everything that was copied, exactly like
@@ -969,16 +1094,20 @@ class SyncRunner {
     if (this.toVerify.length && !this.token.cancelled) {
       this.phase = 'verify';
       this.current = '';
+      this.plan.verifyBytes = this.toVerify.reduce((t, i) => t + (i.size || 0), 0);
       this.emit(true, 'Verifying…');
       log.info('verify', `reading back ${this.toVerify.length} file(s)`);
       const vStart = Date.now();
       let vBytes = 0;
-      for (const item of this.toVerify) {
+      const vLanes = this.laneCount(this.toVerify[0].side, this.toVerify[0].side);
+      await this.runLanes(this.toVerify, vLanes, async (item, lane) => {
         await this.gate();
+        if (this.token.cancelled) return;
         this.current = item.rel;
         this.way = item.side;
+        this.inFlight++;
         this.emit(true);
-        const fsx = this.side(item.side).fs;
+        const fsx = this.fsFor(item.side, lane);
         const vT0 = Date.now();
         try {
           const flushed = await fsx.flush(item.path);
@@ -1003,7 +1132,7 @@ class SyncRunner {
             this.checksums[item.side].push({ rel: item.listRel || item.rel, hash: item.digest, size: item.size });
           }
         } catch (err) {
-          if (/cancelled/i.test(err.message || '')) break;
+          if (/cancelled/i.test(err.message || '')) { this.inFlight--; return; }
           item.ok = false;
           this.done.errors++;
           this.errors.push({ rel: item.rel, message: err.message || String(err) });
@@ -1012,10 +1141,12 @@ class SyncRunner {
           this.applied.delete(item.rel);
           const res = this.results.find(r => r.rel === item.rel && r.ok);
           if (res) { res.ok = false; res.error = err.message || String(err); }
-          if (this.halt(err)) break;
+          this.halt(err);
+        } finally {
+          this.inFlight--;
         }
         this.emit(false);
-      }
+      });
       // Not back to 'copy': what follows writes nothing, and the interface
       // must not flash green again as if a new file were being transferred.
       {

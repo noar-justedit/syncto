@@ -4,6 +4,66 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.7.2] — 2026-09-19
+
+Transfers to a server, three times faster — and two copies of syncto that can
+run side by side.
+
+### Fixed
+
+- **syncto asked a server ten questions for every file it copied.** Before each
+  copy it confirmed the destination folder by stat'ing *every segment of the
+  path*, file after file — five round trips to rediscover a folder it had just
+  written four hundred files into. At 100 ms of latency that is half a second
+  per file before a byte moves, and it is the main reason a plain FTP client
+  looked so much faster. A folder confirmed once is now remembered for the run,
+  two more redundant checks per file are gone, and the file id nobody can read
+  over SFTP is no longer asked for: **10.2 requests per file → 5.0**.
+- **"Data remaining" counted the read-back pass as well as the copy**, so it
+  showed about twice the size of the folder the overview had just listed. The
+  tile now follows the pass that is running and says which one it is: **Left to
+  copy**, then **Left to verify**. The ring still counts both passes, because
+  both take time.
+- **Two copies of syncto shared one log file.** It is truncated at launch, so
+  the second to start wiped the first one's log and the two then wrote into it
+  at once. Each copy now has its own file, and a log left behind by a copy that
+  has ended is swept up at the next launch.
+- **Two copies of syncto overwrote each other's preferences.** Before writing,
+  syncto now re-reads the file and lays only its own changes over it; what it
+  did not touch keeps whatever the other copy put there.
+
+### Added
+
+- **Several files are copied at once on a server, each on its own connection**
+  — Settings › Servers › *Files at a time*, four by default. One connection
+  cannot go faster than the SSH window (2 MB, a constant inside the ssh2
+  library) divided by the round trip: 20 MB/s at 100 ms, whatever the link.
+  Opening several is the only way past it, and it is what a transfer client
+  does. Local disks and mounted shares are untouched — they still copy one file
+  at a time, because a spinning drive asked for four files at once seeks
+  instead of reading.
+- **The read-back can be turned off for servers** — Settings › Servers › *Read
+  files back on a server*, on by default. On a server the verification is the
+  whole file crossing the link a second time; turning it off roughly halves the
+  time and leaves a copy nothing has checked, which is what an ordinary FTP
+  client gives you. **Local disks keep their verification whatever this says.**
+  A run with no read-back says so on the summary card, drops the Verify step
+  from the run panel, and writes no checksum list for that side.
+- **File › New syncto window** (⌥⌘N, Ctrl+Alt+N) starts a second copy: on macOS
+  the Dock and the Finder refuse to. The folder locks needed nothing — a second
+  copy of the same installation already reads the first one's lock as a live
+  process, not as a leftover to clear.
+
+### Measured
+
+Against a real SFTP server with injected latency, 64 MB in 8 files at 40 ms:
+
+| | time | rate |
+|---|---|---|
+| one file at a time, read back (0.7.1) | 16.3 s | 3.9 MB/s |
+| four at a time, read back | 6.2 s | 10.3 MB/s |
+| four at a time, no read-back | 4.4 s | 14.7 MB/s |
+
 ## [0.7.1] — 2026-09-14
 
 Getting out of a narrowed view, and a run you can read from across the room.
