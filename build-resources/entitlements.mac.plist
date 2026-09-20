@@ -12,5 +12,11 @@
   <true/>
   <key>com.apple.security.network.client</key>
   <true/>
+  <!-- Shutting down asks System Events to do it, which is an Apple event. An
+       app with the hardened runtime may not send one at all without this
+       entitlement: the request is refused before it leaves, with error -1743,
+       and the machine simply stays on. -->
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
 </dict>
 </plist>

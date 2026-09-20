@@ -63,6 +63,20 @@ function commandFor(action, platform) {
   return null;
 }
 
+// The one refusal a person can actually do something about: macOS asking
+// permission to drive System Events, and being told no — once, months ago, in
+// a dialog nobody remembers. The system error says "Not authorized to send
+// Apple events", which names nothing anyone can find in the settings.
+function explain(action, c, err) {
+  const first = String(err.message || err).split('\n')[0];
+  if (process.platform === 'darwin' && /-1743|not authori[sz]ed to send apple events/i.test(String(err.message || ''))) {
+    return `${label(action)} was refused by macOS: syncto is not allowed to control System Events. `
+         + 'Open System Settings › Privacy & Security › Automation, find syncto, and turn on '
+         + '“System Events”.';
+  }
+  return `${label(action)} failed (${c.cmd}): ${first}`;
+}
+
 function label(action) {
   return { none: 'Do nothing', quit: 'Quit syncto', sleep: 'Sleep', shutdown: 'Shut down' }[action] || 'Do nothing';
 }
@@ -100,10 +114,7 @@ function run(action, { onQuit } = {}) {
       if (!err) return resolve({ ok: true, action });
       // Say what was attempted. "Command failed" on its own tells the user
       // nothing about why the machine is still on.
-      resolve({
-        ok: false, action,
-        error: `${label(action)} failed (${c.cmd}): ${err.message.split('\n')[0]}`,
-      });
+      resolve({ ok: false, action, error: explain(action, c, err) });
     });
   });
 }

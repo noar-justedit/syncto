@@ -4285,6 +4285,82 @@ async function testSftpSpeed() {
   }
 }
 
+
+// ══ 41. The bridge must carry every argument the handler reads (0.7.3) ════
+// "After the synchronization: shut down" did nothing, on macOS and on Windows
+// alike, and the reason was neither of them: the preload forwarded ONE
+// argument to a handler that refuses to act unless the SECOND one is exactly
+// true. So every request was turned down as "the run did not finish cleanly",
+// on every platform, for ever.
+//
+// This section reads the two files and compares them, channel by channel.
+function testIpcArity() {
+  console.log('\n\n41. The bridge carries every argument (0.7.3)');
+
+  const root = path.join(__dirname, '..');
+  const preload = fs.readFileSync(path.join(root, 'src/main/preload.js'), 'utf8');
+  const mainjs  = fs.readFileSync(path.join(root, 'src/main/main.js'), 'utf8');
+
+  // What the window sends: ipcRenderer.invoke('channel', a, b, …)
+  const sent = new Map();
+  for (const m of preload.matchAll(/ipcRenderer\.invoke\(\s*'([^']+)'\s*([^)]*)\)/g)) {
+    const rest = m[2].trim();
+    const args = rest ? rest.replace(/^,/, '').split(',').filter(s => s.trim()).length : 0;
+    sent.set(m[1], args);
+  }
+  ok(sent.size > 20, `the bridge exposes ${sent.size} channels`);
+
+  // What the main process reads: ipcMain.handle('channel', (_, x, y) => …)
+  const read = new Map();
+  for (const m of mainjs.matchAll(/ipcMain\.handle\(\s*'([^']+)'\s*,\s*(?:async\s*)?\(([^)]*)\)/g)) {
+    const params = m[2].split(',').map(s => s.trim()).filter(Boolean);
+    read.set(m[1], Math.max(0, params.length - 1));   // the event is not an argument
+  }
+  ok(read.size > 20, `the main process answers ${read.size} of them`);
+
+  // Every channel the window calls must exist, and must be given everything
+  // the handler looks at. A handler reading more than it is sent gets
+  // `undefined` — and `undefined` passes no test that expects a value.
+  const missing = [...sent.keys()].filter(c => !read.has(c));
+  eq(missing.join(', '), '', 'every channel the window calls is answered');
+
+  const short = [];
+  for (const [channel, given] of sent) {
+    const wanted = read.get(channel);
+    if (wanted != null && given < wanted) short.push(`${channel}: sends ${given}, reads ${wanted}`);
+  }
+  eq(short.join(' | '), '', 'and none is called with fewer arguments than it reads');
+
+  // The one that was broken, named, so a future edit cannot quietly undo it.
+  eq(sent.get('after-sync'), 2, 'after-sync carries the action AND whether the run was clean');
+  ok(/afterSync\s*:\s*\(action, clean\)/.test(preload), 'the bridge names both');
+  ok(/API\.afterSync\(afterState\.action, afterState\.clean === true\)/
+     .test(fs.readFileSync(path.join(root, 'src/renderer/app.js'), 'utf8')),
+     'and the window still sends both');
+
+  // macOS refuses an Apple event from a signed app that has not asked for the
+  // right. Shutting down goes through System Events, so without these two the
+  // machine stays on and the log says nothing a person can act on.
+  {
+    const ent = fs.readFileSync(path.join(root, 'build-resources/entitlements.mac.plist'), 'utf8');
+    const yml = fs.readFileSync(path.join(root, 'electron-builder.yml'), 'utf8');
+    ok(/com\.apple\.security\.automation\.apple-events/.test(ent),
+       'the signed app is allowed to send Apple events');
+    ok(/NSAppleEventsUsageDescription/.test(yml),
+       'and says why, which is what the permission prompt shows');
+    const { commandFor } = require('../src/main/power');
+    ok(/System Events/.test(commandFor('shutdown', 'darwin').args.join(' ')),
+       'because that is how the Mac is asked to shut down');
+  }
+
+  // And when it is refused anyway, the message names the setting to change.
+  {
+    const power = fs.readFileSync(path.join(root, 'src/main/power.js'), 'utf8');
+    ok(/Privacy & Security › Automation/.test(power),
+       'a refusal points at the panel that fixes it, not at an error number');
+  }
+}
+
 (async function main() {
   console.log('syncto engine tests');
   console.log('scratch: ' + ROOT);
@@ -4329,6 +4405,7 @@ async function testSftpSpeed() {
     testNarrowedViewAndRunUi();
     await testRunFiguresAndLogPerProcess();
     await testSftpSpeed();
+    testIpcArity();
   } catch (err) {
     failed++;
     failures.push('UNCAUGHT: ' + (err.stack || err.message));

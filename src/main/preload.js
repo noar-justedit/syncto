@@ -52,7 +52,11 @@ const api = {
 
   // After the run, and phone notifications. `ntfyGet` never returns the
   // access token — only whether one is stored.
-  afterSync : (action)      => ipcRenderer.invoke('after-sync', action),
+  // BOTH arguments. The handler refuses to touch the machine unless `clean`
+  // is exactly true, and this bridge used to forward the action alone — so
+  // `clean` arrived undefined, every request was refused as "the run did not
+  // finish cleanly", and the machine never slept or shut down on any platform.
+  afterSync : (action, clean) => ipcRenderer.invoke('after-sync', action, clean),
   ntfyGet   : ()            => ipcRenderer.invoke('ntfy-get'),
   ntfySave  : (patch)       => ipcRenderer.invoke('ntfy-save', patch),
   ntfyTest  : (patch)       => ipcRenderer.invoke('ntfy-test', patch),

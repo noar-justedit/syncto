@@ -4,6 +4,39 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.7.3] — 2026-09-20
+
+"After the synchronization: shut down" never worked. Neither did sleep.
+
+### Fixed
+
+- 🔴 **The machine was never asked.** The window sends two things — what to do,
+  and whether the run finished cleanly — and the main process refuses to touch
+  the machine unless the second is exactly `true`. The bridge between them
+  forwarded only the first, so that check saw `undefined`, every request was
+  turned down as *"the run did not finish cleanly"*, and nothing happened. On
+  macOS and on Windows alike, since the day the setting existed: the fault was
+  in neither operating system, which is why it looked like both were at fault.
+- **macOS refused the request even once it was made.** Shutting down goes
+  through System Events, which is an Apple event, and an application signed
+  with the hardened runtime may not send one at all unless it says so: the
+  `com.apple.security.automation.apple-events` entitlement and the sentence
+  macOS shows in the permission prompt were both missing. They are there now.
+  ⚠️ **The first run after updating will ask** for permission to control System
+  Events — that prompt is the shutdown being allowed to happen. If it was
+  refused once before, turn syncto back on in *System Settings › Privacy &
+  Security › Automation*.
+- **A refusal now names the panel that fixes it** rather than reporting
+  "Not authorized to send Apple events", which points at nothing anyone can act
+  on.
+
+### Added
+
+- The test suite reads the bridge and the main process side by side and fails
+  when a channel is called with fewer arguments than its handler reads. That is
+  the shape of this bug, and it could have been anywhere on the thirty-odd
+  channels between the window and the engine.
+
 ## [0.7.2] — 2026-09-19
 
 Transfers to a server, three times faster — and two copies of syncto that can

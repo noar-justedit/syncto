@@ -55,6 +55,10 @@ mac:
     NSDesktopFolderUsageDescription: "syncto needs this to synchronize a folder on your Desktop."
     NSDocumentsFolderUsageDescription: "syncto needs this to synchronize a folder in your Documents, and to write its reports there."
     NSDownloadsFolderUsageDescription: "syncto needs this to synchronize a folder in your Downloads."
+    # Shown in the prompt the first time syncto asks to shut the machine down,
+    # which it does through System Events. Without a sentence here macOS shows
+    # an empty dialog — or refuses outright on recent releases.
+    NSAppleEventsUsageDescription: "syncto needs this to shut this machine down or put it to sleep when a synchronization finishes, if you asked it to."
   target:
     - target: dmg
       arch:
