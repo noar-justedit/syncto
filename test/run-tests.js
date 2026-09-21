@@ -4353,12 +4353,136 @@ function testIpcArity() {
        'because that is how the Mac is asked to shut down');
   }
 
+  // The buttons of a card stay in view while its content scrolls. The settings
+  // panel is two screens tall, and the only way out of it used to be at the
+  // bottom of that scroll.
+  {
+    const html = fs.readFileSync(path.join(root, 'src/renderer/index.html'), 'utf8');
+    ok(/\.mcard > \.m-btns\{position:sticky;bottom:-24px;/.test(html),
+       'a card keeps its buttons on screen');
+    // The card pads itself by 24 px; a sticky bar that does not cancel that
+    // padding floats above the edge with a strip of scrolling content under it.
+    ok(/margin:20px -24px -24px;/.test(html), 'flush with the bottom of the card, not floating above it');
+    // Under the charte (0.7.4) the bar is told from the scrolling content by
+    // being OPAQUE, on the card's own surface — no line.
+    const last = html.lastIndexOf('.mcard > .m-btns{');
+    ok(/^\.mcard > \.m-btns\{background:var\(--card\);border-top:none;/.test(html.slice(last)),
+       'opaque, on the card surface, so the content is seen to pass behind it');
+  }
+
+  // A hint that describes a safety behaviour has to describe the one in the
+  // code: the abandoned-lock window moved from 12 to 60 seconds in 0.6.2 and
+  // the settings panel kept telling people 12.
+  {
+    const html = fs.readFileSync(path.join(root, 'src/renderer/index.html'), 'utf8');
+    const { DETECT_ABANDONED_MS } = require('../src/main/core/lock');
+    const m = /taken over after (\d+)&nbsp;seconds/.exec(html);
+    ok(m, 'the panel says when an abandoned lock is taken over');
+    eq(Number(m[1]) * 1000, DETECT_ABANDONED_MS, 'and says the number the engine actually uses');
+  }
+
   // And when it is refused anyway, the message names the setting to change.
   {
     const power = fs.readFileSync(path.join(root, 'src/main/power.js'), 'utf8');
     ok(/Privacy & Security › Automation/.test(power),
        'a refusal points at the panel that fixes it, not at an error number');
   }
+}
+
+
+// ══ 42. The charte UI (0.7.4) ════════════════════════════════════════════
+// syncto now wears the visual language shared by Noar's applications
+// (charte-ui-noar.md). A redesign breaks nothing a test would notice, and can
+// quietly come undone: these are the promises the charte makes that a later
+// edit could take back without anyone seeing it on the first screen.
+function testCharte() {
+  console.log('\n\n42. The charte UI (0.7.4)');
+  const root = path.join(__dirname, '..');
+  const html = fs.readFileSync(path.join(root, 'src/renderer/index.html'), 'utf8');
+  const app  = fs.readFileSync(path.join(root, 'src/renderer/app.js'), 'utf8');
+  const css  = html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
+  const at   = css.indexOf('CHARTE UI');
+  ok(at > 0, 'the charte is one block laid over the stylesheet');
+  const block = css.slice(at);
+
+  // Last, or the rules it overrides win back by coming later.
+  ok(css.indexOf('#bottombar.kiosk{') < at && css.indexOf('.mcard > .m-btns{position:sticky') < at,
+     'and it comes after every rule it overrides');
+
+  // The accent is syncto's own and marks the brand only.
+  // syncto's identity colour, validated 21.09.2026: the cyan of its icon. Not
+  // ingesto's violet, and not the magenta first tried, which is presto's.
+  ok(/--accent:#2cc4ea;/.test(block), "the accent is syncto's cyan, not ingesto's violet nor presto's magenta");
+  {
+    const svg = fs.readFileSync(path.join(root, 'build-resources/icon.svg'), 'utf8');
+    ok(/stroke="#2cc4ea"/.test(svg), 'and it is the colour of the icon');
+    // The loop, not a folder: projecto and renamo already draw one.
+    ok(!/linearGradient|folder/i.test(svg.replace(/<!--[\s\S]*?-->/g, '')), 'which is no longer a folder');
+    ok(!/#ff0062|#5936d8/i.test(svg.replace(/<!--[\s\S]*?-->/g, '')), 'which no longer carries the old violet or magenta');
+  }
+  const accentUses = block.split('\n').filter(l => /var\(--accent\)/.test(l));
+  eq(accentUses.map(l => l.trim().split('{')[0]).join(' | '), '.t-logo > span',
+     'and the charte block uses it on the logo and nowhere else');
+  ok(/--accent-d:rgba\(255,255,255,\.06\);\s*--accent-g:rgba\(255,255,255,\.18\);/.test(block),
+     'a rule still asking for the old accent tint gets grey, never magenta');
+
+  // Four state colours. Violet is folded into blue.
+  ok(/--violet:var\(--blue\);\s*--violet-d:var\(--blue-d\);/.test(block),
+     'violet is gone: a detected move is blue');
+
+  // The chips under the grid speak the grid's colour code. They did not: an
+  // update was orange in the grid and blue in its chip, a deletion red and orange.
+  {
+    const grid = {};
+    for (const m of app.matchAll(/^\s*(\w+)\s*:\s*\{[^}]*cls: '(arr-\w+)/gm)) grid[m[1]] = m[2];
+    const colour = { 'arr-add': 'g', 'arr-upd': 'o', 'arr-del': 'r', 'arr-mov': 'b', 'arr-cfl': 'r' };
+    const wrong = [];
+    for (const m of app.matchAll(/chip\('(\w?)', '[^']*', s\.\w+,\s*'(\w+)'/g)) {
+      const want = colour[grid[m[2]]];
+      if (want && want !== m[1]) wrong.push(`${m[2]}: chip ${m[1] || '-'}, grid ${want}`);
+    }
+    ok(Object.keys(grid).length >= 10, 'the grid colour table is read');
+    eq(wrong.join(' | '), '', 'every chip has the colour of its arrow in the grid');
+  }
+
+  // No structural line: the old border tokens are transparent.
+  ok(/--border:transparent;\s*--border2:transparent;/.test(block),
+     'grouping is carried by the background: the border tokens are transparent');
+  // Read the charte's OWN rule for each container, not any rule that happens
+  // to mention it: "#toolbar .tbtn{border:none}" says nothing about #toolbar.
+  for (const sel of ['#toolbar{', '#statusbar{', '#pairwrap{', '.mcard{', '.sb-hd{']) {
+    const rule = (block.match(new RegExp('(?:^|[\\s,}])' + sel.replace(/[.#{]/g, c => '\\' + c) + '[^}]*', 'm')) || [''])[0];
+    ok(/border(-bottom|-top)?:none/.test(rule), `${sel.slice(0, -1)} carries no line`);
+  }
+
+  // The modes: grey, the chosen one on a surface with a green tick.
+  ok(/\.mbtn\.on,#var-twoWay\.on,#var-mirror\.on,#var-update\.on,#var-custom\.on\{\s*background:var\(--ins\);border:none;box-shadow:none;\}/.test(block),
+     'the chosen mode sits on a hollow, no coloured frame');
+  ok(/stroke='%2335c98b'/.test(block), 'with a green tick');
+
+  // Every button that is only an icon says what it is to a screen reader.
+  {
+    const bare = [];
+    for (const m of html.matchAll(/<button\b([^>]*)>\s*<svg(?:(?!<\/?button)[\s\S])*?<\/svg>\s*<\/button>/g))
+      if (!/aria-label=/.test(m[1])) bare.push((/id="([^"]+)"/.exec(m[1]) || [, m[1].slice(0, 40)])[1]);
+    for (const m of app.matchAll(/<button\b([^>]*)>\$\{ICON_\w+\}<\/button>/g))
+      if (!/aria-label=/.test(m[1])) bare.push((/class="([^"]+)"/.exec(m[1]) || [, '?'])[1]);
+    eq(bare.join(', '), '', 'every icon-only button carries an aria-label');
+  }
+
+  // Escape closes every window, through its own safe button.
+  {
+    const ids = [...html.matchAll(/class="ov" id="([\w-]+)"/g)].map(m => m[1]);
+    const esc = app.slice(app.indexOf('const ESC_CLOSE'), app.indexOf('};', app.indexOf('const ESC_CLOSE')));
+    ok(ids.length >= 9, `the page has ${ids.length} windows`);
+    eq(ids.filter(id => !esc.includes(`'${id}'`)).join(', '), '', 'Escape knows every one of them');
+  }
+
+  // The documented exception: the resize handles stay, and are invisible
+  // until the pointer is on them.
+  ok(/id="split-sb"/.test(html) && /id="split-jobs"/.test(html), 'the resize handles are still there');
+  ok(/\.split-v\{width:12px;padding:0 5px;background-color:transparent;\}/.test(block),
+     'drawn as the 12 px gap itself, with no line at rest');
 }
 
 (async function main() {
@@ -4406,6 +4530,7 @@ function testIpcArity() {
     await testRunFiguresAndLogPerProcess();
     await testSftpSpeed();
     testIpcArity();
+    testCharte();
   } catch (err) {
     failed++;
     failures.push('UNCAUGHT: ' + (err.stack || err.message));

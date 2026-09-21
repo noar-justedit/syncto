@@ -766,6 +766,14 @@ border:1px solid rgba(242,160,61,.4);border-radius:5px;padding:3px 9px;cursor:po
 #lock-badge:hover{border-color:var(--orange);}
 #lock-badge:disabled{opacity:.5;cursor:default;}
 .m-btns{display:flex;gap:9px;margin-top:20px;}
+/* The buttons of a card stay in view while its content scrolls. The settings
+   panel is long — the button that closes it used to be at the bottom of a
+   scroll, which is a strange place to hide the only way out.
+   `bottom:-24px` cancels the card's own bottom padding, so the bar sits flush
+   on the card's edge instead of floating 24 px above it. */
+.mcard > .m-btns{position:sticky;bottom:-24px;z-index:3;
+margin:20px -24px -24px;padding:14px 24px;background:var(--bg2);
+border-top:1px solid var(--border);border-radius:0 0 13px 13px;}
 .m-btn{flex:1;padding:11px;border-radius:var(--rs);border:1px solid var(--border2);
 background:var(--bg3);color:var(--text);font-family:var(--font);font-size:13.5px;font-weight:700;
 cursor:pointer;transition:all .15s;}
@@ -1021,6 +1029,328 @@ font-family:var(--font);font-size:11px;font-weight:600;max-width:320px;white-spa
 padding:6px 10px;border-radius:6px;border:1px solid var(--border2);
 box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ease;}
 @keyframes tipIn{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:translateY(0)}}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   CHARTE UI — the shared visual language of Noar's applications, set on
+   ingesto 2.7.0 (charte-ui-noar.md). Laid OVER the rules above rather than
+   rewriting them: the whole redesign reads in one place, and can be lifted out
+   in one piece.
+
+   The rule: grouping is carried by the BACKGROUND, never by a line. Three
+   surfaces — page, card, the hollow inside a card — plus --raise for what
+   floats above (menus, tooltips). The only outline left is one that states
+   something: a selection, keyboard focus, an alarm.
+
+   Decided for syncto (21.09.2026):
+   - accent = syncto's identity colour, cyan #2cc4ea — the icon's folder —
+     on the logo and nowhere else (the magenta first tried is presto's);
+   - four state colours only: violet is gone, a detected move is BLUE (nothing
+     is copied — neutral information);
+   - the modes are grey, the chosen one sits on a hollow with a green tick;
+   - SOURCE / DESTINATION titles are grey labels: red means "deleted" in the
+     grid, and in two-way mode neither side is a source;
+   - the three resize handles stay, invisible until hovered — a documented
+     exception: long paths need the grid to be widened.
+   ═══════════════════════════════════════════════════════════════════════════ */
+:root{
+  --page:#0a0b0e; --card:#14161c; --ins:#0e1014; --raise:#1b1d24;
+  --text4:#6f757f;
+  --r-card:14px; --r-ins:11px; --r-field:8px; --r-badge:4px;
+  --accent:#2cc4ea;
+  /* Anything above that still asks for the old accent tints gets neutral
+     values: a rule missed here falls back to grey, never to the accent. */
+  --accent-d:rgba(255,255,255,.06); --accent-g:rgba(255,255,255,.18);
+  --violet:var(--blue); --violet-d:var(--blue-d);
+  /* Old tokens, re-pointed at the three surfaces. */
+  --bg:var(--page); --bg2:var(--card); --bg3:var(--ins); --bg4:var(--raise);
+  --border:transparent; --border2:transparent;
+  --font-display:var(--font);
+  --focus:inset 0 0 0 1px rgba(255,255,255,.18);
+}
+html,body{background:var(--page);}
+
+/* ── Logo — the one place the accent lives ─────────────────────────────── */
+.t-logo > span{color:var(--accent);}
+
+/* ── Page layout: cards on the page, 12 px apart ───────────────────────── */
+#titlebar{border-bottom:none;}
+#main{padding:0 12px 0 12px;}
+#sidebar{background:transparent;}
+#sb-jobs,#sb-overview{background:var(--card);border-radius:var(--r-card);overflow:hidden;}
+#content{padding:0;}
+#syncmodes,#pairwrap{background:var(--card);border:none;border-radius:var(--r-card);
+  margin-bottom:12px;padding:13px 16px 14px;}
+/* Toolbar, grid and chip strip are ONE card: the grid's controls above it,
+   its counts below it. Rounded top, square middle, rounded bottom. */
+#toolbar{background:var(--card);border:none;border-radius:var(--r-card) var(--r-card) 0 0;
+  padding:12px 16px 10px;}
+#gridwrap{background:var(--card);padding:0 8px;}
+#statusbar{background:var(--card);border:none;border-radius:0 0 var(--r-card) var(--r-card);
+  padding:9px 16px 11px;}
+#bottom-controls{background:transparent;border:none;padding:12px 0 0;}
+#footer{border-top:none;padding:6px 14px 7px;}
+
+/* ── Resize handles: kept, invisible. The 12 px gutter IS the handle. ──── */
+.split-v{width:12px;padding:0 5px;background-color:transparent;}
+.split-h{height:12px;padding:5px 0;background-color:transparent;}
+.split-v:hover,.split-v.drag,.split-h:hover,.split-h.drag{background-color:rgba(255,255,255,.14);}
+
+/* ── Labels: capitals 10/700, fixed 12 px height ───────────────────────── */
+.sb-hd{border-bottom:none;padding:13px 14px 6px;}
+.sb-hd h2,.cc-label,.tgroup > label,.prow-hdr .fld-lbl,#gridhead .hd-big,
+.set-sec-title,.rl-tag,.rl-lbl,.slabel,.sr-lbl{
+  font-family:var(--font);font-size:10px;font-weight:700;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--text3);height:12px;line-height:12px;}
+.cc-label{margin-bottom:10px;}
+.tgroup{gap:6px;}
+.prow-hdr .fld-lbl .dot{display:none;}
+.prow-hdr .fld-lbl,.prow-hdr .fld-lbl:has(.dot.src){color:var(--text3);}
+.set-sec-title{margin-bottom:12px;}
+
+/* ── Titlebar icon buttons: 28 px squares on the page ──────────────────── */
+#titlebar .tbtn.icon{width:30px;height:30px;padding:0;justify-content:center;
+  background:var(--card);border:none;border-radius:8px;color:var(--text2);}
+#titlebar .tbtn.icon:hover:not(:disabled){color:var(--text);}
+#wincontrols button:hover{background:var(--card);}
+
+/* ── Jobs ──────────────────────────────────────────────────────────────── */
+.job-actions{padding:6px 12px 10px;gap:6px;}
+.job-actions button{background:var(--ins);border:none;border-radius:9px;color:var(--text3);}
+.job-actions button:hover{color:var(--text);}
+.job-actions button:disabled:hover{color:var(--text3);}
+.recent-list{padding:2px 8px 10px;}
+.recent-item{border-radius:var(--r-field);padding:6px 8px;}
+.recent-item:hover{background:rgba(255,255,255,.03);}
+/* The open job is the only one on a surface. No colour spent on it. */
+.recent-item.cur{background:var(--ins);}
+.recent-item.cur svg{color:var(--text2);}
+.recent-item.cur .recent-name{color:var(--text);}
+
+/* ── Overview ──────────────────────────────────────────────────────────── */
+#ov-head{padding:4px 12px 6px;font-size:9.5px;font-weight:700;letter-spacing:.12em;}
+#ov-head [data-sort].on{color:var(--text);}
+#ov-list{padding:0 8px 10px;}
+.ov-row{border-radius:7px;}
+.ov-row:hover{background:rgba(255,255,255,.03);}
+.ov-pct{background:var(--ins);border:none;border-radius:var(--r-badge);}
+/* Two answers that can be true at once, told apart without a colour:
+   "the grid shows this one" is a surface, "picked for a batch" an outline. */
+.ov-row.sel,.ov-row.scoped,.ov-row.picked.scoped{background:var(--ins);box-shadow:none;}
+.ov-row.sel .ov-name,.ov-row.scoped .ov-name{color:var(--text);}
+.ov-row.picked{background:transparent;box-shadow:var(--focus);}
+.ov-row.picked.scoped{box-shadow:var(--focus);}
+.ov-chk input,.chk input,.grow .c-chk input{accent-color:var(--text2);}
+.ov-twist:hover{background:var(--ins);}
+.ov-pairhead .n,.grow-hdr .gh-num{min-width:0;height:auto;border:none;
+  font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:.06em;
+  color:var(--blue);background:rgba(77,144,240,.15);padding:2px 6px;border-radius:var(--r-badge);}
+.ov-reset{background:var(--ins);border:none;border-radius:var(--r-ins);}
+#ov-list.can-reset:hover .ov-reset{color:var(--text2);}
+
+/* ── Modes: grey, the chosen one on a hollow with a green tick ─────────── */
+.modes-row{gap:6px;}
+.mbtn,#syncmodes .mbtn{background:transparent;border:none;border-radius:var(--r-ins);
+  padding:9px 12px;box-shadow:none;}
+.mbtn:hover{background:rgba(255,255,255,.03);}
+.mbtn.on,#var-twoWay.on,#var-mirror.on,#var-update.on,#var-custom.on{
+  background:var(--ins);border:none;box-shadow:none;}
+.mico,#var-twoWay .mico,#var-mirror .mico,#var-update .mico,#var-custom .mico{
+  background:transparent;color:var(--text3);width:30px;height:30px;}
+.mico svg{width:22px;height:22px;}
+.mbtn.on .mico{color:var(--text);}
+.mbadge,.bw,.bm,.bu,.bc{background:transparent;color:var(--text2);padding:0;
+  font-size:13px;font-weight:700;letter-spacing:.07em;}
+.mbtn.on .mbadge{color:var(--text);}
+/* "Selected" becomes a green tick — said by a shape, read by a screen reader. */
+.msel,#var-twoWay.on .msel,#var-mirror.on .msel,#var-update.on .msel,#var-custom.on .msel{
+  font-size:0;width:13px;height:13px;color:transparent;
+  background:no-repeat center/13px 13px url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2335c98b' stroke-width='2.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E");}
+
+/* ── Folder pairs: fields are hollows ──────────────────────────────────── */
+.prow-hdr{margin-bottom:8px;}
+.prow input{background:var(--ins);border:none;border-radius:var(--r-field);
+  padding:9px 10px;font-size:12.5px;}
+.prow input:focus{box-shadow:var(--focus);}
+.prow input.gone{border:none;box-shadow:inset 0 0 0 1px rgba(242,85,90,.55);}
+.prow input.gone:focus{box-shadow:inset 0 0 0 1px var(--red);}
+.prow .pr-num{background:transparent;border:none;color:var(--text3);font-size:12px;font-weight:600;}
+.br-btn,.prow .br-btn{background:var(--ins);border:none;border-radius:9px;color:var(--text2);
+  font-size:12px;font-weight:600;padding:0 13px;}
+.br-btn:hover{color:var(--text);}
+.srv-btn{background:var(--ins);border:none;border-radius:var(--r-field);color:var(--text2);}
+.srv-btn:hover{color:var(--text);background:var(--ins);}
+.srv-btn.on{border:none;background:rgba(53,201,139,.15);}
+.srv-btn.on::after{border-color:var(--card);box-shadow:none;}
+.prow .pr-swap{width:28px;height:28px;border-radius:8px;border:none;background:var(--ins);color:var(--text2);}
+.prow .pr-swap:hover{color:var(--text);}
+.prow .pr-rm{border:none;border-radius:8px;background:rgba(242,85,90,.14);}
+.prow .pr-rm:hover{background:rgba(242,85,90,.24);}
+.prow .pr-rm:disabled{background:transparent;color:var(--text4);}
+.ps-add{background:var(--ins);border:none;border-radius:9px;color:var(--text2);padding:7px 13px;}
+.ps-add:hover{color:var(--text);}
+
+/* ── Toolbar ───────────────────────────────────────────────────────────── */
+#toolbar{gap:18px;}
+.seg{gap:2px;}
+.seg button{background:transparent;border:none;border-radius:var(--r-field);color:var(--text3);padding:6px 11px;}
+.seg button:hover{color:var(--text);}
+.seg button.on{background:var(--ins);color:var(--text);box-shadow:none;}
+#toolbar .tbtn.icon{width:28px;height:28px;padding:0;justify-content:center;
+  background:var(--ins);border:none;border-radius:8px;color:var(--text2);}
+/* A filter at work hides part of the comparison: something is missing from
+   view, which is what orange means everywhere. */
+#btn-filter.on{background:rgba(242,160,61,.15);border:none;color:var(--orange);}
+.autorow input[type=number],#search{background:var(--ins);border:none;border-radius:var(--r-field);}
+.autorow input[type=number]:focus,#search:focus{box-shadow:var(--focus);}
+#search{padding:8px 10px;}
+
+/* ── Switch: 34 × 20, 14 px knob ───────────────────────────────────────── */
+.switch{width:34px;height:20px;}
+.switch .slider{background:var(--ins);border:none;box-shadow:inset 0 0 0 1px rgba(255,255,255,.09);border-radius:20px;}
+.switch .slider::before{width:14px;height:14px;left:3px;top:3px;background:#5c6270;}
+.switch input:checked + .slider{background:var(--green);box-shadow:none;}
+.switch input:checked + .slider::before{transform:translateX(14px);background:var(--text);}
+.switch input:focus-visible + .slider{box-shadow:inset 0 0 0 1px rgba(255,255,255,.4);}
+
+/* ── Grid ──────────────────────────────────────────────────────────────── */
+#gridhead{background:transparent;border-bottom:none;height:30px;}
+#gridhead .side-l,#gridhead .side-r{color:var(--text3);}
+#gridhead .hd-big{height:auto;}
+#gridhead .c-act{color:var(--text4);}
+.grow{border-bottom:none;border-radius:6px;}
+.grow .pane-r,#gridhead .pane-r{border-left:none;}
+.grow.grow-hdr{background:var(--ins);border-bottom:none;border-radius:var(--r-field);}
+.grow-hdr .gh-path{color:var(--text2);}
+.grow.rowmov{background:rgba(77,144,240,.055);}
+.grow.sel{box-shadow:inset 0 0 0 1px rgba(255,255,255,.22),inset 0 0 0 999px rgba(255,255,255,.05);}
+.grow .c-act:hover{background:rgba(255,255,255,.06);}
+#scope-bar{background:var(--ins);border:none;border-radius:var(--r-field);margin:0 0 6px;padding:7px 10px;}
+#scope-bar svg{color:var(--text3);}
+#scope-bar .nm{color:var(--text);}
+#scope-bar .pairtag{background:transparent;border:none;padding:0;}
+#scope-bar button{background:var(--card);border:none;border-radius:8px;color:var(--text2);}
+#scope-bar button:hover{color:var(--text);}
+#ge-act{background:var(--ins);border:none;border-radius:9px;}
+
+/* ── Status chips: small buttons, the colour says the operation ───────── */
+.stat{background:var(--ins);border:none;border-radius:var(--r-field);padding:5px 10px;}
+.stat:hover{color:var(--text2);}
+.stat.on{background:var(--ins);color:var(--text);box-shadow:var(--focus);}
+.stat.on.g{color:var(--green);} .stat.on.b{color:var(--blue);}
+.stat.on.o{color:var(--orange);} .stat.on.r{color:var(--red);}
+#missing-badge{border:none;background:rgba(242,85,90,.15);border-radius:var(--r-field);}
+#lock-badge{border:none;background:rgba(242,160,61,.15);border-radius:var(--r-field);}
+
+/* ── The two big buttons: full width, tinted by what they do ───────────── */
+.bigbtn{border:none;border-radius:var(--r-card);padding:16px;font-size:15px;}
+.bigbtn:disabled{background:var(--card);color:var(--text4);}
+/* Compare reads, it changes nothing: neutral information, blue. */
+#btn-compare:not(:disabled){background:#0f1d33;border:none;color:var(--blue);box-shadow:none;}
+#btn-compare:not(:disabled):hover{animation:btnGlowBlue 1.9s ease-in-out infinite;}
+#btn-sync:not(:disabled){border:none;box-shadow:none;}
+#btn-sync.auto:not(:disabled){border:none;}
+@keyframes btnGlowBlue{0%,100%{box-shadow:0 0 6px 0 rgba(77,144,240,.28)}50%{box-shadow:0 0 17px 2px rgba(77,144,240,.6)}}
+
+/* ── Progress: the strip under a comparison, the run view ──────────────── */
+#bottombar{border-top:none;}
+#bottombar.open:not(.kiosk){background:var(--card);border-radius:var(--r-card);margin-top:12px;}
+#bottombar.kiosk{border-radius:var(--r-card);}
+.pb-track-top{background:var(--ins);}
+.sbox{background:var(--ins);border:none;border-radius:var(--r-ins);}
+#bottombar.kiosk .sbox{background:rgba(14,16,20,.82);}
+.pf-end{background:var(--ins);border:none;border-radius:var(--r-field);}
+.pb-flow.to-right #pf-right,.pb-flow.to-left #pf-left{
+  background:var(--flow-dim,var(--green-d));box-shadow:inset 0 0 0 1px var(--flow-color,var(--green));}
+.pb-step{background:var(--ins);border:none;border-radius:var(--r-badge);}
+.pb-step.on.copy,.pb-step.on.verify,.pb-step.on.tail{border:none;}
+.pb-step.on.tail{background:var(--raise);}
+.pb-step.done{background:transparent;}
+.pb-step-sep{background:var(--text4);opacity:.5;}
+.ring-track{stroke:var(--ins);}
+.pb-btns .tbtn{background:var(--ins);border:none;border-radius:9px;color:var(--text2);}
+.pb-btns .tbtn:hover:not(:disabled){color:var(--text);}
+.pb-btns .tbtn.go{background:#0f2c1d;color:var(--green);}
+.pb-btns .tbtn.stop{background:rgba(242,85,90,.14);color:var(--red);}
+.vf-ring-fill{stroke:var(--blue);}
+
+/* ── Windows: a card on a black veil ───────────────────────────────────── */
+.ov{background:rgba(0,0,0,.7);backdrop-filter:none;-webkit-backdrop-filter:none;}
+.mcard{background:var(--card);border:none;border-radius:18px;box-shadow:0 30px 80px rgba(0,0,0,.6);}
+.mcard > .m-btns{background:var(--card);border-top:none;border-radius:0 0 17px 17px;}
+.m-h1{font-size:18px;font-weight:600;letter-spacing:-.3px;}
+.set-section{border-bottom:none;margin:0 0 22px;padding-bottom:0;}
+.set-row input:not([type=checkbox]),.set-row select,.set-row textarea{
+  background:var(--ins);border:none;border-radius:var(--r-field);padding:9px 10px;}
+.set-row input:focus,.set-row select:focus,.set-row textarea:focus{box-shadow:var(--focus);}
+.set-hint code{background:var(--ins);}
+.m-btn{background:var(--ins);border:none;border-radius:9px;color:var(--text2);}
+.m-btn:hover{background:var(--ins);color:var(--text);}
+.m-btn.primary{background:#0f2c1d;border:none;color:var(--green);}
+.m-btn.primary:hover{background:#12351f;}
+.m-btn.danger{background:rgba(242,85,90,.14);border:none;}
+.log-box{background:transparent;border:none;padding:0;}
+.log-text{background:var(--ins);border:none;border-radius:var(--r-ins);}
+.rl-row{background:var(--ins);border:none;border-radius:var(--r-ins);}
+.rl-row.done{background:rgba(53,201,139,.07);box-shadow:inset 0 0 0 1px rgba(53,201,139,.35);}
+.rl-path{background:var(--page);border:none;border-radius:var(--r-field);}
+.rl-path.ok{border:none;}
+.rl-btn{background:var(--card);border:none;border-radius:9px;}
+.rl-btn.use{background:rgba(53,201,139,.15);border:none;}
+.ntfy-setup{background:var(--ins);border:none;border-radius:var(--r-ins);}
+.sum-verify{border:none;background:var(--ins);border-radius:var(--r-ins);}
+.sum-verify.good{background:rgba(53,201,139,.1);}
+.sum-verify.warn{background:rgba(242,160,61,.1);}
+.sum-verify.bad{background:rgba(242,85,90,.1);}
+.sum-verify.plain .sv-ico{background:var(--raise);}
+.sum-ico,.sum-ico.ok,.sum-ico.err,.sum-ico.cancel{border:none;border-radius:12px;}
+.sum-recheck{background:var(--ins);border:none;border-radius:var(--r-ins);}
+.srow{background:var(--ins);border:none;border-radius:var(--r-ins);}
+.err-block{background:rgba(242,85,90,.08);border:none;border-radius:var(--r-ins);}
+.err-copy{background:var(--card);border:none;border-radius:6px;}
+.err-copy.done{border:none;}
+.after-ico{border:none;border-radius:14px;}
+/* Server window */
+#ov-server .srow{border:none;}
+#ov-server .srow:hover{background:var(--raise);}
+.srow:hover > svg{color:var(--text2);}
+.srv-div::before,.srv-div::after{display:none;}
+.srv-div{margin:18px 0 10px;}
+.srv-status{border:none;border-radius:var(--r-field);}
+.srv-crumbs{background:var(--ins);border:none;border-radius:var(--r-field);}
+.srv-crumbs button:hover{color:var(--text);}
+.srv-tree{background:var(--ins);border:none;border-radius:var(--r-ins);}
+.tnode{border:none;border-radius:7px;}
+.tnode:hover{background:rgba(255,255,255,.04);}
+.tnode.sel{background:var(--raise);border:none;color:var(--text);}
+.tnode.sel svg{color:var(--text2);}
+#ov-server .m-h1 svg{color:var(--text2)!important;}
+
+/* ── Menus and tooltips float on --raise ───────────────────────────────── */
+.ctx,.ctx-sub{background:var(--raise);border:none;border-radius:12px;padding:6px;
+  box-shadow:0 18px 44px rgba(0,0,0,.6);}
+.ctx-it{border-radius:7px;}
+.ctx-it:hover{background:rgba(255,255,255,.06);}
+.ctx-sep{background:transparent;height:6px;margin:0;}
+.ctx-it .key{border:none;background:var(--ins);}
+.ctx-it.pat-it code{color:var(--text2);background:var(--ins);border:none;}
+.tooltip-float{background:var(--raise);border:none;border-radius:9px;padding:8px 11px;
+  font-weight:500;line-height:1.5;box-shadow:0 10px 26px rgba(0,0,0,.55);}
+
+/* The drop halves are a state (where the folder will land), so their
+   outlines stay. */
+.drop-half{background:rgba(10,11,14,.86);}
+
+/* The summary tiles share the class name of the saved-server rows, and
+   inherited their row layout and their hover: label and value side by side,
+   the value wrapping onto two lines, a tile lighting up under the mouse as if
+   it could be clicked. A tile is a figure over its label, and is inert. */
+.sum-grid .srow{display:flex;flex-direction:column-reverse;align-items:flex-start;gap:6px;
+  width:auto;padding:11px 12px;cursor:default;}
+.sum-grid .srow:hover{background:var(--ins);}
+.sum-grid .sr-val{margin-top:0;font-size:16px;font-weight:600;}
+.sum-grid .sr-lbl{font-size:9px;letter-spacing:.13em;}
+/* Letter-spacing made "Items" one character too wide for its column. */
+#ov-head{letter-spacing:.08em;}
 </style>
 </head>
 <body>
@@ -1032,16 +1362,16 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
   <span class="t-jobname" id="job-title"><span class="unsaved">Untitled — not saved yet</span></span>
   <div class="t-spacer"></div>
   <div class="t-actions">
-    <button class="tbtn icon" id="btn-verify" data-tip="Verify a folder against its syncto checksum list">
+    <button class="tbtn icon" id="btn-verify" aria-label="Verify a folder" data-tip="Verify a folder against its syncto checksum list">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="m9 12 2 2 4-4"/></svg>
     </button>
-    <button class="tbtn icon" id="btn-settings" data-tip="Settings">
+    <button class="tbtn icon" id="btn-settings" aria-label="Settings" data-tip="Settings">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1"/></svg>
     </button>
     <div id="wincontrols">
-      <button id="win-min" title="Minimize"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M5 12h14"/></svg></button>
-      <button id="win-max" title="Maximize"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="4" y="4" width="16" height="16" rx="2"/></svg></button>
-      <button id="win-close" class="close" title="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="m6 6 12 12"/><path d="m18 6-12 12"/></svg></button>
+      <button id="win-min" title="Minimize" aria-label="Minimize"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M5 12h14"/></svg></button>
+      <button id="win-max" title="Maximize" aria-label="Maximize"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="4" y="4" width="16" height="16" rx="2"/></svg></button>
+      <button id="win-close" class="close" title="Close" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="m6 6 12 12"/><path d="m18 6-12 12"/></svg></button>
     </div>
   </div>
 </div>
@@ -1160,7 +1490,7 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
     </div>
   </div>
   <div class="tgroup"><label>Filter</label>
-    <button class="tbtn icon" id="btn-filter" data-tip="Include / exclude patterns for THIS job — saved in the .syncto file">
+    <button class="tbtn icon" id="btn-filter" aria-label="Filter" data-tip="Include / exclude patterns for THIS job — saved in the .syncto file">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 20a1 1 0 0 0 .553.895l2 1A1 1 0 0 0 14 21v-7a2 2 0 0 1 .517-1.341L21.74 4.67A1 1 0 0 0 21 3H3a1 1 0 0 0-.742 1.67l7.225 7.989A2 2 0 0 1 10 14z"/></svg>
     </button>
   </div>
@@ -1434,7 +1764,7 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
       <div class="set-row"><label>Lock folders</label>
         <label class="switch"><input type="checkbox" id="st-lock" checked><span class="slider"></span></label>
         <span style="font-size:11.5px;color:var(--text3)">one machine at a time per folder</span></div>
-      <div class="set-hint">A <code>.syncto.lock</code> file at the root of each synchronized folder, refreshed every 5&nbsp;seconds while the run lasts. Another machine starting on the same folders waits and tells you who is running; a lock left behind by a crash is taken over after 12&nbsp;seconds. Works over any network share — turn it off only if your storage forbids the extra file.</div>
+      <div class="set-hint">A <code>.syncto.lock</code> file at the root of each synchronized folder, refreshed every 5&nbsp;seconds while the run lasts. Another machine starting on the same folders waits and tells you who is running; a lock left behind by a crash is taken over after 60&nbsp;seconds of silence. Works over any network share — turn it off only if your storage forbids the extra file.</div>
       <div class="set-row"><label>Fail-safe copy</label>
         <label class="switch"><input type="checkbox" id="st-failsafe" checked><span class="slider"></span></label>
         <span style="font-size:11.5px;color:var(--text3)">write to a temporary file, then rename</span></div>

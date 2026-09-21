@@ -101,7 +101,7 @@ function renderPairRows() {
         <button class="br-btn pr-browse-l">Browse</button>
         <button class="srv-btn pr-server-l${on(p.left)}"${id('left-server')} data-tip="Connect to a server (SFTP)" aria-label="Connect to a server">${ICON_SERVER}</button>
       </div>
-      <button class="pr-swap" data-tip="Swap this pair's source and destination">${ICON_SWAP}</button>
+      <button class="pr-swap" data-tip="Swap this pair's source and destination" aria-label="Swap pair ${i + 1}">${ICON_SWAP}</button>
       <div class="pr-field">
         <input class="pr-right"${id('right-path')} value="${esc(p.right)}" placeholder="Destination folder" spellcheck="false">
         <button class="br-btn pr-browse-r">Browse</button>
@@ -166,7 +166,7 @@ function esc(s) {
 }
 
 // ── Action column: Lucide arrows, colour-coded ─────────────────────────────
-//   green  = added   orange = updated   red = deleted   violet = renamed
+//   green  = added   orange = updated   red = deleted   blue = renamed (moved)
 const SVG_ARR_R = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>';
 const SVG_ARR_L = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></svg>';
 const SVG_X     = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
@@ -785,12 +785,12 @@ function renderStats() {
   const parts = [];
   if (s.createRight) parts.push(chip('g', 'create →', s.createRight, 'createRight', 'op'));
   if (s.createLeft)  parts.push(chip('g', '← create', s.createLeft,  'createLeft',  'op'));
-  if (s.updateRight) parts.push(chip('b', 'update →', s.updateRight, 'overwriteRight', 'op'));
-  if (s.updateLeft)  parts.push(chip('b', '← update', s.updateLeft,  'overwriteLeft',  'op'));
-  if (s.deleteRight) parts.push(chip('o', 'delete →', s.deleteRight, 'deleteRight', 'op'));
-  if (s.deleteLeft)  parts.push(chip('o', '← delete', s.deleteLeft,  'deleteLeft',  'op'));
-  if (s.moveRight)   parts.push(chip('v', 'move →',   s.moveRight,   'moveRightTo', 'op'));
-  if (s.moveLeft)    parts.push(chip('v', '← move',   s.moveLeft,    'moveLeftTo',  'op'));
+  if (s.updateRight) parts.push(chip('o', 'update →', s.updateRight, 'overwriteRight', 'op'));
+  if (s.updateLeft)  parts.push(chip('o', '← update', s.updateLeft,  'overwriteLeft',  'op'));
+  if (s.deleteRight) parts.push(chip('r', 'delete →', s.deleteRight, 'deleteRight', 'op'));
+  if (s.deleteLeft)  parts.push(chip('r', '← delete', s.deleteLeft,  'deleteLeft',  'op'));
+  if (s.moveRight)   parts.push(chip('b', 'move →',   s.moveRight,   'moveRightTo', 'op'));
+  if (s.moveLeft)    parts.push(chip('b', '← move',   s.moveLeft,    'moveLeftTo',  'op'));
   if (s.conflicts)   parts.push(chip('r', 'conflicts', s.conflicts,  'conflict',    'op'));
   parts.push(chip('', 'identical', s.equal, 'none', 'op'));
   if (s.excluded)    parts.push(chip('', 'excluded', s.excluded, '', ''));
