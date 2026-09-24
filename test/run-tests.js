@@ -4488,6 +4488,23 @@ function testCharte() {
      'the chosen mode sits on a hollow, no coloured frame');
   ok(/stroke='%2335c98b'/.test(block), 'with a green tick');
 
+  // (0.8.1) Each mode's icon says what the mode does to the files, in the
+  // charte's own colours — so the colour carries a meaning rather than a mood.
+  {
+    const modeColour = id => {
+      const m = new RegExp(`#var-${id} \\.mico\\{color:var\\(--(\\w+)\\)`).exec(block);
+      return m ? m[1] : null;
+    };
+    eq(modeColour('twoWay'), 'blue',   '2 WAYS is blue: neutral, nothing is removed');
+    eq(modeColour('mirror'), 'orange', 'MIRROR is orange: it removes, which is a decision');
+    eq(modeColour('update'), 'green',  'UPDATE is green: it adds and updates, never removes');
+    eq(modeColour('custom'), 'text2',  'CUSTOM is grey: it is whatever the settings make it');
+    ok(!/#var-\w+ \.mico\{color:var\(--red\)/.test(block),
+       'and no mode is red: red is kept for the rows that will be deleted');
+    ok(block.lastIndexOf('#var-mirror .mico{color:var(--orange)') > block.lastIndexOf('.mbtn.on .mico{'),
+       'the chosen mode keeps its colour instead of turning white');
+  }
+
   // Every button that is only an icon says what it is to a screen reader.
   {
     const bare = [];
@@ -5186,9 +5203,17 @@ function testWindowTruth() {
   testWindowTruth,
     ];
     const only = (process.env.SYNCTO_ONLY || '').split(',').map(x => x.trim()).filter(Boolean);
+    // Each section on its own: an exception used to end the whole suite, so
+    // one crash in section 35 printed "837 passed, 1 failed" and silently
+    // skipped the eleven sections after it. Now the crash is named, and the
+    // rest still runs.
     for (const section of SECTIONS) {
       if (only.length && !only.includes(section.name)) continue;
-      await section();
+      try { await section(); }
+      catch (err) {
+        failed++;
+        failures.push(`UNCAUGHT in ${section.name}: ` + (err.stack || err.message));
+      }
     }
   } catch (err) {
     failed++;
