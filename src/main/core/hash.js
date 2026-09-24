@@ -67,14 +67,33 @@ function hashStream(fsx, filePath, hasher, onBytes, token) {
     hasher.init();
     const rs = fsx.createReadStream(filePath);
     let aborted = false;
+    // PAUSE has to work inside a file here too. The copy pass has had this
+    // gate since 0.6.4; the read-back never did, so pausing during the
+    // verification of a 6 GB clip changed the label on screen and nothing
+    // else — the whole file went on streaming.
+    let held = false, pauseTimer = null;
+    const resumeIfFree = () => {
+      if (aborted) return;
+      if (token && token.cancelled) { aborted = true; rs.destroy(); return; }
+      if (!token || !token.paused) {
+        if (held) { held = false; rs.resume(); }
+        clearInterval(pauseTimer); pauseTimer = null;
+      }
+    };
+    const stopTimer = () => { if (pauseTimer) { clearInterval(pauseTimer); pauseTimer = null; } };
     rs.on('data', chunk => {
-      if (token && token.cancelled && !aborted) { aborted = true; rs.destroy(); return; }
-      try { hasher.update(chunk); } catch (e) { aborted = true; rs.destroy(); reject(e); }
+      if (token && token.cancelled && !aborted) { aborted = true; stopTimer(); rs.destroy(); return; }
+      if (token && token.paused && !held) {
+        held = true;
+        rs.pause();
+        if (!pauseTimer) pauseTimer = setInterval(resumeIfFree, 150);
+      }
+      try { hasher.update(chunk); } catch (e) { aborted = true; stopTimer(); rs.destroy(); reject(e); }
       if (onBytes) onBytes(chunk.length);
     });
-    rs.on('error', reject);
-    rs.on('close', () => { if (aborted) reject(new Error('cancelled')); });
-    rs.on('end', () => resolve(hasher.digest()));
+    rs.on('error', e => { stopTimer(); reject(e); });
+    rs.on('close', () => { stopTimer(); if (aborted) reject(new Error('cancelled')); });
+    rs.on('end', () => { stopTimer(); resolve(hasher.digest()); });
   });
 }
 

@@ -164,20 +164,38 @@ class PipelinedReader extends Readable {
     const at = this.reqPos;
     this.reqPos += this.chunkSize;
     this.inflight++;
-    const buf = Buffer.allocUnsafe(this.chunkSize);
-    this.owner.sftp.read(this.handle, buf, 0, this.chunkSize, at, (err, read) => {
-      this.inflight--;
+    this._readChunk(seq, at, Buffer.allocUnsafe(this.chunkSize), 0);
+  }
+
+  // 🔴 One request, one reply — but a reply may be SHORTER than what was asked
+  // for without the file being over: plenty of servers cap a single read (some
+  // NAS firmwares at 16 KB). Treating that as the end of the file left a hole
+  // at every chunk and ended the stream cleanly, with no error: the copy was
+  // caught by the size check, the read-back was not, so perfectly good files
+  // came back as "checksum mismatch" on every run. The rest of the chunk is
+  // asked for instead, and only a real EOF ends it.
+  _readChunk(seq, at, buf, got) {
+    const want = this.chunkSize - got;
+    this.owner.sftp.read(this.handle, buf, got, want, at + got, (err, read) => {
       if (err) {
+        this.inflight--;
         // EOF is reported as an error by ssh2; anything else is real.
-        if (/EOF/i.test(err.message || '') || err.code === 1) this.eofSeq = Math.min(this.eofSeq, seq);
-        else if (!this.failure) this.failure = err;
-      } else if (!read) {
-        this.eofSeq = Math.min(this.eofSeq, seq);
-      } else {
-        // A short read means the server capped this one; the file is not over.
-        this.pending.set(seq, buf.slice(0, read));
-        if (read < this.chunkSize) this.eofSeq = Math.min(this.eofSeq, seq + 1);
+        if (/EOF/i.test(err.message || '') || err.code === 1) {
+          if (got) { this.pending.set(seq, buf.slice(0, got)); this.eofSeq = Math.min(this.eofSeq, seq + 1); }
+          else this.eofSeq = Math.min(this.eofSeq, seq);
+        } else if (!this.failure) this.failure = err;
+        return this._flush();
       }
+      if (!read) {
+        this.inflight--;
+        if (got) { this.pending.set(seq, buf.slice(0, got)); this.eofSeq = Math.min(this.eofSeq, seq + 1); }
+        else this.eofSeq = Math.min(this.eofSeq, seq);
+        return this._flush();
+      }
+      got += read;
+      if (got < this.chunkSize) return this._readChunk(seq, at, buf, got);
+      this.inflight--;
+      this.pending.set(seq, buf);
       this._flush();
     });
   }

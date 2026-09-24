@@ -39,6 +39,10 @@ const { STATUS_CODE, OPEN_MODE } = require('ssh2').utils.sftp;
 function startSftpServer(opts) {
   const root = opts.root;
   const latencyMs = opts.latencyMs || 0;
+  // Some servers answer a READ with fewer bytes than were asked for, without
+  // the file being over — NAS firmwares capping at 16 KB are common. A client
+  // that reads a short reply as "end of file" truncates silently.
+  const readCap = opts.readCap || 0;
   const user = opts.username || 'tester';
   const pass = opts.password || 'secret';
 
@@ -151,7 +155,8 @@ function startSftpServer(opts) {
               if (!e || e.fd == null) return sftp.status(id, STATUS_CODE.FAILURE);
               const buf = Buffer.alloc(len);
               let n = 0;
-              try { n = fs.readSync(e.fd, buf, 0, len, offset); } catch (_) { n = 0; }
+              const ask = readCap ? Math.min(len, readCap) : len;
+              try { n = fs.readSync(e.fd, buf, 0, ask, offset); } catch (_) { n = 0; }
               if (n <= 0) return sftp.status(id, STATUS_CODE.EOF);
               sftp.data(id, buf.slice(0, n));
             }));

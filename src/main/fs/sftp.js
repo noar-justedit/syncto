@@ -43,6 +43,23 @@ const OP_TIMEOUT_MS = 45000;
 
 const { log } = require('../log');
 const { PipelinedReader, PipelinedWriter } = require('./sftp-pipe');
+const crypto = require('crypto');
+
+// ── Who is answering on that address ──────────────────────────────────────
+// Without this, ssh2 accepts ANY host key, on the first connection and on
+// every one after: syncto would decrypt the saved password and hand it to
+// whatever replied. On a hotel or venue network that is all an interceptor
+// needs. The policy is installed by the main process (it is the only part
+// that may read and write the profile); the engine and the tests install
+// their own.
+let hostKeyPolicy = null;
+function setHostKeyPolicy(p) { hostKeyPolicy = p || null; }
+
+// The same shape OpenSSH prints, so a fingerprint can be compared with
+// `ssh-keyscan` output by eye.
+function fingerprintOf(key) {
+  return 'SHA256:' + crypto.createHash('sha256').update(key).digest('base64').replace(/=+$/, '');
+}
 
 // NO backslash translation. These are POSIX paths: "a\b.txt" is a perfectly
 // legal file name on a Linux server, and turning it into "a/b.txt" made syncto
@@ -150,6 +167,18 @@ class SftpFs {
         keepaliveCountMax: 3,
       };
       if (this.opts.password)   cfg.password   = this.opts.password;
+      // Checked BEFORE any credential is sent: hostVerifier runs during the
+      // key exchange, and returning false aborts the handshake.
+      let seenKey = null;
+      let keyChanged = null;
+      cfg.hostVerifier = key => {
+        const fp = fingerprintOf(key);
+        const known = hostKeyPolicy && hostKeyPolicy.known
+          ? hostKeyPolicy.known(this.opts.host, this.opts.port || 22) : null;
+        if (known && known !== fp) { keyChanged = { known, fp }; return false; }
+        seenKey = fp;
+        return true;
+      };
       if (this.opts.privateKey) cfg.privateKey = this.opts.privateKey;
       if (this.opts.passphrase) cfg.passphrase = this.opts.passphrase;
 
@@ -160,6 +189,17 @@ class SftpFs {
       const bail = err => {
         if (settled) return;
         settled = true;
+        // Say what actually happened. ssh2's own message for a refused key is
+        // "Handshake failed", which sends the user looking at their password.
+        if (keyChanged) {
+          err = new Error(
+            `The identity of ${this.opts.host} has changed since the last connection.\n` +
+            `Known: ${keyChanged.known}\nNow:   ${keyChanged.fp}\n` +
+            'Either the server was reinstalled, or something is answering in its place. ' +
+            'Nothing was sent. If the change is expected, forget this server in the ' +
+            'connection window and connect again.');
+          err.hostKeyChanged = true;
+        }
         log.error('sftp', 'connection failed', (err && (err.level || err.code || err.message)) || err);
         try { conn.end(); } catch (_) {}
         this.conn = null; this.sftp = null;
@@ -177,7 +217,12 @@ class SftpFs {
           if (settled) { try { conn.end(); } catch (_) {} return; }
           settled = true;
           this.conn = conn; this.sftp = sftp; this.dead = null;
-          log.info('sftp', 'connected');
+          // Remembered only once the connection is genuinely usable, so a
+          // half-open attempt never writes an identity down.
+          if (seenKey && hostKeyPolicy && hostKeyPolicy.remember) {
+            try { hostKeyPolicy.remember(this.opts.host, this.opts.port || 22, seenKey); } catch (_) {}
+          }
+          log.info('sftp', `connected (host key ${seenKey || 'unchecked'})`);
           // From here on, losing the channel is a run-stopping error rather
           // than a silent freeze.
           const lost = e => this._die(e || new Error('The SFTP connection was closed by the server.'));
@@ -264,7 +309,18 @@ class SftpFs {
       this.sftp.readdir(dir, (err, l) => err ? reject(err) : resolve(l));
     }));
     return list
-      .filter(e => e.filename !== '.' && e.filename !== '..')
+      // The server chooses these strings. One containing a separator is not a
+      // file name: it is a path, and it would be joined onto the destination
+      // root and written wherever it points. Dropped here, at the door.
+      .filter(e => {
+        const n = String(e.filename == null ? '' : e.filename);
+        if (n === '.' || n === '..' || n === '') return false;
+        if (n.includes('/') || n.includes('\\')) {
+          log.warn('sftp', `ignored an entry whose name is a path: ${JSON.stringify(n)}`);
+          return false;
+        }
+        return true;
+      })
       .map(e => {
         const st = this._mapStat(e.attrs);
         return { name: e.filename, type: st.type, size: st.size, mtime: st.mtime, id: null };
@@ -435,4 +491,4 @@ class SftpFs {
   supportsTrash() { return false; }
 }
 
-module.exports = { SftpFs, READ_BLOCK };
+module.exports = { SftpFs, READ_BLOCK, setHostKeyPolicy, fingerprintOf };

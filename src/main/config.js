@@ -157,6 +157,11 @@ function defaultPrefs() {
     // Phone notifications, same mechanism as ingesto. The access token is
     // ciphertext from the OS credential store, like every other secret here.
     ntfy: { enabled: false, server: 'https://ntfy.sh', topic: '', tokenEnc: '', onlyOnProblem: false },
+    // The identity of each SFTP server, learnt at the first connection and
+    // compared at every one after. { "host:port": "SHA256:…" }. Not a secret —
+    // a public key fingerprint — so it lives in the file in clear, which is
+    // also what makes it checkable by eye against `ssh-keyscan`.
+    knownHosts: {},
   };
 }
 
@@ -470,9 +475,42 @@ class Prefs {
   }
 
   removeServer(id) {
+    const gone = (this.data.servers || []).find(s => s.id === id);
     this.data.servers = (this.data.servers || []).filter(s => s.id !== id);
+    // Forgetting a server forgets its identity too: that is the one deliberate
+    // act by which a person accepts a key that changed (a reinstalled NAS),
+    // and it is the only way out of the refusal, so it has to be here.
+    if (gone && gone.host) this.forgetHostKey(gone.host, gone.port || 22);
     this.save();
     return this.listServers();
+  }
+
+  // ── The identity of a server ─────────────────────────────────────────────
+  // First connection: whatever key answers is written down. Every connection
+  // after: a different key stops the connection before a password is sent.
+  knownHostKey(host, port) {
+    const m = this.data.knownHosts || {};
+    return m[`${host}:${Number(port) || 22}`] || null;
+  }
+
+  // The window asks this to show what it will trust.
+  hostKeyFor(host, port) { return this.knownHostKey(host, port); }
+
+  rememberHostKey(host, port, fp) {
+    if (!host || !fp) return;
+    if (!this.data.knownHosts || typeof this.data.knownHosts !== 'object') this.data.knownHosts = {};
+    const key = `${host}:${Number(port) || 22}`;
+    if (this.data.knownHosts[key] === fp) return;   // nothing to write
+    this.data.knownHosts[key] = fp;
+    this.save();
+  }
+
+  // Emptied rather than deleted: preferences are saved by laying THIS copy's
+  // changes over the file as it is now (two syncto windows must not undo each
+  // other), and a merge of objects cannot express "this key is gone".
+  forgetHostKey(host, port) {
+    if (!this.data.knownHosts || typeof this.data.knownHosts !== 'object') return;
+    this.data.knownHosts[`${host}:${Number(port) || 22}`] = '';
   }
 
   // ── ntfy ─────────────────────────────────────────────────────────────────

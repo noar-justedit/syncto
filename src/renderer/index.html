@@ -255,11 +255,9 @@ color:var(--text);transition:all .15s;}
 .msel{visibility:hidden;font-size:10px;font-weight:800;letter-spacing:.08em;
 text-transform:uppercase;color:var(--text3);}
 .mbtn.on .msel{visibility:visible;}
-.mdesc{font-size:12.5px;color:var(--text3);text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;}
 .mbadge{font-size:14px;padding:3px 11px;border-radius:4px;font-weight:600;letter-spacing:.04em;}
-.bf{background:var(--blue-d);color:var(--blue);}     /* FAST = blue */
-.bn{background:var(--green-d);color:var(--green);}   /* VERIFIED = green */
-.bs{background:var(--orange-d);color:var(--orange);} /* SECURE = orange */
+/* FAST / VERIFIED / SECURE went with the three copy levels in 0.5.0; .stat.v
+   went with the violet in 0.7.4. Nothing emits them any more. */
 .bw{background:var(--violet-d);color:var(--violet);}        /* TWO WAY = violet */
 .bm{background:var(--green-d);color:var(--green);}   /* MIRROR = green */
 .bu{background:var(--blue-d);color:var(--blue);}     /* UPDATE = blue */
@@ -337,8 +335,8 @@ padding:7px 11px;font-size:12.5px;color:var(--text);font-family:var(--mono);outl
 /* The folder this row names is not there. Said on the row itself, where the
    path is, and not only in a dialog that has been dismissed: the red is what
    is still on screen an hour later. */
-.prow input.gone{border-color:rgba(242,85,90,.55);background:rgba(242,85,90,.07);color:var(--red);}
-.prow input.gone:focus{border-color:var(--red);}
+.prow input.gone{border-color:rgba(242,160,61,.55);background:rgba(242,160,61,.07);color:var(--orange);}
+.prow input.gone:focus{border-color:var(--orange);}
 
 /* Every pair gets its own swap, and it swaps THAT pair. */
 .prow .pr-swap{width:30px;height:30px;justify-self:center;border-radius:50%;
@@ -532,7 +530,6 @@ cursor:pointer;transition:all .13s;white-space:nowrap;}
 .stat b{font-family:var(--mono);font-weight:800;}
 .stat.g{color:var(--green);} .stat.b{color:var(--blue);}
 .stat.o{color:var(--orange);} .stat.r{color:var(--red);}
-.stat.v{color:var(--violet);}
 .status-spacer{flex:1;}
 .status-note{font-size:11.5px;color:var(--text3);font-family:var(--mono);}
 
@@ -741,7 +738,7 @@ background:var(--bg3);}
 .rl-hd{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;}
 .rl-tag{font-size:10.5px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;
 color:var(--text3);}
-.rl-state{font-size:10.5px;font-weight:700;color:var(--red);}
+.rl-state{font-size:10.5px;font-weight:700;color:var(--orange);}
 .rl-row.done .rl-state{color:var(--green);}
 .rl-path{font-family:var(--mono);font-size:12px;color:var(--text2);background:var(--bg);
 border:1px solid var(--border);border-radius:7px;padding:8px 10px;overflow-wrap:anywhere;}
@@ -756,10 +753,13 @@ color:var(--text2);font-family:inherit;font-size:11.5px;font-weight:600;cursor:p
 .rl-btn:hover{color:var(--text);border-color:var(--text3);}
 .rl-btn.use{background:rgba(53,201,139,.12);border-color:rgba(53,201,139,.4);color:var(--green);}
 .rl-more{font-size:11.5px;color:var(--text3);margin-top:9px;line-height:1.5;overflow-wrap:anywhere;}
+/* Orange, not red: a folder that is not there is something to decide about —
+   exactly like the leftover-lock badge next to it — while red in the grid
+   above means "these files will be deleted". */
 #missing-badge{display:inline-flex;align-items:center;font-family:inherit;font-size:11px;
-font-weight:700;letter-spacing:.02em;color:var(--red);background:var(--red-d);
-border:1px solid rgba(242,85,90,.35);border-radius:5px;padding:3px 9px;cursor:pointer;}
-#missing-badge:hover{border-color:var(--red);}
+font-weight:700;letter-spacing:.02em;color:var(--orange);background:var(--orange-d);
+border:1px solid rgba(242,160,61,.4);border-radius:5px;padding:3px 9px;cursor:pointer;}
+#missing-badge:hover{border-color:var(--orange);}
 #lock-badge{display:inline-flex;align-items:center;font-family:inherit;font-size:11px;
 font-weight:700;letter-spacing:.02em;color:var(--orange);background:var(--orange-d);
 border:1px solid rgba(242,160,61,.4);border-radius:5px;padding:3px 9px;cursor:pointer;}
@@ -1171,8 +1171,8 @@ html,body{background:var(--page);}
 .prow input{background:var(--ins);border:none;border-radius:var(--r-field);
   padding:9px 10px;font-size:12.5px;}
 .prow input:focus{box-shadow:var(--focus);}
-.prow input.gone{border:none;box-shadow:inset 0 0 0 1px rgba(242,85,90,.55);}
-.prow input.gone:focus{box-shadow:inset 0 0 0 1px var(--red);}
+.prow input.gone{border:none;box-shadow:inset 0 0 0 1px rgba(242,160,61,.55);}
+.prow input.gone:focus{box-shadow:inset 0 0 0 1px var(--orange);}
 .prow .pr-num{background:transparent;border:none;color:var(--text3);font-size:12px;font-weight:600;}
 .br-btn,.prow .br-btn{background:var(--ins);border:none;border-radius:9px;color:var(--text2);
   font-size:12px;font-weight:600;padding:0 13px;}
@@ -1238,7 +1238,7 @@ html,body{background:var(--page);}
 .stat.on{background:var(--ins);color:var(--text);box-shadow:var(--focus);}
 .stat.on.g{color:var(--green);} .stat.on.b{color:var(--blue);}
 .stat.on.o{color:var(--orange);} .stat.on.r{color:var(--red);}
-#missing-badge{border:none;background:rgba(242,85,90,.15);border-radius:var(--r-field);}
+#missing-badge{border:none;background:rgba(242,160,61,.15);border-radius:var(--r-field);}
 #lock-badge{border:none;background:rgba(242,160,61,.15);border-radius:var(--r-field);}
 
 /* ── The two big buttons: full width, tinted by what they do ───────────── */
@@ -1262,6 +1262,10 @@ html,body{background:var(--page);}
 .pb-flow.to-right #pf-right,.pb-flow.to-left #pf-left{
   background:var(--flow-dim,var(--green-d));box-shadow:inset 0 0 0 1px var(--flow-color,var(--green));}
 .pb-step{background:var(--ins);border:none;border-radius:var(--r-badge);}
+/* The dot and the tick now live in a wrapper (the chips are built once per
+   run and only their classes change afterwards). An inline wrapper would give
+   the dot no size at all: it is 5 px of nothing until something blockifies it. */
+.pb-step .mark{display:inline-flex;align-items:center;}
 .pb-step.on.copy,.pb-step.on.verify,.pb-step.on.tail{border:none;}
 .pb-step.on.tail{background:var(--raise);}
 .pb-step.done{background:transparent;}
@@ -1844,10 +1848,13 @@ html,body{background:var(--page);}
     <div class="set-hint">One pattern per line (or separated by <code>|</code>).
       <code>*</code> is any run of characters inside one name, <code>?</code> is exactly one.
       End with <code>/</code> to mean folders only, with <code>:</code> to mean files only.<br>
-      <b>No <code>/</code> in the pattern</b> → it matches the item's <i>name</i>, at any depth:
-      <code>*.tmp</code> · <code>thumbs.db</code> · <code>Proxies/</code><br>
-      <b>Starts with <code>/</code></b> → it matches one exact path from the folder above:
-      <code>/Rushes/A001/</code> · <code>/notes.txt</code></div>
+      <b>No <code>/</code> anywhere</b> → it matches the item's <i>name</i>, at any depth:
+      <code>*.tmp</code> · <code>thumbs.db</code> · <code>Proxies/</code> (the trailing slash
+      only means "folders only", it does not count).<br>
+      <b>A <code>/</code> anywhere in it</b> → it matches the path from the top of the pair, and
+      only there. A leading <code>/</code> changes nothing: <code>Rushes/A001/</code> and
+      <code>/Rushes/A001/</code> are the same pattern, and neither one reaches
+      <code>DAY2/Rushes/A001</code>. Use <code>*/Rushes/A001/</code> for that.</div>
     <div class="m-btns">
       <button class="m-btn" id="filter-close">Apply</button>
     </div>

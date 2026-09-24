@@ -115,6 +115,11 @@ function buildReport(input) {
     },
     comparison: stats || null,
     comparisonErrors: comparisonErrors || [],
+    // The run's own errors. They were left out, and the banner that is meant
+    // to say what was checked read them — so it could never say "failed
+    // verification" and printed "Not one differed" over a run that had found
+    // corruption.
+    errors: (run.errors || []).map(e => ({ rel: e.rel || '', message: e.message || String(e) })),
     notes: run.notes || [],
     items,
   };

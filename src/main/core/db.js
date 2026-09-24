@@ -40,19 +40,36 @@ const { DB_NAME } = require('./compare');
 const FORMAT  = 'syncto-db';
 const VERSION = 1;
 
-function streamToBuffer(stream) {
+// The database lives INSIDE the synchronized folder, so it is supplied by
+// whatever is on the other side. A run must not be able to die of reading it:
+// 16 MB is already far more than the largest real one (a 400 000-item tree
+// compresses to about 6), and a file bigger than that is not a database.
+const MAX_DB_BYTES  = 16 * 1024 * 1024;
+const MAX_DB_INFLATED = 256 * 1024 * 1024;
+
+function streamToBuffer(stream, limit) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    stream.on('data', c => chunks.push(c));
+    let total = 0;
+    stream.on('data', c => {
+      total += c.length;
+      if (limit && total > limit) {
+        stream.destroy();
+        reject(new Error(`it is larger than ${Math.round(limit / (1024 * 1024))} MB`));
+        return;
+      }
+      chunks.push(c);
+    });
     stream.on('end', () => resolve(Buffer.concat(chunks)));
     stream.on('error', reject);
   });
 }
 
-async function readFileBuffer(fsx, p) {
+async function readFileBuffer(fsx, p, limit) {
   const st = await fsx.stat(p);
   if (!st || st.type !== 'file') return null;
-  return streamToBuffer(fsx.createReadStream(p));
+  if (limit && st.size > limit) throw new Error(`it is larger than ${Math.round(limit / (1024 * 1024))} MB`);
+  return streamToBuffer(fsx.createReadStream(p), limit);
 }
 
 function writeFileBuffer(fsx, p, buf) {
@@ -72,14 +89,16 @@ async function readDb(fsx, basePath, onDamaged) {
   const p = fsx.join(basePath, DB_NAME);
   let buf;
   try {
-    buf = await readFileBuffer(fsx, p);
+    buf = await readFileBuffer(fsx, p, MAX_DB_BYTES);
   } catch (err) {
     if (onDamaged) onDamaged(`${p} could not be read: ${err.message}`);
     return null;
   }
   if (!buf || !buf.length) return null;
   try {
-    const json = JSON.parse((await gunzip(buf)).toString('utf8'));
+    // Compressed data expands: a megabyte of zeros is gigabytes of nothing,
+    // and this runs in the process that is holding the folder locks.
+    const json = JSON.parse((await gunzip(buf, { maxOutputLength: MAX_DB_INFLATED })).toString('utf8'));
     if (json.format !== FORMAT) {
       if (onDamaged) onDamaged(`${p} was written by another version of syncto.`);
       return null;

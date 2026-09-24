@@ -30,7 +30,8 @@ const { FsPool, parseLocation, redactLocation } = require('../fs/afs');
 const { NativeFs } = require('../fs/native');
 const { buildReport, toHtml, toCsv, toJson } = require('./report');
 const { formatChecksumList, parseChecksumList, createHasher, hashStream } = require('./hash');
-const { acquireAll, clearStaleLock, DETECT_ABANDONED_MS } = require('./lock');
+const { isSafeRel } = require('./relpath');
+const { acquireAll, clearStaleLock, isLockFileName, DETECT_ABANDONED_MS } = require('./lock');
 const { log } = require('../log');
 
 // How the overview panel is ordered, at every level of its tree. Size,
@@ -130,6 +131,7 @@ class Session {
       (res.cancelled ? ' (cancelled)' : ''));
     for (const e of (res.errors || []).slice(0, 20)) log.warn('compare', e.path || '', e.message);
     this.nodes  = res.nodes;
+    this._touched();
     this.errors = res.errors;
     this.leftovers = res.leftovers || [];
     this.locks = res.locks || [];
@@ -169,7 +171,28 @@ class Session {
 
   // ── Grid access ──────────────────────────────────────────────────────────
   // view: { showEqual, showExcluded, search, onlyCategory, onlyOperation }
+  // Every scroll event asked for 60 rows and rebuilt the whole index to get
+  // them: 7 ms at 40 000 rows, 28 ms at 400 000, sixty times a second while
+  // the thumb moves. The answer only changes when the view changes or when
+  // something in the tree is edited, so it is kept — and thrown away by
+  // `_touched()`, which every mutator calls.
+  _viewKey(v) {
+    return [v.showEqual ? 1 : 0, v.showExcluded ? 1 : 0, v.onlyCategory || '',
+            v.onlyOperation || '', (v.search || '').trim().toLowerCase(),
+            (v.scope && v.scope.rel) || ''].join('\u0000');
+  }
+
+  _touched() { this._idxCache = null; }
+
   _visibleIndices(view) {
+    const key = this._viewKey(view || {});
+    if (this._idxCache && this._idxCache.key === key) return this._idxCache.list;
+    const list = this._computeVisible(view);
+    this._idxCache = { key, list };
+    return list;
+  }
+
+  _computeVisible(view) {
     const v = view || {};
     const needle = (v.search || '').trim().toLowerCase();
     const out = [];
@@ -225,6 +248,7 @@ class Session {
       n.dir = dir;
       n.op  = operationFor(n);
     }
+    this._touched();
     applyFolderRules(this.nodes);
     this.stats = computeStats(this.nodes);
     return this.stats;
@@ -253,6 +277,7 @@ class Session {
       n.active = !!active;
       n.op = operationFor(n);
     }
+    this._touched();
     applyFolderRules(this.nodes);
     this.stats = computeStats(this.nodes);
     return this.stats;
@@ -277,6 +302,7 @@ class Session {
       else if (n.dir === 'right') n.dir = 'left';
       n.op = operationFor(n);
     }
+    this._touched();
     applyFolderRules(this.nodes);
     this.stats = computeStats(this.nodes);
     return this.stats;
@@ -309,15 +335,22 @@ class Session {
     const opened = new Set(open || []);
     const groups = new Map();   // displayed rel -> { name, type, items, bytes, idx, active }
     for (const n of this.nodes) {
-      const parts = n.rel.split('/');
+      // Walked rather than split: at 400 000 rows an array per node — rebuilt
+      // every time a folder is unfolded — was 138 ms of pure allocation.
+      const rel = n.rel;
       const busy = n.active && n.op !== OP.NONE && n.op !== OP.DO_NOTHING &&
                    n.op !== OP.MOVE_LEFT_FROM && n.op !== OP.MOVE_RIGHT_FROM;
       let key = '';
-      for (let i = 0; i < parts.length; i++) {
-        key = i ? key + '/' + parts[i] : parts[i];
+      let from = 0;
+      for (let i = 0; from <= rel.length; i++) {
+        let cut = rel.indexOf('/', from);
+        if (cut < 0) cut = rel.length;
+        const part = rel.slice(from, cut);
+        from = cut + 1;
+        key = i ? key + '/' + part : part;
         let g = groups.get(key);
         if (!g) {
-          g = { rel: key, name: parts[i], depth: i,
+          g = { rel: key, name: part, depth: i,
                 type: n.rel === key ? n.type : 'folder',
                 items: 0, bytes: 0, idx: -1, active: true, work: 0, off: 0,
                 kidsAll: false, kidsWork: false };
@@ -426,6 +459,27 @@ class Session {
   // the missing mount point existed by then — and the NEXT comparison, finding
   // an empty folder instead of a missing one, planned the mass deletion for
   // real.
+  // The two roots, as they are at this second. A root that was already
+  // missing when the comparison ran is not re-reported here: that case is the
+  // business of missingRootProblem(), which knows whether it may be created.
+  async checkRootsStillThere() {
+    for (const which of ['left', 'right']) {
+      const side = this[which];
+      if (!side || !side.path) continue;
+      if (this.errors.some(e => e.missingRoot === which)) continue;
+      let st = null;
+      try { st = await side.fs.stat(side.path); } catch (_) { st = null; }
+      if (!st) {
+        throw new Error(`The ${which} folder is no longer there (${side.path}). It was when the ` +
+          'comparison ran, so the drive or the share has gone away since. ' +
+          'Reconnect it and compare again.');
+      }
+      if (st.type !== 'folder') {
+        throw new Error(`The ${which} folder is not a folder any more (${side.path}).`);
+      }
+    }
+  }
+
   missingRootProblem() {
     for (const e of this.errors) {
       if (!e.missingRoot) continue;
@@ -521,6 +575,13 @@ class Session {
     const missing = this.missingRootProblem();
     if (missing) throw new Error(missing);
 
+    // 🔴 And again, NOW. Everything above reads the comparison, which may be
+    // minutes old: a drive unplugged while the confirmation dialog was up left
+    // all of it true and none of it current. The folder was then re-created by
+    // the locking step — on the startup disk, under the mount point — and the
+    // run copied happily into it and reported success.
+    await this.checkRootsStillThere();
+
     const startedAt = Date.now();
 
     const lanes = await this._openLanes(job);
@@ -552,7 +613,11 @@ class Session {
     if (wantList) {
       for (const side of ['left', 'right']) {
         const list = run.checksums[side];
-        if (!list.length) continue;
+        // A run that only DELETED files still has to rewrite the list: the
+        // lines of the files it removed must go with them, or the sidecar goes
+        // on vouching for files that are not there any more.
+        const anyDeleted = [...run.applied.values()].some(r => r && r.deleted);
+        if (!list.length && !anyDeleted) continue;
         const algo = 'xxh64';
         const target = this[side];
         const p = target.fs.join(target.path, CHECKSUM_FILE);
@@ -568,8 +633,21 @@ class Session {
             }
           } catch (_) { /* unreadable previous list: start fresh */ }
           // Entries deleted or re-copied this run must not survive from the
-          // old list with a stale hash.
-          for (const [rel, res] of run.applied) if (res.deleted) byRel.delete(rel);
+          // old list with a stale hash. The list is keyed by the side's OWN
+          // spelling of a name (a Mac stores "é" decomposed, a server stores
+          // it composed) while `applied` is keyed by the canonical one, so a
+          // deleted accented file used to keep its line here for ever.
+          const spelt = new Map();
+          for (const n of this.nodes || []) {
+            const own = side === 'left' ? (n.relL || n.rel) : (n.relR || n.rel);
+            if (own && own !== n.rel) spelt.set(n.rel, own);
+          }
+          for (const [rel, res] of run.applied) {
+            if (!res.deleted) continue;
+            byRel.delete(rel);
+            const own = spelt.get(rel);
+            if (own) byRel.delete(own);
+          }
           for (const e of list) byRel.set(e.rel, e);
           const merged = [...byRel.values()].sort((a, b) => a.rel < b.rel ? -1 : 1);
           await writeText(target.fs, p, formatChecksumList(algo, merged, { pair: job.name, side }));
@@ -1040,7 +1118,18 @@ class MultiSession {
     let lockLost = null;
     if (job.sync.lockFolders !== false) {
       const folders = [];
-      for (const s of this.sessions) { folders.push(s.left, s.right); }
+      // A folder the comparison found absent may be created when it is locked
+      // (a first backup into a new folder on a NAS). One that was there at
+      // comparison time and is gone now may NOT: it means the drive went away.
+      const creatable = new Set();
+      for (const s of this.sessions) {
+        folders.push(s.left, s.right);
+        for (const e of (s.errors || [])) {
+          if (!e.missingRoot) continue;
+          const side = e.missingRoot === 'left' ? s.left : s.right;
+          if (side && side.path) creatable.add(side.path);
+        }
+      }
       // The window showed NOTHING between pressing Synchronize and the first
       // file: a normal acquisition emits no status at all, and on a server each
       // folder is a handful of round trips on one serialized connection. A run
@@ -1049,6 +1138,11 @@ class MultiSession {
       if (onProgress) onProgress({ phase: 'lock', current: 'Locking the folders…', waiting: true });
       locks = await acquireAll(folders, {
         token,
+        // Which of these folders may be created if they are not there. Only
+        // the ones the comparison already reported missing: anything else
+        // disappeared since, and re-creating it means writing to the wrong
+        // place (typically the startup disk, under an empty mount point).
+        mayCreate: creatable,
         onFolder: (p, i, n) => {
           log.info('lock', `folder ${i + 1}/${n}`);
           if (onProgress) onProgress({
@@ -1256,6 +1350,13 @@ async function verifyFolder(pool, phrase, opts) {
   let done = 0, okCount = 0, badCount = 0, missingCount = 0;
   for (const e of entries) {
     if (token && token.cancelled) break;
+    // The list is a file INSIDE the folder being checked — written by the
+    // other side of a previous run, or by anyone who can write there. An entry
+    // naming '../../…' would have syncto read a file nobody pointed it at.
+    if (!isSafeRel(e.rel)) {
+      badCount++; results.push({ rel: e.rel, status: 'error', error: 'This entry points outside the folder.' });
+      done++; continue;
+    }
     const p = fsx.join(root, ...e.rel.split('/'));
     const st = await fsx.stat(p);
     if (!st) { missingCount++; results.push({ rel: e.rel, status: 'missing' }); done++; continue; }
@@ -1265,6 +1366,10 @@ async function verifyFolder(pool, phrase, opts) {
       if (got === e.hash) { okCount++; results.push({ rel: e.rel, status: 'ok' }); }
       else { badCount++; results.push({ rel: e.rel, status: 'mismatch', expected: e.hash, got }); }
     } catch (err) {
+      // Cancelling is not a verdict on the file. hashStream rejects with
+      // 'cancelled' when the token is set mid-file, and counting that as a
+      // mismatch put a red row against a file that is byte-perfect.
+      if (/cancelled/i.test(err.message || '')) break;
       badCount++; results.push({ rel: e.rel, status: 'error', error: err.message });
     }
     done++;
@@ -1308,18 +1413,41 @@ async function clearStaleLocks(job, items, opts) {
   const pool = new FsPool();
   const results = [];
   try {
+    // The folders this job actually names, each opened through its own
+    // location. Two things used to go wrong when the window's `folder` string
+    // was re-parsed instead: a server folder ("/export") does not look like an
+    // sftp:// URL, so a lock seen on the SERVER was cleared through the LOCAL
+    // filesystem; and any folder at all could be named, because the string
+    // came from the window. A lock is now only ever removed in a folder this
+    // job synchronizes, on the side it belongs to.
+    const bases = [];
+    // Same reading of a job as the rest of the engine: `pairs` when it holds
+    // real folders, the job's own left/right otherwise — a saved job can carry
+    // an empty pair row, and that must not leave the list of folders empty.
+    const listed = ((job && job.pairs) || []).filter(p => p && (p.left || '').trim() && (p.right || '').trim());
+    const jobPairs = listed.length ? listed
+      : [{ left: (job && job.left) || '', right: (job && job.right) || '' }];
+    for (const p of jobPairs) {
+      for (const which of ['left', 'right']) {
+        const phrase = p && p[which];
+        if (!phrase) continue;
+        try {
+          const side = await pool.open(parseLocation(phrase, credentials));
+          bases.push({ fs: side.fs, path: side.path });
+        } catch (_) { /* a folder we cannot open holds no lock we can clear */ }
+      }
+    }
+
     for (const item of items || []) {
       if (!item || !item.path || !item.folder) continue;
-      let fsx, target;
-      try {
-        // pool.open takes a parsed location, not a raw path.
-        const side = await pool.open(parseLocation(item.folder, credentials));
-        fsx = side.fs;
-        target = Object.assign({}, item, { path: fsx.join(side.path, item.name) });
-      } catch (err) {
-        results.push({ path: item.path, status: 'failed', error: err.message || String(err) });
+      const base = bases.find(b => b.path === item.folder);
+      if (!base || !isLockFileName(item.name)) {
+        results.push({ path: item.path, status: 'failed',
+                       error: 'That is not a lock file in a folder of this job.' });
         continue;
       }
+      const fsx = base.fs;
+      const target = Object.assign({}, item, { path: fsx.join(base.path, item.name) });
       let status = 'failed', error = null;
       try { status = await clearStaleLock(fsx, target, { onStatus, token }); }
       catch (err) { error = err.message || String(err); }

@@ -473,6 +473,10 @@ async function renderWindow() {
   const body = $('gridbody');
   body.style.transform = `translateY(${first * ROWH}px)`;
   body.innerHTML = res.rows.map((r, i) => rowHtml(r, first + i)).join('');
+  // Only what is on screen (plus the margin above and below). This map used
+  // to keep every row ever fetched: scrolling the length of a 400 000-row
+  // comparison held all of them until the next comparison cleared it.
+  state.rows.clear();
   res.rows.forEach((r, i) => state.rows.set(first + i, r));
 }
 
@@ -769,7 +773,15 @@ async function afterEdit() {
   renderAutoUi();
 }
 
-$('gridscroll').addEventListener('scroll', () => { renderWindow(); });
+// One fetch per frame, not one per scroll event. A trackpad fling fires this
+// sixty to a hundred and twenty times a second, and every fetch made the main
+// process walk the whole tree; the answers that arrived out of order were then
+// thrown away by the sequence guard — work done twice over to be discarded.
+let scrollFrame = 0;
+$('gridscroll').addEventListener('scroll', () => {
+  if (scrollFrame) return;
+  scrollFrame = requestAnimationFrame(() => { scrollFrame = 0; renderWindow(); });
+});
 window.addEventListener('resize', () => { renderWindow(); });
 
 // ── Status chips ───────────────────────────────────────────────────────────
@@ -793,7 +805,10 @@ function renderStats() {
   if (s.moveLeft)    parts.push(chip('b', '← move',   s.moveLeft,    'moveLeftTo',  'op'));
   if (s.conflicts)   parts.push(chip('r', 'conflicts', s.conflicts,  'conflict',    'op'));
   parts.push(chip('', 'identical', s.equal, 'none', 'op'));
-  if (s.excluded)    parts.push(chip('', 'excluded', s.excluded, '', ''));
+  // It looked like every other chip — pointer, hover — and did nothing at
+  // all. Clicking it now shows the excluded rows, which is what a person is
+  // asking for by clicking a count of them.
+  if (s.excluded)    parts.push(chip('', 'excluded', s.excluded, 'excluded', 'view'));
   box.innerHTML = parts.join('');
 
   const data = fmtBytes(s.bytesTotal);
@@ -816,13 +831,21 @@ function renderStats() {
 
 function isActiveFilter(key, kind) {
   return (kind === 'op' && state.view.onlyOperation === key) ||
-         (kind === 'cat' && state.view.onlyCategory === key);
+         (kind === 'cat' && state.view.onlyCategory === key) ||
+         (kind === 'view' && key === 'excluded' && !!state.view.showExcluded);
 }
 
 $('stat-chips').addEventListener('click', async e => {
   const chip = e.target.closest('.stat');
   if (!chip || !chip.dataset.key) return;
   const key = chip.dataset.key;
+  // The excluded count is a view switch, not an operation filter: it turns
+  // the excluded rows on, and it lights up while they are showing.
+  if (chip.dataset.kind === 'view' && key === 'excluded') {
+    state.view.showExcluded = !state.view.showExcluded;
+    const box = $('chk-excluded');
+    if (box) box.checked = state.view.showExcluded;
+  }
   if (chip.dataset.kind === 'op') {
     state.view.onlyOperation = state.view.onlyOperation === key ? '' : key;
     // Deliberately NOT touching state.view.showEqual here. Filtering on the
@@ -1197,16 +1220,33 @@ async function checkBeforeSync() {
   return false;
 }
 
+// The names the buttons show. At module scope because two windows say them:
+// the confirmation, and the auto-sync card — which used to print the internal
+// key ("twoWay") because the map was local to the other one.
+const VARIANT_LABEL = { twoWay: 'Two way', mirror: 'Mirror →', update: 'Update →', custom: 'Custom' };
+
+// What the run will really do about proof, for THESE folders. The read-back
+// can be turned off for servers, so promising "verified copy" whatever the
+// pairs are is a promise the summary then takes back two hours later.
+function verificationPhrase() {
+  const servers = completePairs().some(p => /^sftp:/i.test(p.left) || /^sftp:/i.test(p.right));
+  const off = state.job.sync.verifyRemote === false;
+  if (!servers) return 'verified copy (xxHash64)';
+  if (!off) return 'verified copy (xxHash64)';
+  const bothRemote = completePairs().every(p => /^sftp:/i.test(p.left) && /^sftp:/i.test(p.right));
+  return bothRemote ? 'copied, NOT read back (server)'
+                    : 'verified on disk, NOT read back on the server';
+}
+
 function askConfirm() {
   const s = state.stats;
   uiToJob();
   const j = state.job;
-  const VAR_LBL = { twoWay: 'Two way', mirror: 'Mirror →', update: 'Update →', custom: 'Custom' };
   const CMP_LBL = { timeSize: 'time & size', content: 'content', size: 'size' };
 
   const np = completePairs().length;
   $('cf-sub').textContent =
-    `${np} pair${np > 1 ? 's' : ''} · ${VAR_LBL[j.sync.variant] || j.sync.variant} · compared by ${CMP_LBL[j.compare.compareVariant]} · verified copy (xxHash64)`;
+    `${np} pair${np > 1 ? 's' : ''} · ${VARIANT_LABEL[j.sync.variant] || j.sync.variant} · compared by ${CMP_LBL[j.compare.compareVariant]} · ${verificationPhrase()}`;
   const cfCells = [
     ['Create', s.createLeft + s.createRight],
     ['Update', s.updateLeft + s.updateRight],
@@ -1302,6 +1342,8 @@ async function doCompareQuiet() {
   state.busy = 'compare';
   $('btn-compare').disabled = true;
   $('btn-sync').disabled = true;
+  // Nothing here can be paused, so the button must not sit there offering to.
+  $('btn-pause').style.display = 'none';
   state.selIdx = null;
   // It used to run with nothing on screen at all: a few seconds — minutes on a
   // big tree — of a window that answers to nothing, right after a run, which
@@ -1317,6 +1359,7 @@ async function doCompareQuiet() {
   } finally {
     state.busy = null;
     $('pb-ring').classList.remove('spin');
+    $('btn-pause').style.display = '';
     setBusyUi(false);
   }
   if (!res || !res.ok || res.cancelled) {
@@ -1547,9 +1590,16 @@ API.onSyncProgress(p => {
                     : 'COPYING';
   title.style.color = p.paused ? '' : (verifying ? 'var(--blue)' : 'var(--green)');
 
-  state.speeds.push(p.bytesPerSec || 0);
-  if (state.speeds.length > 70) state.speeds.shift();
-  drawSpark(state.speeds);
+  // Sampled about twice a second. Pushed per event it held the last quarter
+  // of a second at a high file rate — a line of noise rather than a trend —
+  // and redrew two SVG shapes each time.
+  const nowMs = Date.now();
+  if (nowMs - (state.lastSpeedAt || 0) >= 500) {
+    state.lastSpeedAt = nowMs;
+    state.speeds.push(p.bytesPerSec || 0);
+    if (state.speeds.length > 70) state.speeds.shift();
+    drawSpark(state.speeds);
+  }
 });
 
 // ── The passes of a run, drawn as steps ────────────────────────────────────
@@ -1575,17 +1625,33 @@ const RUN_STEPS = [
 // pass: 'copy' | 'verify' | 'cleanup' | null (nothing running yet)
 // verifying: false when the read-back is off for this run — the step is then
 // dropped rather than drawn and never reached.
+// Built once per run, then only the classes change. Rewriting the innerHTML
+// on every progress event meant parsing HTML and recalculating style several
+// times a second, for three chips that do not move.
+let stepsShape = '';
 function renderSteps(pass, verifying) {
   const box = $('pb-steps');
   if (!box) return;
   const steps = verifying === false ? RUN_STEPS.filter(s => s.key !== 'verify') : RUN_STEPS;
+  const shape = steps.map(s => s.key).join(',');
+  if (shape !== stepsShape) {
+    stepsShape = shape;
+    box.innerHTML = steps.map((s, i) =>
+      (i ? '<span class="pb-step-sep"></span>' : '') +
+      `<span class="pb-step ${s.cls}" data-step="${s.key}"><span class="mark"></span>${esc(s.label)}</span>`
+    ).join('');
+  }
   const at = steps.findIndex(s => s.key === pass);
-  box.innerHTML = steps.map((s, i) => {
+  steps.forEach((s, i) => {
+    const el = box.querySelector(`[data-step="${s.key}"]`);
+    if (!el) return;
     const state_ = at < 0 ? '' : i < at ? 'done' : i === at ? 'on' : '';
-    const mark = state_ === 'done' ? ICO_STEP_OK : '<span class="dot"></span>';
-    return (i ? '<span class="pb-step-sep"></span>' : '') +
-      `<span class="pb-step ${s.cls} ${state_}">${mark}${esc(s.label)}</span>`;
-  }).join('');
+    if (el.dataset.state === state_) return;
+    el.dataset.state = state_;
+    el.classList.toggle('done', state_ === 'done');
+    el.classList.toggle('on',   state_ === 'on');
+    el.querySelector('.mark').innerHTML = state_ === 'done' ? ICO_STEP_OK : '<span class="dot"></span>';
+  });
 }
 
 function drawSpark(values) {
@@ -2058,8 +2124,8 @@ function bind() {
       const n = state.job.autoSync.minutes || 30;
       const np = completePairs().length;
       $('auto-cf-sub').textContent =
-        `Every ${n} minute${n > 1 ? 's' : ''}: ${state.job.sync.variant} synchronization of ${np} pair${np > 1 ? 's' : ''}, ` +
-        `every file read back and compared.`;
+        `Every ${n} minute${n > 1 ? 's' : ''}: ${VARIANT_LABEL[state.job.sync.variant] || state.job.sync.variant} ` +
+        `synchronization of ${np} pair${np > 1 ? 's' : ''} · ${verificationPhrase()}.`;
       $('ov-auto').classList.add('open');
     } else {
       state.job.autoSync.enabled = false;
@@ -2089,6 +2155,8 @@ function bind() {
   $('win-close').addEventListener('click', () => API.winClose());
 
   document.addEventListener('keydown', e => {
+    // The one floating surface a keyboard could open and not close.
+    if (e.key === 'Escape') closeCtx();
     if (e.key === 'Escape') {
       // Escape goes through each modal's own close button: several of them do
       // real work on close (settings persist, the filter modal re-compares,
@@ -2637,6 +2705,10 @@ async function autoRun() {
   setBusyUi(false);
   if (!res.ok) {
     $('footer-auto').textContent = `auto-sync ${stamp()}: failed — ${res.error}`;
+    // A run that failed is the one a person away from the screen most needs
+    // to hear about — and auto-sync is unattended by definition. The manual
+    // path has sent this since 0.4.0; this one returned before it.
+    notifyRunFailed(res.error);
     return;
   }
   const c = res.counters;
@@ -2967,7 +3039,11 @@ async function openServerDialog(target) {
   srv.savedId = null;
   srv.conn = null;
   const side = target.side === 'left' ? 'source' : 'destination';
-  $('srv-sub').innerHTML = `This becomes the <span style="color:var(--${target.side === 'left' ? 'blue' : 'green'})">${side}</span>` +
+  // Plain text: SOURCE and DESTINATION are grey labels everywhere else since
+  // the charte (green means "read back and verified", and in a two-way job
+  // neither side is a source). An inline style was also out of the charte
+  // block's reach.
+  $('srv-sub').innerHTML = `This becomes the <b>${side}</b>` +
     (target.kind === 'pair' ? ` of pair ${target.index + 1}` : '') + '.';
   $('srv-title').textContent = 'Connect to a server';
   srvShowStep(1);

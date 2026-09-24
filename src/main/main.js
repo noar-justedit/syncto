@@ -95,6 +95,7 @@ const { FsPool } = require('./fs/afs');
 const { Prefs, defaultJob, loadJob, saveJob, jobNameFromPath, JOB_EXT, credentialMap,
         pushRecent: addRecent, removeRecent } = require('./config');
 const { RemoteBrowser } = require('./fs/browse');
+const { setHostKeyPolicy } = require('./fs/sftp');
 const secrets = require('./secrets');
 const power  = require('./power');
 const notify = require('./notify');
@@ -160,7 +161,12 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      // The renderer runs inside the OS sandbox. The preload only needs
+      // ipcRenderer and webUtils.getPathForFile, both of which work there, so
+      // nothing is given up for it — and a flaw in the page (reached through
+      // a file name, a server's error string, a rendered report) stays
+      // contained instead of running with the user's own rights.
+      sandbox: true,
     },
   });
 
@@ -278,6 +284,15 @@ function buildMenu() {
 app.whenReady().then(() => {
   prefs = new Prefs(app.getPath('userData'));
   prefs.load();
+
+  // Who is allowed to answer for a server. The profile is the only place an
+  // identity can be remembered, and the main process is the only part that
+  // may write it — hence the policy being installed here rather than inside
+  // the SFTP backend.
+  setHostKeyPolicy({
+    known   : (host, port) => prefs.knownHostKey(host, port),
+    remember: (host, port, fp) => prefs.rememberHostKey(host, port, fp),
+  });
 
   // The journal, as early as possible: everything before this point is lost,
   // so nothing important happens before it.
@@ -476,10 +491,15 @@ ipcMain.handle('ntfy-test', async (_, patch) => {
   // the same made "Test" pass with the old token still attached, right after
   // the user had removed it.
   const pick = (a, b) => (a === undefined ? b : a);
+  const server = pick(p.server, cfg.server) || cfg.server;
+  // The stored token belongs to the stored server. Testing against a DIFFERENT
+  // server must not carry it there — that is how a token ends up in somebody
+  // else's log. A token typed in the window is used as typed, wherever it goes.
+  const sameServer = String(server).trim() === String(cfg.server || '').trim();
   return notify.send({
-    server: pick(p.server, cfg.server) || cfg.server,
+    server,
     topic : pick(p.topic,  cfg.topic),
-    token : pick(p.token,  cfg.token),
+    token : p.token !== undefined ? p.token : (sameServer ? cfg.token : ''),
     title : 'syncto test',
     message: 'Test notification from syncto.',
     tags  : 'bell',
@@ -500,7 +520,22 @@ ipcMain.handle('ntfy-run', async (_, res, jobName) => {
 });
 
 ipcMain.handle('reveal-path',  (_, p) => { try { shell.showItemInFolder(p); } catch (_) {} });
-ipcMain.handle('open-path',    (_, p) => shell.openPath(p));
+// What syncto itself produces, and folders. `shell.openPath` hands the file
+// to whatever the system opens it with, so an unrestricted channel is "run
+// this" for anything the renderer can name. The window only ever asks for a
+// report, a checksum list, the journal, or a folder.
+const OPENABLE = new Set(['.html', '.htm', '.txt', '.csv', '.log', '.json', '.md', '.xml']);
+ipcMain.handle('open-path', async (_, p) => {
+  const file = String(p || '');
+  let st = null;
+  try { st = fs.statSync(file); } catch (_) { return 'That item is no longer there.'; }
+  if (st.isDirectory()) return shell.openPath(file);
+  if (!OPENABLE.has(path.extname(file).toLowerCase())) {
+    log.warn('ui', `refused to open ${file}: not a document syncto writes`);
+    return 'syncto only opens the documents it writes.';
+  }
+  return shell.openPath(file);
+});
 ipcMain.handle('open-external',(_, u) => openExternalSafely(u));
 
 // ── The diagnostic journal ─────────────────────────────────────────────────

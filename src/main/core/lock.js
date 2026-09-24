@@ -168,6 +168,9 @@ function isHeldHere(lockId) { return !!lockId && HELD.has(lockId); }
 // because nothing in that phase looks at the token.
 const READ_LOCK_TIMEOUT_MS = 20000;
 
+// 64 KB is a hundred times the largest lock file syncto writes.
+const MAX_LOCK_BYTES = 64 * 1024;
+
 async function readLockInfo(fsx, lockPath) {
   return new Promise(resolve => {
     const chunks = [];
@@ -185,7 +188,14 @@ async function readLockInfo(fsx, lockPath) {
       finish(null);
     }, READ_LOCK_TIMEOUT_MS);
     try { rs = fsx.createReadStream(lockPath); } catch (_) { return finish(null); }
-    rs.on('data', c => chunks.push(c));
+    // A lock file is a single line of JSON. Reading one is not an invitation
+    // to accumulate whatever the other side decides to send.
+    let total = 0;
+    rs.on('data', c => {
+      total += c.length;
+      if (total > MAX_LOCK_BYTES) { log.warn('lock', `${lockPath} is too large to be a lock file`); return finish(null); }
+      chunks.push(c);
+    });
     rs.on('error', () => finish(null));
     rs.on('end', () => {
       const text = Buffer.concat(chunks).toString('utf8');
@@ -351,8 +361,41 @@ function describe(info) {
 // directions: a live lock looking old, or a dead one looking fresh. Neither is
 // allowed to matter — this function only REPORTS. Removing goes through
 // clearStaleLock(), which does the real life-sign watch first.
+// Exactly the name a takeover writes, and nothing else. The loose version of
+// this test ("starts with Delete.<n>. and contains the lock name somewhere")
+// also accepted a name carrying '..' segments — and a remote server chooses
+// the names a readdir returns, so "clear this leftover" could be made to
+// unlink a file of the server's choosing on the local disk.
+// A corpse can be a corpse of a corpse — abandonedLockName() stacks a new
+// `Delete.<n>.` in front each time, up to ABANDONED_LEVEL_MAX — so the test
+// peels the prefixes off and demands the lock name underneath, with nothing
+// else around it.
 function isCorpseName(name) {
-  return /^Delete\.\d+\./.test(name) && name.includes(LOCK_NAME);
+  let s = String(name || '');
+  let peeled = 0;
+  while (peeled < ABANDONED_LEVEL_MAX) {
+    const m = /^Delete\.\d+\.(.+)$/.exec(s);
+    if (!m) break;
+    s = m[1];
+    peeled++;
+  }
+  return peeled > 0 && s === LOCK_NAME;
+}
+
+// The only two shapes of name this module is ever allowed to remove. The lock
+// list travels through the window before it comes back to be cleared, and a
+// remote server chooses the names a readdir returns.
+function isLockFileName(name) {
+  return String(name || '') === LOCK_NAME || isCorpseName(name);
+}
+
+// The name an item carries, or the tail of its path when it carries none.
+function lockNameOf(item) {
+  if (!item) return '';
+  if (item.name) return String(item.name);
+  const p = String(item.path || '');
+  const cut = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+  return cut >= 0 ? p.slice(cut + 1) : p;
 }
 
 // entries: what a readdir of the folder returned ({name, size, mtime}).
@@ -392,6 +435,9 @@ function findLeftoverLocks(entries, folderPath, joinPath, now) {
 // Returns 'removed' | 'alive' | 'gone' | 'failed'.
 async function clearStaleLock(fsx, item, opts) {
   const { onStatus, token } = opts || {};
+  // Re-checked here, not only where the list was built: this function is
+  // reached from the window, and the item it is given has travelled.
+  if (!isLockFileName(lockNameOf(item))) return 'failed';
   let st = null;
   try { st = await fsx.stat(item.path); } catch (_) { return 'failed'; }
   if (!st) return 'gone';
@@ -580,6 +626,10 @@ async function takeOver(fsx, lockPath, onStatus, info, attempt) {
 // never deadlock by taking them in opposite orders.
 async function acquireAll(entries, opts) {
   const onFolder = (opts || {}).onFolder;
+  // A Set of the paths that may be created if they are absent. Undefined means
+  // "any" — which is what every caller but a run wants (the tests, and the
+  // first backup into a folder that does not exist yet).
+  const mayCreate = (opts || {}).mayCreate;
   const seen = new Map();
   for (const e of entries) {
     if (!e || !e.fs || !e.path) continue;
@@ -598,6 +648,13 @@ async function acquireAll(entries, opts) {
       // "absent" and ran the whole synchronization on that folder WITHOUT a
       // lock, silently. Let the real error through.
       const st = await e.fs.stat(e.path);
+      if (!st && mayCreate && !mayCreate.has(e.path)) {
+        // It was there when the comparison ran. Creating it now would rebuild
+        // the path somewhere else entirely — under an empty mount point, on
+        // the startup disk — and the run would copy into it and call that a
+        // success.
+        throw new Error(`${e.path} is no longer there. Reconnect it and compare again.`);
+      }
       if (!st) {
         // Genuinely not there yet. Create it now rather than skipping the lock:
         // two machines starting their first backup into the same new NAS folder
@@ -641,6 +698,6 @@ async function acquireAll(entries, opts) {
 
 module.exports = {
   acquireOne, acquireAll, abandonedLockName, processStatus, localLockInfo, readLockInfo,
-  findLeftoverLocks, clearStaleLock, isCorpseName, checkStillOurs, isHeldHere,
+  findLeftoverLocks, clearStaleLock, isCorpseName, isLockFileName, checkStillOurs, isHeldHere,
   EMIT_LIFE_SIGN_MS, POLL_LIFE_SIGN_MS, DETECT_ABANDONED_MS, LOCK_NAME,
 };

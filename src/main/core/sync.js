@@ -36,6 +36,7 @@
 
 const { OP, TEMP_EXT, OLD_EXT, ALWAYS_SKIP, OS_LITTER_FOLDERS, isSyncToInternal } = require('./compare');
 const { createHasher, hashStream, algoFor } = require('./hash');
+const { assertSafeRel } = require('./relpath');
 const { log } = require('../log');
 const { Versioner, runTimestamp, streamCopy } = require('./versioning');
 
@@ -237,10 +238,15 @@ class SyncRunner {
   // cancelled, so "stop at the first error" still stops everything — the files
   // already in flight finish or fail on their own terms, which is the same
   // thing that happens to the single file in flight without lanes.
-  async runLanes(items, k, worker) {
+  // `keepGoing` is for the verification pass: stopping it would leave files
+  // copied but unchecked, and they were then written into the database as
+  // synchronized — so the next run skipped them too, for ever. An error there
+  // must end the RUN, not the checking of what is already on the disk.
+  async runLanes(items, k, worker, keepGoing) {
+    const halted = () => (this.stopped && !keepGoing) || this.token.cancelled;
     if (k <= 1) {
       for (const item of items) {
-        if (this.stopped || this.token.cancelled) break;
+        if (halted()) break;
         await worker(item, 0);
       }
       return;
@@ -250,7 +256,7 @@ class SyncRunner {
     for (let lane = 0; lane < k; lane++) {
       lanes.push((async () => {
         for (;;) {
-          if (this.stopped || this.token.cancelled) return;
+          if (halted()) return;
           const i = next++;
           if (i >= items.length) return;
           await worker(items[i], lane);
@@ -259,11 +265,31 @@ class SyncRunner {
     }
     await Promise.all(lanes);
   }
+  // Anything copied but NOT read back must not be recorded as synchronized:
+  // the database is what makes the next run skip a file, so a file whose
+  // proof was never taken has to be looked at again. Cancelling is not a
+  // failure of proof — the run simply ended — so it is left out.
+  dropUnproven() {
+    if (this.token && this.token.cancelled) return 0;
+    const unproven = (this.toVerify || []).filter(i => !i.ok);
+    for (const i of unproven) this.applied.delete(i.rel);
+    if (unproven.length) {
+      this.notes.push(`${unproven.length} file${unproven.length > 1 ? 's were' : ' was'} copied but not read back — ` +
+        `${unproven.length > 1 ? 'they are' : 'it is'} left out of the database, so the next run checks ` +
+        `${unproven.length > 1 ? 'them' : 'it'} again.`);
+    }
+    return unproven.length;
+  }
+
   other(which) { return which === 'left' ? 'right' : 'left'; }
 
   abs(which, rel) {
     const s = this.side(which);
-    return rel ? s.fs.join(s.path, ...rel.split('/')) : s.path;
+    if (!rel) return s.path;
+    // join() normalises, so one '..' segment in `rel` would resolve OUTSIDE
+    // the chosen folder — and `rel` is built from names the other side chose.
+    assertSafeRel(rel, 'This item');
+    return s.fs.join(s.path, ...rel.split('/'));
   }
 
   // A node's path on ONE side, in that side's own spelling. `rel` is the
@@ -564,7 +590,12 @@ class SyncRunner {
 
     this.current = n.rel;
     this.way = to;
-    this.emit(true);
+    // Not forced. A forced emit per file meant two events per file whatever
+    // the rate: 10 000 of them for 5 000 files, and the window rebuilt its
+    // step chips and its sparkline on every one — which is what a "frozen
+    // during the copy" window actually is. The 120 ms throttle is faster than
+    // anyone can read a file name.
+    this.emit(false);
 
     const t0 = Date.now();
     log.debug('copy', `start ${n.rel} → ${to}`);
@@ -657,6 +688,19 @@ class SyncRunner {
       await this.dispose(to, n, true);
       existed = null;
     }
+    // 🔴 A LINK where the file goes. Opening it for writing follows it, so the
+    // bytes land on whatever it points at — a file outside both synchronized
+    // folders, which nothing in the run ever mentions. (With the fail-safe on
+    // the rename replaces the link itself and the target is safe; with it off,
+    // the stream wrote straight through it.) The link is removed first, through
+    // the deletion policy like every other thing that is replaced.
+    if (existed && existed.type === 'symlink') {
+      log.warn('copy', `${n.rel}: a link is in the way on the ${to} side — removing it before writing`);
+      // As a file, not as a folder: a link to a directory is still one entry
+      // to unlink, and rmdir on it fails with ENOTDIR.
+      await this.dispose(to, n, false);
+      existed = null;
+    }
 
     // An existing target is put aside before being replaced, so "overwrite"
     // never means "lose the previous version" when versioning is on.
@@ -685,11 +729,14 @@ class SyncRunner {
     // and a quota error arrives in that acknowledgement — after the copy has
     // been declared a success. Without this, a truncated file was renamed
     // straight over the good copy it was meant to replace.
+    // Kept: this same answer carries the file id, and renaming does not
+    // change it — so the third stat further down can often be skipped.
+    let landed;
     {
-      const st = await dstFs.stat(tmp);
-      if (!st || st.size !== srcStat.size) {
+      landed = await dstFs.stat(tmp);
+      if (!landed || landed.size !== srcStat.size) {
         try { if (failSafe) await dstFs.unlink(tmp); } catch (_) {}
-        throw new Error(`Size mismatch after copy (${st ? st.size : 0} vs ${srcStat.size}).`);
+        throw new Error(`Size mismatch after copy (${landed ? landed.size : 0} vs ${srcStat.size}).`);
       }
     }
 
@@ -741,9 +788,14 @@ class SyncRunner {
     // One more round trip per file, for two answers we may already have: the
     // file id (which SFTP servers do not give at all) and the date really on
     // disk (which we only need when preserving it failed or was never tried).
-    const needsRead = !mtimeKept || dstFs.hasFileIds !== false;
+    // The id is already in hand from the size check: a rename moves the name,
+    // not the file, so the id under the final name is the id we measured under
+    // the temporary one. What that answer CANNOT give is the date when
+    // preserving it failed — the file was touched after that stat — so that
+    // case still reads. One round trip per file saved on everything else.
+    const needsRead = !mtimeKept || (dstFs.hasFileIds !== false && !(landed && landed.id));
     try {
-      const st = needsRead ? await dstFs.stat(dst) : null;
+      const st = needsRead ? await dstFs.stat(dst) : landed;
       // `mtimeKept` is false both when preserving the date FAILED and when it
       // was never attempted (preserveTimes off). Either way the copy carries
       // its own date, and that is what the database has to record. The extra
@@ -781,7 +833,7 @@ class SyncRunner {
 
     this.current = `${fromRel} → ${n.rel}`;
     this.way = side;
-    this.emit(true);
+    this.emit(false);
 
     const st = await fsx.stat(from);
     if (!st) throw new Error('The file to move vanished before it could be renamed.');
@@ -1100,13 +1152,16 @@ class SyncRunner {
       const vStart = Date.now();
       let vBytes = 0;
       const vLanes = this.laneCount(this.toVerify[0].side, this.toVerify[0].side);
+      // keepGoing: a mismatch on one file used to end the pass, leaving every
+      // file after it copied but never read back — and recorded as
+      // synchronized all the same.
       await this.runLanes(this.toVerify, vLanes, async (item, lane) => {
         await this.gate();
         if (this.token.cancelled) return;
         this.current = item.rel;
         this.way = item.side;
         this.inFlight++;
-        this.emit(true);
+        this.emit(false);
         const fsx = this.fsFor(item.side, lane);
         const vT0 = Date.now();
         try {
@@ -1132,7 +1187,9 @@ class SyncRunner {
             this.checksums[item.side].push({ rel: item.listRel || item.rel, hash: item.digest, size: item.size });
           }
         } catch (err) {
-          if (/cancelled/i.test(err.message || '')) { this.inFlight--; return; }
+          // `finally` below decrements too: doing it here as well sent
+          // inFlight negative in the progress payload.
+          if (/cancelled/i.test(err.message || '')) return;
           item.ok = false;
           this.done.errors++;
           this.errors.push({ rel: item.rel, message: err.message || String(err) });
@@ -1146,7 +1203,12 @@ class SyncRunner {
           this.inFlight--;
         }
         this.emit(false);
-      });
+      }, true);
+
+      // Anything copied but NOT read back must not be recorded as
+      // synchronized: the database is what makes the next run skip a file, so
+      // a file whose proof was never taken has to be looked at again.
+      this.dropUnproven();
       // Not back to 'copy': what follows writes nothing, and the interface
       // must not flash green again as if a new file were being transferred.
       {

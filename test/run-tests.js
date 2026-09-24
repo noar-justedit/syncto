@@ -1266,9 +1266,15 @@ async function testAuditFixes() {
     await s.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: { cancelled: false } });
     const node = s.nodes[0];
     ok(s.nodes.length === 1, 'the two spellings are one item, not two');
-    eq(node.relL, nfd, 'the left path keeps the decomposed spelling');
-    eq(node.relR, nfc, 'the right path keeps the composed one');
+    // Read the way the engine reads them: a side stores its own spelling only
+    // when it DIFFERS from the key (0.8.0 — three copies of every path in
+    // memory was 100 MB on a large job), and relOn() falls back to the key.
+    const { SyncRunner } = require('../src/main/core/sync');
+    const relOn = SyncRunner.prototype.relOn;
+    eq(relOn(node, 'left'), nfd, 'the left path keeps the decomposed spelling');
+    eq(relOn(node, 'right'), nfc, 'the right path keeps the composed one');
     eq(node.rel, nfc, 'and the key is the composed form, whichever side exists');
+    eq(node.relR, null, 'the side that spells it like the key stores nothing');
     await s.close();
   }
 }
@@ -2908,10 +2914,14 @@ async function testCheckJobPaths() {
     ok(/missing-badge'\)\.addEventListener\('click', \(\) => offerRelinkForJob\(false\)\)/.test(appjs),
        'clicking it opens the dialog');
 
-    // (f) The red on the row. This is what is still on screen an hour after the
-    //     dialog was closed, and the path is where the problem actually is.
-    ok(/\.prow input\.gone\{border-color:rgba\(242,85,90/.test(html),
-       'a row whose folder is missing is drawn in red');
+    // (f) The mark on the row. This is what is still on screen an hour after
+    //     the dialog was closed, and the path is where the problem actually
+    //     is. Orange since 0.8.0, not red: a folder that is not there is
+    //     something to decide about, while red in the grid above means "these
+    //     files will be deleted".
+    ok(/\.prow input\.gone\{border-color:rgba\(242,160,61/.test(html),
+       'a row whose folder is missing is drawn in orange');
+    ok(/#missing-badge\{[^}]*color:var\(--orange\)/.test(html), 'and so is the badge that counts them');
     ok(/function markMissingPaths\(list\)/.test(appjs), 'and something marks it');
     ok(/markMissingPaths\(state\.missingPaths\);/.test(appjs),
        'rebuilding the pair rows puts the red back');
@@ -3158,7 +3168,12 @@ async function testLockTolerance() {
       fs.writeFileSync(f, JSON.stringify(localLockInfo()) + '\n');
       fs.utimesSync(f, new Date(old), new Date(old));
     }
-    const res = await clearStaleLocks({}, [
+    // The job is what says which folders may be touched: since 0.8.0 the
+    // wrapper opens the pairs' own locations instead of re-parsing the string
+    // the window sent back, so a lock is only ever cleared in a folder this
+    // job synchronizes — on the side it belongs to.
+    const job = makeJob(dir, path.join(dir, 'elsewhere'));
+    const res = await clearStaleLocks(job, [
       { folder: dir, name: LOCK_NAME, path: lockPath, kind: 'lock' },
       { folder: dir, name: `Delete.0.${LOCK_NAME}`, path: corpse, kind: 'corpse' },
     ], {});
@@ -3167,6 +3182,19 @@ async function testLockTolerance() {
     ok(res.every(r => !r.error), 'with no error carried back');
     eq(fs.readdirSync(dir).filter(n => n.includes('.syncto.lock')), [],
        'the folder really is clean afterwards');
+
+    // And what the window may NOT ask for. A folder this job does not name,
+    // and a name that is not a lock file, are both refused — the second is
+    // how a remote server used to get a local file of its choosing deleted.
+    const outside = scratch().dir;
+    const decoy = path.join(outside, 'thesis.docx');
+    fs.writeFileSync(decoy, 'the only copy');
+    const refused = await clearStaleLocks(job, [
+      { folder: outside, name: LOCK_NAME, path: path.join(outside, LOCK_NAME), kind: 'lock' },
+      { folder: dir, name: `Delete.0..syncto.lock/../../thesis.docx`, path: decoy, kind: 'corpse' },
+    ], {});
+    eq(refused.map(r => r.status).join(','), 'failed,failed', 'a folder outside the job, and a name that is not a lock, are refused');
+    ok(fs.existsSync(decoy), 'and the file the name pointed at is still there');
   }
 
   // (g) The window's side: reported, and cleared only on purpose.
@@ -4485,52 +4513,683 @@ function testCharte() {
      'drawn as the 12 px gap itself, with no line at rest');
 }
 
+
+// ══ 43. Security hardening (0.8.0) ═══════════════════════════════════════
+// An audit of 0.7.4 found four ways the OTHER side of a synchronization — a
+// server, or anything answering in its place — could reach past the folders
+// the user chose. These are the guards, tested the way they will be attacked.
+async function testSecurity() {
+  console.log('\n\n43. What the other side is allowed to do (0.8.0)');
+  const root = path.join(__dirname, '..');
+  const { isSafeRel, isSafeName, assertSafeRel } = require('../src/main/core/relpath');
+  const { startSftpServer } = require('./sftp-server');
+  const { SftpFs, setHostKeyPolicy, fingerprintOf } = require('../src/main/fs/sftp');
+
+  // (a) What a relative path may look like.
+  {
+    for (const bad of ['../x', 'a/../../b', '/etc/passwd', '\\\\windows', 'a\\\\..\\\\..\\\\b', 'C:/x', 'a//b', 'a/./b', 'a\u0000b'])
+      ok(!isSafeRel(bad), `refused: ${JSON.stringify(bad)}`);
+    for (const good of ['', 'A001_C001.mov', 'DAY1/CARD_A/clip.mov', 'a b/c.d', 'é/ü.mov'])
+      ok(isSafeRel(good), `allowed: ${JSON.stringify(good)}`);
+    ok(!isSafeName('a/b') && !isSafeName('..') && isSafeName('clip.mov'), 'a name is one segment');
+    let threw = false;
+    try { assertSafeRel('../../etc/passwd', 'This item'); } catch (e) { threw = /points outside the folder/.test(e.message); }
+    ok(threw, 'and the guard says why it refused');
+  }
+
+  // (b) 🔴 The engine builds every path through abs(). A name the other side
+  //     chose used to be joined onto the root, and join() resolves '..'.
+  {
+    const { SyncRunner } = require('../src/main/core/sync');
+    const r = Object.create(SyncRunner.prototype);
+    r.left  = { fs: new NativeFs(), path: '/tmp/left' };
+    r.right = { fs: new NativeFs(), path: '/tmp/right' };
+    r.side = function (w) { return w === 'left' ? this.left : this.right; };
+    eq(r.abs('right', 'DAY1/clip.mov'), path.join('/tmp/right', 'DAY1', 'clip.mov'), 'an ordinary path is joined');
+    let threw = false;
+    try { r.abs('right', '../../../../tmp/pwned.txt'); } catch (_) { threw = true; }
+    ok(threw, 'one that climbs out is refused before anything is opened');
+  }
+
+  // (c) 🔴 A remote name that is really a path never reaches the comparison.
+  {
+    const fake = Object.create(SftpFs.prototype);
+    fake._q = (label, fn) => Promise.resolve().then(fn);
+    fake.sftp = { readdir: (_d, cb) => cb(null, [
+      { filename: 'A001_C001.mov', attrs: { mode: 0o100644, size: 12, mtime: 1 } },
+      { filename: '../../../../Users/victim/Library/LaunchAgents/evil.plist', attrs: { mode: 0o100644, size: 3, mtime: 1 } },
+      { filename: 'sub\\\\..\\\\..\\\\evil.exe', attrs: { mode: 0o100644, size: 3, mtime: 1 } },
+      { filename: '.', attrs: { mode: 0o040755 } },
+    ]) };
+    const list = await fake.readdir('/export');
+    eq(list.map(e => e.name).join(','), 'A001_C001.mov', 'only the name that is a name survives');
+  }
+
+  // (d) 🔴 A checksum list is a file inside the folder, so it is data.
+  {
+    const { dir } = scratch();
+    const nfs = new NativeFs();
+    fs.writeFileSync(path.join(dir, 'clip.mov'), 'x');
+    fs.writeFileSync(path.join(dir, 'syncto-checksums.txt'),
+      '# syncto checksum list\n# algorithm: xxh64\n' +
+      '9a0a1b2c3d4e5f60  ../../../../etc/hosts\n' +
+      '9a0a1b2c3d4e5f60  clip.mov\n');
+    const { verifyFolder } = require('../src/main/core/session');
+    const { FsPool } = require('../src/main/fs/afs');
+    const pool = new FsPool();
+    const res = await verifyFolder(pool, dir, { token: {} });
+    await pool.closeAll();
+    const escaped = res.results.find(r => /etc\/hosts/.test(r.rel));
+    ok(escaped && escaped.status === 'error' && /outside the folder/.test(escaped.error || ''),
+       'an entry that points outside is refused, not hashed');
+  }
+
+  // (e) 🔴 Who is answering on that address. First connection remembers the
+  //     key; a different key stops the handshake BEFORE the password is sent.
+  {
+    const { dir } = scratch();
+    const remote = path.join(dir, 'server');
+    fs.mkdirSync(remote, { recursive: true });
+    const srv = await startSftpServer({ root: remote });
+    const seen = [];
+    setHostKeyPolicy({ known: () => null, remember: (h, p, fp) => seen.push(fp) });
+    const one = new SftpFs({ host: srv.host, port: srv.port, username: srv.username, password: srv.password });
+    await one.connect();
+    await one.close();
+    eq(seen.length, 1, 'the first connection writes the identity down');
+    ok(/^SHA256:[A-Za-z0-9+/]{20,}$/.test(seen[0]), `and it is a fingerprint (${seen[0].slice(0, 20)}…)`);
+
+    setHostKeyPolicy({ known: () => 'SHA256:somethingelsethatisnotthiskey', remember: () => {} });
+    const two = new SftpFs({ host: srv.host, port: srv.port, username: srv.username, password: srv.password });
+    let err = null;
+    try { await two.connect(); } catch (e) { err = e; }
+    try { await two.close(); } catch (_) {}
+    ok(err, 'a server whose key changed is refused');
+    ok(err && err.hostKeyChanged && /identity of .* has changed/.test(err.message),
+       'and the message says so, with both fingerprints');
+
+    // The same key again: nothing to report, the connection just works.
+    setHostKeyPolicy({ known: () => seen[0], remember: () => {} });
+    const three = new SftpFs({ host: srv.host, port: srv.port, username: srv.username, password: srv.password });
+    await three.connect();
+    ok(true, 'the key it already knows is accepted in silence');
+    await three.close();
+    setHostKeyPolicy(null);
+    await srv.close();
+  }
+
+  // (f) Forgetting a server forgets its identity: the one deliberate way to
+  //     accept a key that really did change.
+  {
+    const { Prefs } = require('../src/main/config');
+    const { dir } = scratch();
+    const prefs = new Prefs(dir);
+    prefs.load();
+    const saved = prefs.saveServer({ name: 'NAS', host: 'nas.local', port: 22, username: 'noar', savePassword: false });
+    prefs.rememberHostKey('nas.local', 22, 'SHA256:abc');
+    eq(prefs.knownHostKey('nas.local', 22), 'SHA256:abc', 'an identity is remembered per host and port');
+    eq(prefs.knownHostKey('nas.local', 2222), null, 'another port is another machine');
+    prefs.removeServer(saved.server.id);
+    eq(prefs.knownHostKey('nas.local', 22), null, 'forgetting the server forgets the key');
+    ok(!/password/i.test(JSON.stringify(prefs.data.knownHosts || {})), 'a fingerprint is not a secret, and no secret is near it');
+  }
+
+  // (g) 🔴 The database sits inside the synchronized folder, so its size is
+  //     not ours to trust.
+  {
+    const { dir } = scratch();
+    const nfs = new NativeFs();
+    const notes = [];
+    fs.writeFileSync(path.join(dir, '.syncto.db'), Buffer.alloc(17 * 1024 * 1024, 0x41));
+    const db = await require('../src/main/core/db').readDb(nfs, dir, m => notes.push(m));
+    eq(db, null, 'a file too large to be a database is not read');
+    ok(notes.some(n => /larger than/.test(n)), 'and it is reported as damaged, not as absent');
+  }
+
+  // (h) The window may name a lock to clear. It may not name anything else.
+  {
+    const { isLockFileName, LOCK_NAME } = require('../src/main/core/lock');
+    ok(isLockFileName(LOCK_NAME), 'a lock file');
+    ok(isLockFileName(`Delete.0.${LOCK_NAME}`) && isLockFileName(`Delete.1.Delete.0.${LOCK_NAME}`), 'and its corpses, nested');
+    for (const bad of [`Delete.0.${LOCK_NAME}/../../thesis.docx`, `Delete.0.${LOCK_NAME}.mov`, 'notes.txt', '', `x${LOCK_NAME}`])
+      ok(!isLockFileName(bad), `not ${JSON.stringify(bad)}`);
+  }
+
+  // (i) The main process, read as a document: the three channels the audit
+  //     said were wider than they need to be.
+  {
+    const main = fs.readFileSync(path.join(root, 'src/main/main.js'), 'utf8');
+    ok(/sandbox: true/.test(main), 'the renderer runs inside the OS sandbox');
+    ok(/OPENABLE\s*=\s*new Set/.test(main) && /open-path[\s\S]{0,700}OPENABLE\.has/.test(main),
+       'open-path opens a document or a folder, not whatever it is handed');
+    ok(/sameServer\s*\?\s*cfg\.token\s*:\s*''/.test(main),
+       'and the stored ntfy token never travels to a server the window named');
+    const ent = fs.readFileSync(path.join(root, 'build-resources/entitlements.mac.plist'), 'utf8');
+    ok(!/<key>com\.apple\.security\.cs\.disable-library-validation<\/key>/.test(ent),
+       'the signed app no longer accepts unsigned libraries');
+  }
+}
+
+
+// ══ 44. What the audit of 0.7.4 found in the engine (0.8.0) ══════════════
+// Seven defects, each reproduced before it was fixed. They share one shape:
+// the run went on and REPORTED success while something it promised had not
+// happened.
+async function testAuditFixes080() {
+  console.log('\n\n44. The engine defects the audit found (0.8.0)');
+  const { startSftpServer } = require('./sftp-server');
+  const { SftpFs } = require('../src/main/fs/sftp');
+  const { createHasher, hashStream } = require('../src/main/core/hash');
+  const nfs = new NativeFs();
+
+  // (a) 🔴 Fail-safe off + a link where the file goes = writing THROUGH it.
+  //     The master the link pointed at — outside both folders — was
+  //     overwritten, and the run said only "Size mismatch after copy".
+  {
+    const { dir, L, R } = scratch();
+    const outside = path.join(dir, 'outside');
+    fs.mkdirSync(outside, { recursive: true });
+    const master = path.join(outside, 'MASTER.mov');
+    fs.writeFileSync(master, 'THE ONLY MASTER — 30 minutes of rushes');
+    write(L, 'A001_C001.mov', 'new proxy, much shorter');
+    fs.symlinkSync(master, path.join(R, 'A001_C001.mov'));
+
+    const job = makeJob(L, R, { sync: { variant: 'mirror', failSafe: false, deletion: 'permanent' } });
+    const { run } = await runPair(job);
+    eq(fs.readFileSync(master, 'utf8'), 'THE ONLY MASTER — 30 minutes of rushes',
+       'the file the link pointed at is untouched');
+    eq(fs.readFileSync(path.join(R, 'A001_C001.mov'), 'utf8'), 'new proxy, much shorter',
+       'and the copy landed where it was meant to');
+    ok(!fs.lstatSync(path.join(R, 'A001_C001.mov')).isSymbolicLink(), 'the link itself is gone');
+    eq(run.errors.length, 0, 'with no error to explain away');
+  }
+
+  // (b) 🔴 A root that vanishes between the comparison and Synchronize. It
+  //     was re-created — on the startup disk, under the mount point — and the
+  //     run copied into it and reported success.
+  {
+    const { dir, L } = scratch();
+    const mount = path.join(dir, 'Volumes', 'RAID', 'Project');
+    fs.mkdirSync(mount, { recursive: true });
+    write(L, 'A001_C001.mov', 'clip one');
+    write(L, 'A001_C002.mov', 'clip two');
+    const job = makeJob(L, mount, { sync: { variant: 'mirror' } });
+    const s = new Session();
+    const token = { cancelled: false, paused: false };
+    await s.compare(job, { token });
+    // The cable goes.
+    fs.rmSync(path.join(dir, 'Volumes'), { recursive: true, force: true });
+    let err = null;
+    try { await s.sync(job, { token, appVersion: 'test' }); } catch (e) { err = e; }
+    await s.close();
+    ok(err && /no longer there/i.test(err.message), 'the run refuses');
+    ok(!fs.existsSync(mount), 'and nothing was re-created on the disk underneath');
+  }
+
+  // (c) 🔴 One checksum mismatch used to end the whole read-back pass — and
+  //     every file already copied was written into the database as
+  //     synchronized, so no later run ever looked at them again.
+  {
+    const { dir, L, R } = scratch();
+    for (let i = 1; i <= 6; i++) write(L, `A001_C00${i}.mov`, `clip ${i} `.repeat(64));
+    const job = makeJob(L, R, { sync: { variant: 'mirror', ignoreErrors: false, retryCount: 0 } });
+
+    // Corrupt exactly one file the moment it has been copied, so its read-back
+    // fails while the five others are perfectly good.
+    const { SyncRunner } = require('../src/main/core/sync');
+    const realCopy = SyncRunner.prototype.copyOne;
+    SyncRunner.prototype.copyOne = async function (item, lane) {
+      const res = await realCopy.call(this, item, lane);
+      if (item.n.rel === 'A001_C003.mov') fs.writeFileSync(path.join(R, item.n.rel), 'corrupted');
+      return res;
+    };
+    let run;
+    try { ({ run } = await runPair(job)); } finally { SyncRunner.prototype.copyOne = realCopy; }
+
+    eq(run.verified, 5, 'the five good files are read back');
+    eq(run.errors.length, 1, 'and the corrupt one is the only error');
+    const db = await require('../src/main/core/db').readDb(nfs, R, () => {});
+    const names = Object.values(db.sessions || {}).flatMap(x => Object.keys(x.items || {}));
+    ok(!names.includes('A001_C003.mov'), 'the file that failed is not recorded as synchronized');
+    eq(names.filter(n => /A001_C00/.test(n)).length, 5, 'and the five proven ones are');
+  }
+
+  // (d) 🔴 The report could never say "failed verification": it read a key
+  //     the payload did not carry, so it printed the green "Not one differed"
+  //     over a run that had found corruption.
+  {
+    const { buildReport, toHtml } = require('../src/main/core/report');
+    const rep = buildReport({
+      pairName: 'PROJET', leftPath: '/a', rightPath: '/b', variant: 'mirror',
+      compareVariant: 'timeSize', startedAt: 1, endedAt: 2, stats: {},
+      run: {
+        results: [{ rel: 'c1', ok: true }],
+        counters: { files: 5, bytes: 10 }, verified: 3, notes: [],
+        errors: [{ rel: 'c2', message: 'Checksum mismatch (xxh64).' },
+                 { rel: 'c3', message: 'Checksum mismatch (xxh64).' }],
+      },
+    });
+    eq(rep.errors.length, 2, 'the run’s errors reach the report');
+    const html = toHtml(rep);
+    ok(/2 files failed verification/.test(html), 'and the banner says so');
+    ok(!/Not one differed/.test(html), 'instead of claiming the opposite');
+  }
+
+  // (e) 🔴 A server that caps its READs. A short reply is not the end of the
+  //     file — reading it as one left a hole in every chunk, ended the stream
+  //     cleanly, and turned good files into "checksum mismatch" for ever.
+  {
+    const { dir } = scratch();
+    const remote = path.join(dir, 'server');
+    fs.mkdirSync(remote, { recursive: true });
+    // A non-repeating pattern: zeros would hide both a hole and a swap.
+    const big = Buffer.alloc(160 * 1024);
+    for (let i = 0; i < big.length; i += 4) big.writeUInt32BE(i, i);
+    fs.writeFileSync(path.join(remote, 'A001_C001.mov'), big);
+
+    const srv = await startSftpServer({ root: remote, readCap: 16 * 1024 });
+    const sftp = new SftpFs({ host: srv.host, port: srv.port, username: srv.username, password: srv.password });
+    await sftp.connect();
+    const chunks = [];
+    await new Promise((res, rej) => {
+      const rs = sftp.createReadStream('/A001_C001.mov');
+      rs.on('data', c => chunks.push(c));
+      rs.on('error', rej);
+      rs.on('end', res);
+    });
+    const got = Buffer.concat(chunks);
+    eq(got.length, big.length, 'every byte arrives from a server that caps its reads');
+    ok(got.equals(big), 'in the right order, with no hole');
+    await sftp.close();
+    await srv.close();
+  }
+
+  // (f) 🔴 PAUSE during the read-back. The copy pass has honoured it inside a
+  //     file since 0.6.4; the verification never did.
+  {
+    const { dir } = scratch();
+    const big = path.join(dir, 'big.mov');
+    fs.writeFileSync(big, Buffer.alloc(48 * 1024 * 1024, 7));
+    const token = { cancelled: false, paused: false };
+    let bytes = 0, atPause = 0, pressedOnce = false;
+    const hasher = await createHasher('xxh64');
+    const p = hashStream(nfs, big, hasher, b => {
+      bytes += b;
+      // Once. Re-arming it here would pause the stream again the instant it
+      // was released, which looks exactly like a hang.
+      if (!pressedOnce && bytes > 2 * 1024 * 1024) { pressedOnce = true; token.paused = true; atPause = bytes; }
+    }, token);
+    await new Promise(r => setTimeout(r, 400));
+    const afterHold = bytes;
+    // The slack is generous on purpose: the point is that the stream STOPS,
+    // not how many buffered chunks were already in flight when it did. A
+    // threshold tight enough to measure that would fail on a loaded machine,
+    // and a test that fails at random is worse than no test.
+    ok(afterHold - atPause < 16 * 1024 * 1024, `the read really stops (${afterHold - atPause} B went past the pause)`);
+    ok(afterHold < 48 * 1024 * 1024, 'and the file is not finished behind the paused label');
+    token.paused = false;
+    await p;
+    eq(bytes, 48 * 1024 * 1024, 'releasing it reads the rest');
+  }
+
+  // (g) 🔴 Cancelling "Verify folder" accused an intact file of a mismatch.
+  {
+    const { dir } = scratch();
+    const folder = path.join(dir, 'RUSHES');
+    fs.mkdirSync(folder, { recursive: true });
+    for (let i = 1; i <= 3; i++) fs.writeFileSync(path.join(folder, `c${i}.mov`), Buffer.alloc(24 * 1024 * 1024, i));
+    const { FsPool } = require('../src/main/fs/afs');
+    const { verifyFolder } = require('../src/main/core/session');
+    const pool = new FsPool();
+    // Write the list the way syncto does, then check it while cancelling.
+    const { formatChecksumList } = require('../src/main/core/hash');
+    const entries = [];
+    for (let i = 1; i <= 3; i++) {
+      const h = await createHasher('xxh64');
+      entries.push({ rel: `c${i}.mov`, hash: await hashStream(nfs, path.join(folder, `c${i}.mov`), h, null, {}), size: 3 * 1024 * 1024 });
+    }
+    fs.writeFileSync(path.join(folder, 'syncto-checksums.txt'), formatChecksumList('xxh64', entries, {}));
+    const token = { cancelled: false };
+    const res = await (async () => {
+      const running = verifyFolder(pool, folder, { token, onProgress: () => {} });
+      // Inside the first file, not between two: that is where the exception
+      // was being read as a verdict on the file.
+      setTimeout(() => { token.cancelled = true; }, 5);
+      return running;
+    })();
+    await pool.closeAll();
+    ok(res.verified < 3, `the check really was interrupted (${res.verified} of 3 done)`);
+    eq(res.mismatched, 0, 'a cancelled check accuses nobody');
+    ok(!res.results.some(r => r.status === 'error'), 'and leaves no red row behind');
+
+    // And the same rule in the run itself: a file copied but not read back is
+    // kept OUT of the database, so the next run looks at it again.
+    {
+      const { SyncRunner } = require('../src/main/core/sync');
+      const r = Object.create(SyncRunner.prototype);
+      r.token = { cancelled: false };
+      r.notes = [];
+      r.applied = new Map([['c1.mov', { ok: true }], ['c2.mov', { ok: true }]]);
+      r.toVerify = [{ rel: 'c1.mov', ok: true }, { rel: 'c2.mov', ok: false }];
+      eq(r.dropUnproven(), 1, 'the unproven file is counted');
+      ok(r.applied.has('c1.mov') && !r.applied.has('c2.mov'), 'and only it is dropped from the database');
+      ok(/not read back/.test(r.notes[0] || ''), 'with a note saying why');
+      const c = Object.create(SyncRunner.prototype);
+      c.token = { cancelled: true }; c.notes = []; c.applied = new Map([['c1.mov', { ok: true }]]);
+      c.toVerify = [{ rel: 'c1.mov', ok: false }];
+      eq(c.dropUnproven(), 0, 'cancelling is not a failure of proof');
+    }
+  }
+
+  // (h) The checksum list is keyed by the side's own spelling of a name, so a
+  //     deleted accented file used to keep its line on macOS.
+  {
+    const { L, R } = scratch();
+    write(L, 'Café.mov', 'x');          // decomposed, the way a Mac writes it
+    const job = makeJob(L, R, { sync: { variant: 'mirror', writeChecksumList: true } });
+    await runPair(job);
+    fs.rmSync(path.join(L, 'Café.mov'));
+    await runPair(job);
+    const list = fs.readFileSync(path.join(R, 'syncto-checksums.txt'), 'utf8');
+    ok(!/Caf/.test(list), 'a deleted file leaves no line behind, whatever its spelling');
+  }
+}
+
+
+// ══ 45. The cost of the things people wait for (0.8.0) ═══════════════════
+// Measured before and after on a 10 440-item tree: the scan 606 → 238 ms
+// locally and 1 874 → 191 ms with 1 ms of latency on every call (which is
+// what a NAS mount is), 200 scroll fetches 165 → 8 ms, the heap 22 → 17 MB.
+// Timings do not belong in a test suite — these are the structural facts the
+// gains rest on, so they cannot quietly come back.
+async function testPerformance() {
+  console.log('\n\n45. What makes the waiting shorter (0.8.0)');
+  const { NativeFs, SCAN_LANES } = require('../src/main/fs/native');
+  const { applyFolderRules } = require('../src/main/core/direction');
+
+  // (a) The scan asks about several entries at once, and keeps the order the
+  //     directory gave. Order matters: the comparison reports the FIRST of two
+  //     names that differ only by case.
+  {
+    const { dir } = scratch();
+    const folder = path.join(dir, 'CARD_A');
+    fs.mkdirSync(folder, { recursive: true });
+    const names = [];
+    for (let i = 0; i < 40; i++) { names.push(`A${String(i).padStart(3, '0')}.MXF`); fs.writeFileSync(path.join(folder, names[names.length - 1]), 'x'); }
+
+    const realLstat = fs.promises.lstat;
+    let live = 0, peak = 0;
+    fs.promises.lstat = async (...a) => {
+      live++; peak = Math.max(peak, live);
+      try { await new Promise(r => setTimeout(r, 2)); return await realLstat(...a); }
+      finally { live--; }
+    };
+    let list;
+    try { list = await new NativeFs().readdir(folder); }
+    finally { fs.promises.lstat = realLstat; }
+
+    ok(peak > 1, `several entries are in flight at once (${peak} at the peak)`);
+    ok(peak <= SCAN_LANES, `and no more than ${SCAN_LANES}`);
+    eq(list.length, 40, 'every entry comes back');
+    eq(list.map(e => e.name).join(','), fs.readdirSync(folder).join(','),
+       'in the order the directory gave them');
+  }
+
+  // (b) A folder is created once, not once per file in it.
+  {
+    const { dir } = scratch();
+    const nfs = new NativeFs();
+    const deep = path.join(dir, 'DEST', 'DAY1', 'CARD_A');
+    const realMkdir = fs.promises.mkdir;
+    let calls = 0;
+    fs.promises.mkdir = (...a) => { calls++; return realMkdir(...a); };
+    try {
+      for (let i = 0; i < 25; i++) await nfs.mkdir(deep);
+      eq(calls, 1, 'twenty-five files in one folder ask for it once');
+      await nfs.rmdir(deep);
+      await nfs.mkdir(deep);
+      eq(calls, 2, 'and a folder that was removed is created again');
+    } finally { fs.promises.mkdir = realMkdir; }
+  }
+
+  // (c) Scrolling does not walk the tree again. The window asks for sixty rows
+  //     at a time, sixty to a hundred and twenty times a second.
+  {
+    const { L, R } = scratch();
+    for (let i = 0; i < 200; i++) write(L, `DAY1/A${i}.mov`, 'x');
+    const s = new Session();
+    await s.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: {} });
+
+    let built = 0;
+    const real = Object.getPrototypeOf(s)._computeVisible;
+    Object.getPrototypeOf(s)._computeVisible = function (...a) { built++; return real.apply(this, a); };
+    try {
+      const view = { showEqual: true };
+      for (let i = 0; i < 50; i++) s.rows(i, 60, view);
+      eq(built, 1, 'fifty scroll fetches walk the tree once');
+      s.rows(0, 60, { showEqual: true, search: 'A1' });
+      eq(built, 2, 'a change of view builds it again');
+      s.setActive([3], false);
+      s.rows(0, 60, view);
+      eq(built, 3, 'and so does editing a row');
+    } finally { Object.getPrototypeOf(s)._computeVisible = real; }
+    await s.close();
+  }
+
+  // (d) Who is whose child does not change between two comparisons.
+  {
+    const nodes = [
+      { idx: 0, parent: -1, type: 'folder', rel: 'A', op: 'none', left: {}, right: {} },
+      { idx: 1, parent: 0, type: 'file', rel: 'A/x', op: 'none', left: {}, right: {} },
+    ];
+    applyFolderRules(nodes);
+    const before = process.memoryUsage().heapUsed;
+    for (let i = 0; i < 2000; i++) applyFolderRules(nodes);
+    ok(process.memoryUsage().heapUsed - before < 12 * 1024 * 1024,
+       'two thousand passes do not rebuild the map each time');
+  }
+
+  // (e) The run reports itself on a clock, not once per file. Forced events
+  //     were two per file whatever the rate, and the window rebuilt its step
+  //     chips and its sparkline on every one.
+  {
+    const { L, R } = scratch();
+    for (let i = 0; i < 120; i++) write(L, `A${i}.mov`, 'x');
+    const s = new Session();
+    const token = { cancelled: false, paused: false };
+    const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+    await s.compare(job, { token });
+    let events = 0;
+    await s.sync(job, { token, appVersion: 'test', onProgress: p => { if (p.phase === 'sync') events++; } });
+    await s.close();
+    ok(events < 120, `120 files produced ${events} progress events, not one or two each`);
+    ok(events > 0, 'and the window still hears about the run');
+  }
+
+  // (f) Three copies of every path is 100 MB on a large job, and two of them
+  //     are the same string.
+  {
+    const { L, R } = scratch();
+    write(L, 'DAY1/A001.mov', 'x');
+    const s = new Session();
+    await s.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: {} });
+    const n = s.nodes.find(x => x.rel === 'DAY1/A001.mov');
+    eq(n.relL, null, 'a side that spells a name like the key stores nothing');
+    eq(n.relR, null, 'on either side');
+    await s.close();
+  }
+
+  // (g) The window's own share, read as a document.
+  {
+    const app = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.js'), 'utf8');
+    ok(/scrollFrame = requestAnimationFrame/.test(app), 'one row fetch per frame, not one per scroll event');
+    ok(/state\.rows\.clear\(\);\s*\n\s*res\.rows\.forEach/.test(app), 'and the row map holds the window, not the whole comparison');
+    ok(/if \(shape !== stepsShape\)/.test(app), 'the step chips are built once per run');
+    ok(/lastSpeedAt/.test(app), 'and the throughput line is sampled on a clock');
+  }
+}
+
+
+// ══ 46. What the window says it does (0.8.0) ═════════════════════════════
+// The audit's interface findings. They are all the same defect wearing
+// different clothes: the screen stating something the engine does not do.
+function testWindowTruth() {
+  console.log('\n\n46. What the window says it does (0.8.0)');
+  const root = path.join(__dirname, '..');
+  const app  = fs.readFileSync(path.join(root, 'src/renderer/app.js'), 'utf8');
+  const html = fs.readFileSync(path.join(root, 'src/renderer/index.html'), 'utf8');
+
+  // (a) 🔴 The unattended run is the one that must reach the phone.
+  {
+    const auto = app.slice(app.indexOf('async function autoRun()'), app.indexOf('function notifyRunFailed'));
+    ok(/notifyRunFailed\(res\.error\)/.test(auto),
+       'a failed auto-sync sends the notification the settings promise');
+  }
+
+  // (b) 🔴 "verified copy" was printed whatever the folders and whatever the
+  //     setting, and the summary said the opposite two hours later. The real
+  //     function is lifted out and run, rather than its source being read.
+  {
+    const src = app.slice(app.indexOf('function verificationPhrase()'));
+    const body = src.slice(0, src.indexOf('\n}\n') + 3);
+    // The function reads `state` and `completePairs` from the module it lives
+    // in; here they are these two, which eval() closes over.
+    let state = null;
+    let pairs = [];
+    const completePairs = () => pairs;
+    // eslint-disable-next-line no-eval
+    const phrase = eval(`(${body.replace('function verificationPhrase()', 'function ()')})`);
+    const call = (ps, verifyRemote) => {
+      pairs = ps;
+      state = { job: { sync: { verifyRemote } } };
+      return phrase();
+    };
+    const local = [{ left: '/a', right: '/b' }];
+    const remote = [{ left: '/a', right: 'sftp://nas/export' }];
+    const bothRemote = [{ left: 'sftp://nas/a', right: 'sftp://nas/b' }];
+    eq(call(local, false), 'verified copy (xxHash64)', 'two local folders: verified, whatever the server setting says');
+    eq(call(remote, true), 'verified copy (xxHash64)', 'a server with the read-back on: verified');
+    ok(/NOT read back/.test(call(remote, false)), 'a server with it off: the window says so BEFORE the run');
+    ok(/NOT read back/.test(call(bothRemote, false)), 'and on both sides too');
+    ok(state !== null, 'the phrase was built from a job, not from a guess');
+  }
+
+  // (c) The auto-sync card said "twoWay", a word the interface never shows.
+  {
+    ok(/const VARIANT_LABEL = \{ twoWay: 'Two way'/.test(app), 'the mode names live in one place');
+    const card = app.slice(app.indexOf("$('auto-cf-sub').textContent"), app.indexOf("$('ov-auto').classList.add('open')"));
+    ok(/VARIANT_LABEL\[state\.job\.sync\.variant\]/.test(card), 'and the auto-sync card uses them');
+    ok(/verificationPhrase\(\)/.test(card), 'with the same honest phrase about the read-back');
+  }
+
+  // (d) 🔴 The filter help described a rule the engine does not apply. The
+  //     engine is asked here, not the text.
+  {
+    const f = new PathFilter('*', 'Proxies/Low');
+    ok(!f.passFile('Proxies/Low/x.mov'), 'a pattern with a slash excludes it at the top of the pair');
+    ok(f.passFile('Rushes/A001/Proxies/Low/x.mov'),
+       'and NOT deeper down — which is what the window now says');
+    const g = new PathFilter('*', '*/Proxies/Low');
+    ok(!g.passFile('Rushes/Proxies/Low/x.mov'), 'reaching deeper takes a leading */');
+    ok(/A <code>\/<\/code> anywhere in it/.test(html), 'and the help says exactly that');
+    ok(!/Starts with <code>\/<\/code><\/b> → it matches one exact path/.test(html), 'the old wording is gone');
+  }
+
+  // (e) Escape closes the context menu, the one floating surface it missed.
+  {
+    const esc = app.slice(app.indexOf("document.addEventListener('keydown'"), app.indexOf("bindServerDialog()"));
+    ok(/if \(e\.key === 'Escape'\) closeCtx\(\);/.test(esc), 'Escape closes the right-click menu');
+  }
+
+  // (f) A chip that looks clickable does something.
+  {
+    ok(/chip\('', 'excluded', s\.excluded, 'excluded', 'view'\)/.test(app), 'the excluded count carries a key');
+    ok(/kind === 'view' && key === 'excluded'/.test(app), 'the handler knows what to do with it');
+    ok(/kind === 'view' && key === 'excluded' && !!state\.view\.showExcluded/.test(app),
+       'and it lights up while those rows are showing');
+  }
+
+  // (g) SOURCE and DESTINATION are grey labels; no state colour is spent on
+  //     naming a side. An inline style is also out of the charte's reach.
+  {
+    ok(!/srv-sub'\)\.innerHTML = `This becomes the <span style="color:var\(--/.test(app),
+       'the server window no longer paints the side blue or green');
+  }
+
+  // (h) Classes nothing emits any more.
+  for (const dead of ['.bf{', '.bn{', '.bs{', '.stat.v{', '.mdesc{'])
+    ok(!html.includes(dead), `${dead.slice(0, -1)} is gone`);
+
+  // (i) The pause button is not offered while nothing can be paused.
+  {
+    const at = app.indexOf('async function doCompareQuiet()');
+    const quiet = app.slice(at, app.indexOf('\nasync function ', at + 10));
+    ok(/btn-pause'\)\.style\.display = 'none'/.test(quiet), 'the re-comparison hides Pause');
+    ok(/btn-pause'\)\.style\.display = ''/.test(quiet), 'and gives it back afterwards');
+  }
+}
+
 (async function main() {
   console.log('syncto engine tests');
   console.log('scratch: ' + ROOT);
   try {
-    testFilter();
-    await testCompare();
-    await testMirror();
-    await testUpdate();
-    await testTwoWay();
-    await testSecure();
-    await testVersioning();
-    await testFailSafe();
-    await testOverrides();
-    await testFolderRules();
-    await testMoves();
-    await testMovesTwoWayAndOff();
-    await testMultiPair();
-    await testLocking();
-    await testReviewRegressions();
-    await testAuditFixes();
-    await testOverviewAndShowEqual();
-    testServers();
-    await testNasRegression();
-    await testAfterAndNtfy();
-    testNtfySecrets();
-    await testSingleCopyMode();
-    await testAudit051();
-    await testAudit051Engine();
-    await testOsFolderLitter();
-    testAppleCommandLines();
-    await testProgressAndReveal();
-    await testBundlesAndCopyLog();
-    await testInSyncPairs();
-    testCloseJob();
-    await testMissingRootWithHistory();
-    await testCheckJobPaths();
-    await testLockTolerance();
-    testLog();
-    await testSftpTransfer();
-    await testOverviewTree();
-    await testOverviewSortAndBatch();
-    testNarrowedViewAndRunUi();
-    await testRunFiguresAndLogPerProcess();
-    await testSftpSpeed();
-    testIpcArity();
-    testCharte();
+    // One entry per section, so a single one can be run on its own:
+    //   SYNCTO_ONLY=testCharte,testSecurity node test/run-tests.js
+    // Checking a guard by breaking the code on purpose used to mean a full
+    // four-minute suite per mutation; this makes it seconds.
+    const SECTIONS = [
+  testFilter,
+  testCompare,
+  testMirror,
+  testUpdate,
+  testTwoWay,
+  testSecure,
+  testVersioning,
+  testFailSafe,
+  testOverrides,
+  testFolderRules,
+  testMoves,
+  testMovesTwoWayAndOff,
+  testMultiPair,
+  testLocking,
+  testReviewRegressions,
+  testAuditFixes,
+  testOverviewAndShowEqual,
+  testServers,
+  testNasRegression,
+  testAfterAndNtfy,
+  testNtfySecrets,
+  testSingleCopyMode,
+  testAudit051,
+  testAudit051Engine,
+  testOsFolderLitter,
+  testAppleCommandLines,
+  testProgressAndReveal,
+  testBundlesAndCopyLog,
+  testInSyncPairs,
+  testCloseJob,
+  testMissingRootWithHistory,
+  testCheckJobPaths,
+  testLockTolerance,
+  testLog,
+  testSftpTransfer,
+  testOverviewTree,
+  testOverviewSortAndBatch,
+  testNarrowedViewAndRunUi,
+  testRunFiguresAndLogPerProcess,
+  testSftpSpeed,
+  testIpcArity,
+  testCharte,
+  testSecurity,
+  testAuditFixes080,
+  testPerformance,
+  testWindowTruth,
+    ];
+    const only = (process.env.SYNCTO_ONLY || '').split(',').map(x => x.trim()).filter(Boolean);
+    for (const section of SECTIONS) {
+      if (only.length && !only.includes(section.name)) continue;
+      await section();
+    }
   } catch (err) {
     failed++;
     failures.push('UNCAUGHT: ' + (err.stack || err.message));
