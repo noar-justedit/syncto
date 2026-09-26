@@ -47,7 +47,18 @@ function startSftpServer(opts) {
   const pass = opts.password || 'secret';
 
   // Generated per run: nothing here is a credential anyone could reuse.
-  const key = utils.generateKeyPairSync('ed25519');
+  //
+  // ssh2's own generator produces a key its own parser rejects about four
+  // times in a thousand ("Malformed OpenSSH private key"). The suite starts
+  // eight servers, so one run in thirty died on it — the intermittent failure
+  // that went unnamed until each section got its own try. Generated again
+  // until it parses; the product never generates keys, only this test does.
+  let key = null;
+  for (let tries = 0; tries < 20; tries++) {
+    const k = utils.generateKeyPairSync('ed25519');
+    if (!(utils.parseKey(k.private) instanceof Error)) { key = k; break; }
+  }
+  if (!key) throw new Error('could not generate a usable host key for the test server');
 
   // Every reply is delayed by the same amount, which is what a round trip is.
   const later = fn => (latencyMs ? setTimeout(fn, latencyMs) : setImmediate(fn));

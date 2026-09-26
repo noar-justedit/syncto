@@ -48,9 +48,30 @@ function store() {
 // False on a machine whose keyring cannot be reached (a fresh Linux session
 // with no desktop keyring, mostly). Callers must then decline to remember the
 // password rather than fall back to writing it down — see Prefs.saveServer.
+//
+// ⚠️ LINUX: with no keyring running (no GNOME Keyring, no KWallet — a bare
+// window manager, a server session), Electron does NOT say "unavailable". It
+// falls back to its 'basic_text' backend, which "encrypts" with a key written
+// in Electron's own source code, and isEncryptionAvailable() answers true.
+// That is a password in clear by another name, so it is refused here exactly
+// like no store at all: the window then says the password cannot be
+// remembered and asks for it at each connection.
+const WEAK_LINUX_BACKENDS = new Set(['basic_text', 'unknown']);
+
+function linuxBackend(s) {
+  if (process.platform !== 'linux') return null;
+  try { return s && s.getSelectedStorageBackend ? s.getSelectedStorageBackend() : 'unknown'; }
+  catch (_) { return 'unknown'; }
+}
+
 function available() {
   const s = store();
-  try { return !!(s && s.isEncryptionAvailable()); } catch (_) { return false; }
+  try {
+    if (!(s && s.isEncryptionAvailable())) return false;
+    const backend = linuxBackend(s);
+    if (backend && WEAK_LINUX_BACKENDS.has(backend)) return false;
+    return true;
+  } catch (_) { return false; }
 }
 
 // Returns a base64 blob to store, or null when nothing can be stored safely.
@@ -70,4 +91,4 @@ function decrypt(blob) {
   catch (_) { return ''; }
 }
 
-module.exports = { available, encrypt, decrypt };
+module.exports = { available, encrypt, decrypt, WEAK_LINUX_BACKENDS };

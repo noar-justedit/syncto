@@ -106,14 +106,50 @@ nsis:
   shortcutName: syncto
   artifactName: "syncto-Setup-${version}.exe"
 
+# Built ON a Linux machine with scripts/build-linux.sh. electron-builder can
+# cross-build a Linux AppImage from a Mac, but the .deb it produces there is
+# not valid (ingesto learnt this the hard way), so Linux has its own script and
+# its own machine, like ingesto.
 linux:
   icon: build-resources/icons
-  category: Utility;
+  category: Utility
   maintainer: "Just Edit <contact@just-edit.fr>"
   vendor: "Just Edit"
   synopsis: "Folder comparison and synchronization"
-  description: "Compare and synchronize folders with checksum-verified copies, versioning and detailed reports."
+  description: "Compare and synchronize folders — local disks, network shares and SFTP servers — with checksum-verified copies, versioning, folder locks and detailed reports."
+  executableName: syncto
+  # The window and the menu entry have to share one name, or the desktop shows
+  # a running syncto as an anonymous second icon beside its own launcher.
+  syncDesktopName: true
+  desktop:
+    entry:
+      Name: syncto
+      Comment: Folder comparison and synchronization
+      Terminal: "false"
+      Type: Application
+      Categories: "Utility;FileTools;"
+      StartupWMClass: syncto
+  artifactName: "syncto-${version}-linux-${arch}.${ext}"
   target:
     - target: AppImage
       arch:
         - x64
+    - target: deb
+      arch:
+        - x64
+
+deb:
+  # What Electron needs on a Debian/Ubuntu machine, plus two that are syncto's:
+  #   libsecret-1-0 — the desktop keyring. Without a keyring syncto refuses to
+  #                   remember a server password rather than write it down.
+  #   xdg-utils     — "Reveal in file manager" and opening a report.
+  depends:
+    - libgtk-3-0
+    - libnotify4
+    - libnss3
+    - libxss1
+    - libxtst6
+    - xdg-utils
+    - libatspi2.0-0
+    - libsecret-1-0
+  artifactName: "syncto_${version}_${arch}.${ext}"

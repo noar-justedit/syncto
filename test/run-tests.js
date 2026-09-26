@@ -5146,6 +5146,75 @@ function testWindowTruth() {
   }
 }
 
+
+// ══ 47. Linux: AppImage and .deb (0.8.2) ═════════════════════════════════
+// Built on a Linux machine by scripts/build-linux.sh, on ingesto's model. The
+// packages themselves were built, installed and launched in a container when
+// this section was written; what can regress quietly is checked here.
+function testLinux() {
+  console.log('\n\n47. Linux packages (0.8.2)');
+  const root = path.join(__dirname, '..');
+  const yml = fs.readFileSync(path.join(root, 'electron-builder.yml'), 'utf8');
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+  const linux = yml.slice(yml.indexOf('\nlinux:'), yml.indexOf('\ndeb:'));
+  const deb = yml.slice(yml.indexOf('\ndeb:'));
+
+  ok(/target: AppImage/.test(linux) && /target: deb/.test(linux), 'both an AppImage and a .deb are built');
+  ok(/icon: build-resources\/icons/.test(linux) && fs.existsSync(path.join(root, 'build-resources/icons/512x512.png')),
+     'from the icon set the SVG produces');
+  ok(/libsecret-1-0/.test(deb), 'the .deb pulls in the keyring library');
+  ok(pkg.desktopName === 'syncto.desktop' && /syncDesktopName: true/.test(linux),
+     'the running window and its launcher share one name');
+
+  // The script, as a person will run it.
+  {
+    const sh = fs.readFileSync(path.join(root, 'scripts/build-linux.sh'), 'utf8');
+    ok(/id -u\)" = "0"/.test(sh), 'the Linux build refuses to run as root');
+    ok(/node_ok\(\)/.test(sh) && /20\.19/.test(sh), 'and checks the Node version before anything');
+    ok(/npm test/.test(sh), 'it runs the test suite before packaging');
+    ok(/dpkg-deb -f dist\/\*\.deb Depends \| grep -q libsecret-1-0/.test(sh),
+       'and checks the dependency in the .deb it produced, not in the config');
+    ok(pkg.scripts['build:linux'] === 'bash scripts/build-linux.sh', 'npm run build:linux goes through it');
+  }
+
+  // 🔴 With no keyring, Electron on Linux answers "available" and encrypts with
+  //    a key written in its own source code. That is a password in clear by
+  //    another name, and syncto's rule is that a password never is.
+  {
+    const electronPath = require.resolve('electron');
+    const secretsPath = require.resolve('../src/main/secrets');
+    const realPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    const saved = require.cache[electronPath];
+    const load = backend => {
+      delete require.cache[secretsPath];
+      require.cache[electronPath] = { id: electronPath, filename: electronPath, loaded: true, exports: {
+        safeStorage: {
+          isEncryptionAvailable: () => true,
+          getSelectedStorageBackend: () => backend,
+          encryptString: s => Buffer.from('enc:' + s),
+          decryptString: b => String(b).slice(4),
+        },
+      } };
+      return require('../src/main/secrets');
+    };
+    try {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      const weak = load('basic_text');
+      ok(!weak.available(), 'Electron’s plain-text fallback is not accepted as a store');
+      eq(weak.encrypt('secret'), null, 'so nothing is encrypted with it');
+      ok(!load('unknown').available(), 'nor is an unknown backend');
+      ok(load('gnome_libsecret').available(), 'GNOME Keyring is');
+      ok(load('kwallet5').available(), 'and so is KWallet');
+      Object.defineProperty(process, 'platform', { value: 'darwin' });
+      ok(load('basic_text').available(), 'the check is Linux-only: the Keychain has no such fallback');
+    } finally {
+      Object.defineProperty(process, 'platform', realPlatform);
+      if (saved) require.cache[electronPath] = saved; else delete require.cache[electronPath];
+      delete require.cache[secretsPath];
+    }
+  }
+}
+
 (async function main() {
   console.log('syncto engine tests');
   console.log('scratch: ' + ROOT);
@@ -5201,6 +5270,7 @@ function testWindowTruth() {
   testAuditFixes080,
   testPerformance,
   testWindowTruth,
+  testLinux,
     ];
     const only = (process.env.SYNCTO_ONLY || '').split(',').map(x => x.trim()).filter(Boolean);
     // Each section on its own: an exception used to end the whole suite, so

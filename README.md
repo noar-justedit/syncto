@@ -6,6 +6,8 @@ FreeFileSync, rebuilt from scratch with the ingesto interface: progress ring,
 live throughput graph, ETA, a checksum-verified copy that reads every file back,
 and an exportable copy report.
 
+**macOS · Windows · Linux** (AppImage and `.deb`).
+
 Licensed under the **GNU General Public License v3.0** (see [`LICENSE`](./LICENSE)).
 
 ---
@@ -150,6 +152,24 @@ From a terminal, `./build.sh` at the project root does the same:
 | `./build.sh --all` | macOS arm64 and Windows x64 |
 | `./build.sh --dev` | run without building |
 | `./build.sh --test` | run the engine test suite |
+
+### Linux
+
+**Build Linux on Linux:** `bash scripts/build-linux.sh` on an Ubuntu, Debian or
+Pop!_OS machine. It checks Node (20.19 or newer — the `apt` one is too old, the
+script says how to get a current one), runs the test suite, and writes
+`dist/syncto-<version>-linux-x86_64.AppImage` and
+`dist/syncto_<version>_amd64.deb`. electron-builder can produce an AppImage
+from a Mac, but the `.deb` it makes there is not valid, so the Linux packages
+come from a Linux machine — the same rule as ingesto.
+
+- Install the `.deb`: `sudo apt install ./dist/syncto_*_amd64.deb`
+- Run the AppImage: `chmod +x syncto-*.AppImage && ./syncto-*.AppImage`. It
+  needs FUSE 2: `sudo apt install libfuse2t64` (`libfuse2` on 22.04 and older).
+- **Server passwords need a desktop keyring** (GNOME Keyring or KWallet). On a
+  session without one, Electron offers a "store" that is really plain text;
+  syncto refuses it and asks for the password at each connection instead of
+  writing it down.
 
 ### Test without building (dev mode)
 Install Node.js (Step 1), then double-click `scripts/dev.command`.
