@@ -90,7 +90,6 @@ function checkForUpdate() {
 }
 
 const { MultiSession, verifyFolder, checkJobPaths, clearStaleLocks } = require('./core/session');
-const { log } = require('./log');
 const { FsPool } = require('./fs/afs');
 const { Prefs, defaultJob, loadJob, saveJob, jobNameFromPath, JOB_EXT, credentialMap,
         pushRecent: addRecent, removeRecent } = require('./config');
@@ -141,10 +140,7 @@ function launchAnother() {
     const args = app.isPackaged ? [] : [app.getAppPath()];
     const child = spawn(process.execPath, args, { detached: true, stdio: 'ignore' });
     child.unref();
-    log.info('app', 'started another copy of syncto');
-  } catch (err) {
-    log.error('app', `could not start another copy: ${err.message || err}`);
-  }
+  } catch (_) { /* nothing to do: the user can open it by hand */ }
 }
 
 function createWindow() {
@@ -164,7 +160,7 @@ function createWindow() {
       // The renderer runs inside the OS sandbox. The preload only needs
       // ipcRenderer and webUtils.getPathForFile, both of which work there, so
       // nothing is given up for it — and a flaw in the page (reached through
-      // a file name, a server's error string, a rendered report) stays
+      // a file name or a server's error string) stays
       // contained instead of running with the user's own rights.
       sandbox: true,
     },
@@ -294,25 +290,9 @@ app.whenReady().then(() => {
     remember: (host, port, fp) => prefs.rememberHostKey(host, port, fp),
   });
 
-  // The journal, as early as possible: everything before this point is lost,
-  // so nothing important happens before it.
-  log.open(app.getPath('userData'), !!prefs.data.log);
-  log.header({
-    version : appVersion(),
-    platform: process.platform,
-    arch    : process.arch,
-    electron: process.versions.electron,
-    node    : process.versions.node,
-    userData: app.getPath('userData'),
-  });
-  logHeader = () => ({
-    version : appVersion(),
-    platform: process.platform,
-    arch    : process.arch,
-    electron: process.versions.electron,
-    node    : process.versions.node,
-    userData: app.getPath('userData'),
-  });
+  // The diagnostic journal went in 0.8.3. What an older version left in
+  // userData/logs (paths, server names) is removed rather than kept forever.
+  try { fs.rmSync(path.join(app.getPath('userData'), 'logs'), { recursive: true, force: true }); } catch (_) {}
   // lastJobPath was written on every open and save and read by nobody, so a
   // restart detached the settings from their file: the title said "not saved
   // yet" and Ctrl+S asked for a name again — which is exactly how an existing
@@ -347,10 +327,10 @@ async function trashItem(fsx, absPath) {
 
 // ── IPC: basics ────────────────────────────────────────────────────────────
 ipcMain.handle('get-version', () => appVersion());
-// NOT prefs.data: it carries servers[].passwordEnc and ntfy.tokenEnc. Those
-// blobs are decryptable by anything running as this user, so handing them to
-// the window is handing over the passwords — exactly what listServers() and
-// ntfyForUi() exist to prevent. The window gets everything else.
+// NOT prefs.data: it carries servers[].passwordEnc. Those blobs are
+// decryptable by anything running as this user, so handing them to the window
+// is handing over the passwords — exactly what listServers() exists to
+// prevent. The window gets everything else.
 ipcMain.handle('load-prefs',  () => {
   const d = Object.assign({}, prefs.data);
   d.servers = prefs.listServers();
@@ -481,25 +461,13 @@ ipcMain.handle('after-sync', async (_, action, clean) => {
 ipcMain.handle('ntfy-get',  () => prefs.ntfyForUi());
 ipcMain.handle('ntfy-save', (_, patch) => prefs.saveNtfy(patch || {}));
 
-// The token comes from the stored config, not from the window — the panel
-// never holds it. A token being typed right now is passed in `patch.token`.
 ipcMain.handle('ntfy-test', async (_, patch) => {
   const cfg = prefs.ntfyConfig();
   const p = patch || {};
-  // `undefined` means "not on screen, use what is stored"; an EMPTY string
-  // means the user cleared the box and wants it tested empty. Treating the two
-  // the same made "Test" pass with the old token still attached, right after
-  // the user had removed it.
   const pick = (a, b) => (a === undefined ? b : a);
-  const server = pick(p.server, cfg.server) || cfg.server;
-  // The stored token belongs to the stored server. Testing against a DIFFERENT
-  // server must not carry it there — that is how a token ends up in somebody
-  // else's log. A token typed in the window is used as typed, wherever it goes.
-  const sameServer = String(server).trim() === String(cfg.server || '').trim();
   return notify.send({
-    server,
+    server: pick(p.server, cfg.server) || cfg.server,
     topic : pick(p.topic,  cfg.topic),
-    token : p.token !== undefined ? p.token : (sameServer ? cfg.token : ''),
     title : 'syncto test',
     message: 'Test notification from syncto.',
     tags  : 'bell',
@@ -511,11 +479,9 @@ ipcMain.handle('ntfy-test', async (_, patch) => {
 ipcMain.handle('ntfy-run', async (_, res, jobName) => {
   const cfg = prefs.ntfyConfig();
   if (!cfg.enabled || !cfg.topic) return { ok: false, skipped: true };
-  const clean = !res.cancelled && !res.lockLost && !(res.errors || []).length;
-  if (cfg.onlyOnProblem && clean) return { ok: false, skipped: true };
   const msg = notify.forRun(res, jobName);
   return notify.sendWithRetry(Object.assign({
-    server: cfg.server, topic: cfg.topic, token: cfg.token,
+    server: cfg.server, topic: cfg.topic,
   }, msg));
 });
 
@@ -523,7 +489,7 @@ ipcMain.handle('reveal-path',  (_, p) => { try { shell.showItemInFolder(p); } ca
 // What syncto itself produces, and folders. `shell.openPath` hands the file
 // to whatever the system opens it with, so an unrestricted channel is "run
 // this" for anything the renderer can name. The window only ever asks for a
-// report, a checksum list, the journal, or a folder.
+// checksum list or a folder.
 const OPENABLE = new Set(['.html', '.htm', '.txt', '.csv', '.log', '.json', '.md', '.xml']);
 ipcMain.handle('open-path', async (_, p) => {
   const file = String(p || '');
@@ -531,53 +497,11 @@ ipcMain.handle('open-path', async (_, p) => {
   try { st = fs.statSync(file); } catch (_) { return 'That item is no longer there.'; }
   if (st.isDirectory()) return shell.openPath(file);
   if (!OPENABLE.has(path.extname(file).toLowerCase())) {
-    log.warn('ui', `refused to open ${file}: not a document syncto writes`);
     return 'syncto only opens the documents it writes.';
   }
   return shell.openPath(file);
 });
 ipcMain.handle('open-external',(_, u) => openExternalSafely(u));
-
-// ── The diagnostic journal ─────────────────────────────────────────────────
-let logHeader = () => ({});
-ipcMain.handle('log-info', () => ({
-  file   : log.path(),
-  enabled: !!prefs.data.log,
-  text   : log.read(),
-}));
-ipcMain.handle('log-set', (_, on) => {
-  prefs.data.log = !!on;
-  prefs.save();
-  // Turning it on starts a fresh file: what gets sent is the reproduction the
-  // user just did, not whatever the app happened to be doing before.
-  log.setEnabled(!!on, logHeader());
-  return { enabled: log.enabled, text: log.read() };
-});
-ipcMain.handle('log-clear', () => { log.clear(); if (log.enabled) log.header(logHeader()); return log.read(); });
-ipcMain.handle('log-reveal', () => { try { shell.showItemInFolder(log.path()); } catch (_) {} });
-
-// Saved as plain .txt, not the .log file itself: the point is a file somebody
-// can attach to a message without their mail client arguing about it.
-ipcMain.handle('log-save', async () => {
-  const text = log.read();
-  if (!text) return { ok: false, error: 'The log is empty.' };
-  const d = new Date();
-  const p2 = n => String(n).padStart(2, '0');
-  const name = `syncto-log-${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}` +
-               `-${p2(d.getHours())}${p2(d.getMinutes())}.txt`;
-  const res = await dialog.showSaveDialog(win, {
-    title: 'Save the log',
-    defaultPath: path.join(app.getPath('documents'), name),
-    filters: [{ name: 'Text', extensions: ['txt'] }],
-  });
-  if (res.canceled || !res.filePath) return { ok: false, canceled: true };
-  try {
-    fs.writeFileSync(res.filePath, text, 'utf8');
-    return { ok: true, path: res.filePath };
-  } catch (err) {
-    return { ok: false, error: err.message || String(err) };
-  }
-});
 
 // Electron's own clipboard, deliberately, and not navigator.clipboard: the
 // renderer is loaded from file:// under a strict CSP, which is not a secure
@@ -748,7 +672,7 @@ ipcMain.handle('compare', async (_, job) => {
     });
     return { ok: true, ...res };
   } catch (err) {
-    return { ok: false, error: err.message || String(err) };
+    return { ok: false, error: err.message || String(err), offline: err.offline || null };
   }
 });
 
@@ -794,8 +718,6 @@ ipcMain.handle('sync', async (_, job) => {
     const res = await session.sync(job, {
       token: tokens.sync,
       trashItem,
-      appVersion: appVersion(),
-      defaultReportFolder: path.join(app.getPath('documents'), 'syncto reports'),
       onProgress: p => send('sync-progress', p),
     });
     return { ok: true, ...res };

@@ -41,7 +41,6 @@ const READ_BLOCK = 512 * 1024;   // SFTP throughput is bounded by the window, no
 // the whole run hanging for ever, with no error and an unresponsive Abort.
 const OP_TIMEOUT_MS = 45000;
 
-const { log } = require('../log');
 const { PipelinedReader, PipelinedWriter } = require('./sftp-pipe');
 const crypto = require('crypto');
 
@@ -102,8 +101,6 @@ class SftpFs {
   _die(err) {
     if (this.dead) return;
     this.dead = err instanceof Error ? err : new Error(String(err || 'The SFTP connection was lost.'));
-    if (this.closing) log.info('sftp', 'connection closed');
-    else log.error('sftp', 'connection lost', this.dead.message);
     for (const s of this._streams) { try { s.destroy(this.dead); } catch (_) {} }
     this._streams.clear();
     try { if (this.conn) this.conn.end(); } catch (_) {}
@@ -131,20 +128,18 @@ class SftpFs {
     const guarded = () => {
       if (this.dead) return Promise.reject(this.dead);
       if (!this.sftp) return Promise.reject(new Error('The SFTP connection is not open.'));
-      const t = log.begin('sftp', label);
       return new Promise((resolve, reject) => {
         let done = false;
         const timer = setTimeout(() => {
           if (done) return;
           done = true;
           const err = new Error(`The server did not answer within ${Math.round(OP_TIMEOUT_MS / 1000)} s.`);
-          log.error('sftp', `TIMED OUT after ${Math.round(OP_TIMEOUT_MS / 1000)} s: ${label}`);
           this._die(err);
           reject(err);
         }, OP_TIMEOUT_MS);
         Promise.resolve().then(fn).then(
-          v => { if (!done) { done = true; clearTimeout(timer); t.end(); resolve(v); } },
-          e => { if (!done) { done = true; clearTimeout(timer); t.fail(e); reject(e); } });
+          v => { if (!done) { done = true; clearTimeout(timer); resolve(v); } },
+          e => { if (!done) { done = true; clearTimeout(timer); reject(e); } });
       });
     };
     const run = this._chain.then(guarded, guarded);
@@ -200,7 +195,6 @@ class SftpFs {
             'connection window and connect again.');
           err.hostKeyChanged = true;
         }
-        log.error('sftp', 'connection failed', (err && (err.level || err.code || err.message)) || err);
         try { conn.end(); } catch (_) {}
         this.conn = null; this.sftp = null;
         // Do NOT keep the rejected promise: it would be replayed as a cached
@@ -209,8 +203,6 @@ class SftpFs {
         reject(err);
       };
 
-      log.info('sftp', `connecting to ${this.opts.username}@${this.opts.host}:${this.opts.port || 22}` +
-        (this.opts.privateKey ? ' (private key)' : this.opts.password ? ' (password)' : ' (no credential)'));
       conn.on('ready', () => {
         conn.sftp((err, sftp) => {
           if (err) return bail(err);
@@ -222,7 +214,6 @@ class SftpFs {
           if (seenKey && hostKeyPolicy && hostKeyPolicy.remember) {
             try { hostKeyPolicy.remember(this.opts.host, this.opts.port || 22, seenKey); } catch (_) {}
           }
-          log.info('sftp', `connected (host key ${seenKey || 'unchecked'})`);
           // From here on, losing the channel is a run-stopping error rather
           // than a silent freeze.
           const lost = e => this._die(e || new Error('The SFTP connection was closed by the server.'));
@@ -316,7 +307,6 @@ class SftpFs {
         const n = String(e.filename == null ? '' : e.filename);
         if (n === '.' || n === '..' || n === '') return false;
         if (n.includes('/') || n.includes('\\')) {
-          log.warn('sftp', `ignored an entry whose name is a path: ${JSON.stringify(n)}`);
           return false;
         }
         return true;

@@ -219,7 +219,11 @@ class NativeFs {
       return;
     } catch (err) {
       if (err.code === 'EEXIST') throw err;
-      if (!['EPERM', 'ENOSYS', 'EXDEV', 'EOPNOTSUPP', 'EMLINK', 'EACCES'].includes(err.code)) throw err;
+      // No hard links on this filesystem. macOS answers ENOTSUP on an SMB
+      // share (errno 45, "operation not supported on socket") — not
+      // EOPNOTSUPP — and that one missing code made every abandoned lock on
+      // a NAS impossible to take over: "Delete it manually" (0.8.5).
+      if (!['EPERM', 'ENOSYS', 'EXDEV', 'EOPNOTSUPP', 'ENOTSUP', 'EMLINK', 'EACCES'].includes(err.code)) throw err;
     }
     try { await fs.promises.lstat(to); }
     catch (_) { await fs.promises.rename(from, to); return; }

@@ -85,7 +85,6 @@ function makeJob(L, R, over) {
   j.left = L; j.right = R;
   j.name = 'test';
   j.sync.deletion = 'permanent';
-  j.sync.report.enabled = false;
   j.sync.retryCount = 0;
   return deepAssign(j, over || {});
 }
@@ -329,9 +328,10 @@ async function testSecure() {
 
   eq(run.errors.length, 0, 'the secure copy completes without errors');
   ok(fs.existsSync(path.join(R, 'syncto-checksums.txt')), 'a checksum list is written next to the data');
-  ok(run.reportFiles.length === 3, 'HTML, CSV and JSON reports are written');
-  ok(fs.readFileSync(run.reportFiles.find(f => f.endsWith('.html')), 'utf8').includes('syncto'),
-     'the HTML report is not empty');
+  // Reports went in 0.8.3. A job saved before still carries its report
+  // settings: they are ignored, and nothing lands anywhere.
+  ok(run.reportFiles === undefined, 'no report is produced any more');
+  ok(!fs.existsSync(path.join(ROOT, 'reports')), 'even for a job that still asks for one');
 
   const list = fs.readFileSync(path.join(R, 'syncto-checksums.txt'), 'utf8');
   ok(/xxh64/.test(list), 'the list records which algorithm was used');
@@ -1527,8 +1527,9 @@ async function testNasRegression() {
     ok(!run, 'the run refuses to start');
     ok(error && /recycle bin does not work/i.test(error.message), 'saying the bin does not work there');
     ok(error && error.message.includes(R), 'and naming the folder');
-    ok(error && /Delete permanently/i.test(error.message) && /delete anyway/i.test(error.message),
-       'and naming both settings that fix it, exactly as they read on screen');
+    ok(error && /Default action/.test(error.message) && /Delete permanently/.test(error.message) &&
+       !/delete anyway/i.test(error.message),
+       'and naming the setting that fixes it, exactly as it reads on screen — not the switch 0.8.3 removed');
     ok(exists(R, 'stale/CACHE.DAT'), 'nothing was deleted');
     ok(!exists(R, '.syncto.trash-probe'), 'and the probe left nothing behind');
   }
@@ -1545,6 +1546,40 @@ async function testNasRegression() {
     ok(!error, 'a working recycle bin is not blocked');
     ok(run && run.counters.files === 1, 'and the copy happens');
     ok(!exists(R, 'stale.mov'), 'with the deletion carried out');
+  }
+
+  // (b2) 0.8.3: the fallback is the default and no longer a setting. A disk
+  //      with no bin does not stop the run — the confirmation says so first,
+  //      and the file is deleted for good.
+  {
+    const { L, R } = scratch();
+    write(L, 'keep.mov', 'data');
+    write(R, 'keep.mov', 'data');
+    write(R, 'stale.mov', 'x');
+    const job = makeJob(L, R, { sync: { variant: 'mirror', deletion: 'recycler' } });
+    eq(defaultJob().sync.permanentFallback, true, 'a new job deletes anyway where there is no bin');
+    const s = new Session();
+    await s.compare(job, { token: {} });
+    const pre = await s.preflight(job, { trashItem: deadTrash });
+    ok(pre.length === 1 && pre[0].notice && pre[0].noTrash, 'the check before the run returns a notice, not a refusal');
+    ok(pre[0] && pre[0].message.includes(R) && /deleted permanently/.test(pre[0].message),
+       'naming the folder and what will happen there');
+    await s.close();
+    const { run, error } = await stepped(job, null, { trashItem: deadTrash });
+    ok(!error && run, 'and the run goes ahead');
+    ok(!exists(R, 'stale.mov'), 'deleting the stray file permanently');
+    ok(!exists(R, '.syncto.trash-probe'), 'with no probe left behind');
+  }
+  {
+    const { L, R } = scratch();
+    write(L, 'keep.mov', 'data');
+    write(R, 'stale.mov', 'x');
+    const job = makeJob(L, R, { sync: { variant: 'mirror', deletion: 'recycler' } });
+    const s = new Session();
+    await s.compare(job, { token: {} });
+    const pre = await s.preflight(job, { trashItem: async () => true });
+    eq(pre.length, 0, 'a disk whose bin works gets no notice');
+    await s.close();
   }
 
   // (c) Permanent deletion never needed a bin, so it must not be checked.
@@ -1580,7 +1615,7 @@ async function testNasRegression() {
     const job = defaultJob();
     job.left = L; job.right = R; job.name = 'test';
     job.sync.variant = 'mirror'; job.sync.deletion = 'permanent';
-    job.sync.report.enabled = false; job.sync.retryCount = 0;
+    job.sync.retryCount = 0;
     eq(job.sync.ignoreErrors, true, 'a new job carries on past a failure by default');
     const res = await stepped(job, () => fs.rmSync(path.join(L, 'a.mov')));
     ok(!res.run.stopped, 'so the run is not stopped by one missing file');
@@ -1695,30 +1730,33 @@ function testAfterAndNtfy() {
 }
 
 function testNtfySecrets() {
-  console.log('\n\n21. ntfy token storage (0.4.0)');
+  console.log('\n\n21. ntfy settings (0.4.0 — token removed in 0.8.3)');
   const { Prefs } = require('../src/main/config');
   const { dir } = scratch();
   const p = new Prefs(dir);
   p.load();
 
-  // The access token is a credential like any other: it goes through the OS
-  // credential store, never into the file in the clear.
-  p.saveNtfy({ enabled: true, server: 'https://ntfy.example', topic: 'syncto-abc', token: 'tk_secret_value' });
+  // A server, a topic, a switch. Nothing else is stored, even if asked to.
+  p.saveNtfy({ enabled: true, server: 'https://ntfy.example', topic: 'syncto-abc', token: 'tk_secret_value', onlyOnProblem: true });
   const onDisk = fs.readFileSync(path.join(dir, 'preferences.json'), 'utf8');
-  ok(!onDisk.includes('tk_secret_value'), 'the ntfy token never reaches the file in the clear');
+  ok(!onDisk.includes('tk_secret_value'), 'a token handed to the settings is not written anywhere');
+  ok(!/tokenEnc|onlyOnProblem/.test(onDisk), 'nor the two settings 0.8.3 removed');
   ok(onDisk.includes('syncto-abc'), 'while the topic is stored normally');
 
   const ui = p.ntfyForUi();
-  ok(!('token' in ui) && !('tokenEnc' in ui), 'and the settings panel is never handed the token');
+  eq(Object.keys(ui).sort(), ['enabled', 'server', 'topic'], 'the panel gets exactly: on/off, server, topic');
   eq(ui.topic, 'syncto-abc', 'it gets the topic');
   eq(ui.enabled, true, 'and the switch state');
 
-  // Saving the panel again without retyping the token must not wipe it.
+  // What an older version stored is dropped at the next save, not kept with
+  // nothing on screen to show or clear it.
   p.data.ntfy.tokenEnc = 'PRETEND-CIPHERTEXT';
+  p.data.ntfy.onlyOnProblem = true;
   p.saveNtfy({ topic: 'syncto-def' });
-  eq(p.data.ntfy.tokenEnc, 'PRETEND-CIPHERTEXT', 'an untouched token box leaves the stored token alone');
-  p.saveNtfy({ token: '' });
-  eq(p.data.ntfy.tokenEnc, '', 'and clearing it explicitly does clear it');
+  ok(!('tokenEnc' in p.data.ntfy) && !('onlyOnProblem' in p.data.ntfy), 'an old stored token is removed on the next save');
+  p.save({ ntfy: { token: 'readable-token' } });
+  ok(!fs.readFileSync(path.join(dir, 'preferences.json'), 'utf8').includes('readable-token'),
+     'and no write, from any caller, can put one back');
 }
 
 
@@ -1769,24 +1807,6 @@ async function testSingleCopyMode() {
     ok(exists(R, 'syncto-checksums.txt'), 'the checksum list is written whenever it is asked for');
   }
 
-  // And the report says what was checked, in words a client can read.
-  {
-    const { buildReport, toHtml } = require('../src/main/core/report');
-    const rep = buildReport({
-      appVersion: 't', pairName: 'j', leftPath: '/l', rightPath: '/r',
-      variant: 'mirror', compareVariant: 'timeSize', copyLevel: 'secure',
-      deletion: 'permanent', versioningStyle: '', filter: {},
-      startedAt: 0, endedAt: 1000,
-      run: { results: [], counters: { files: 3, bytes: 100, deleted: 0, folders: 0 },
-             notes: [], verified: 3, errors: [] },
-      stats: null, comparisonErrors: [],
-    });
-    eq(rep.totals.filesVerified, 3, 'the report carries the verified count');
-    const html = toHtml(rep);
-    ok(/read back and verified \(xxHash64\)/.test(html), 'and states it in the page');
-    ok(/every file read back and compared/.test(html), 'and in the settings block');
-    ok(!/size-checked/.test(html), 'with no trace of the old middle level');
-  }
 }
 
 
@@ -2485,9 +2505,8 @@ async function testBundlesAndCopyLog() {
     const main   = fs.readFileSync(path.join(__dirname, '..', 'src/main/main.js'), 'utf8');
 
     const buttons = [...html.matchAll(/class="err-copy" data-copy="([^"]+)"/g)].map(m => m[1]);
-    // The diagnostic journal reuses the same button — it is the panel people
-    // are most often asked to copy.
-    eq(buttons.sort(), ['st-log-text', 'sum-errors-body', 'sum-notes-body', 'vf-bad-body'],
+    // (The diagnostic journal had one too, until 0.8.3 removed the journal.)
+    eq(buttons.sort(), ['sum-errors-body', 'sum-notes-body', 'vf-bad-body'],
        'every panel that has to be copied carries the button');
     for (const id of buttons) {
       ok(html.includes(`id="${id}"`), `the button for ${id} points at an element that exists`);
@@ -2916,12 +2935,15 @@ async function testCheckJobPaths() {
 
     // (f) The mark on the row. This is what is still on screen an hour after
     //     the dialog was closed, and the path is where the problem actually
-    //     is. Orange since 0.8.0, not red: a folder that is not there is
-    //     something to decide about, while red in the grid above means "these
-    //     files will be deleted".
-    ok(/\.prow input\.gone\{border-color:rgba\(242,160,61/.test(html),
-       'a row whose folder is missing is drawn in orange');
-    ok(/#missing-badge\{[^}]*color:var\(--orange\)/.test(html), 'and so is the badge that counts them');
+    //     is. Red again in 0.8.3 (orange in 0.8.0): a folder or a volume that
+    //     is not there stops the job, and orange read as a suggestion.
+    ok(/\.prow input\.gone\{border-color:rgba\(242,85,90/.test(html),
+       'a row whose folder is missing is drawn in red');
+    ok(/\.prow input\.gone\{border:none;box-shadow:inset 0 0 0 1px rgba\(242,85,90/.test(html),
+       'in the charte block too');
+    ok(/#missing-badge\{[^}]*color:var\(--red\)/.test(html), 'and so is the badge that counts them');
+    ok(/#missing-badge\{border:none;background:rgba\(242,85,90/.test(html), 'on a red hollow');
+    ok(!/#missing-badge\{[^}]*242,160,61/.test(html), 'with no orange left on it');
     ok(/function markMissingPaths\(list\)/.test(appjs), 'and something marks it');
     ok(/markMissingPaths\(state\.missingPaths\);/.test(appjs),
        'rebuilding the pair rows puts the red back');
@@ -3215,183 +3237,24 @@ async function testLockTolerance() {
   }
 }
 
-// ══ 34. The diagnostic journal (0.6.3) ════════════════════════════════════
-// syncto wrote nothing at all — no console output, no file. A user reporting
-// "I press Synchronize and nothing happens" had nothing to send and there was
-// nothing to read. What matters about this thing is what it must NOT do: leak
-// a password, grow for ever, or take a run down with it.
+// ══ 34. The diagnostic journal — removed in 0.8.3 ════════════════════════
+// It came in 0.6.3 and went in 0.8.3 at Noar's request. What is checked now
+// is that it is gone for good: no module, no channel, no setting, and no file
+// left behind in the user's profile by an older version.
 function testLog() {
-  console.log('\n\n34. The diagnostic journal (0.6.3)');
-
-  const { Logger, redact, MAX_BYTES } = require('../src/main/log');
-
-  // (a) Off by default, and silent when off.
-  {
-    const { dir } = scratch();
-    const l = new Logger().open(dir, false);
-    l.info('sync', 'this must not be written');
-    eq(l.enabled, false, 'a logger opened with the setting off stays off');
-    eq(l.read(), '', 'and writes nothing');
-    ok(!fs.existsSync(l.path()), 'the file is not even created');
-    const { defaultPrefs } = require('../src/main/config');
-    eq(defaultPrefs().log, false, 'the preference itself is off out of the box');
-  }
-
-  // (b) One session, one file: it is emptied at every launch.
-  {
-    const { dir } = scratch();
-    new Logger().open(dir, true).info('sync', 'run of yesterday');
-    const again = new Logger().open(dir, true);
-    eq(again.read(), '', 'the next launch starts on a clean page');
-    again.info('sync', 'run of today');
-    ok(/run of today/.test(again.read()), 'and records this session');
-    ok(!/run of yesterday/.test(again.read()), 'with nothing left of the last one');
-  }
-
-  // (c) Turning it on mid-session also starts fresh, so what gets sent is the
-  //     reproduction the user just did and not what came before.
-  {
-    const { dir } = scratch();
-    const l = new Logger().open(dir, true);
-    l.info('sync', 'before');
-    l.setEnabled(false);
-    l.info('sync', 'while off');
-    ok(!/while off/.test(l.read()), 'nothing is written while it is off');
-    l.setEnabled(true, { version: '0.6.3', platform: 'darwin', arch: 'arm64',
-                         electron: '43', node: '22', userData: dir });
-    ok(!/before/.test(l.read()), 'turning it back on clears what came before');
-    ok(/syncto 0\.6\.3 · darwin arm64/.test(l.read()), 'and writes a fresh header');
-    l.info('sync', 'after');
-    ok(/after/.test(l.read()), 'then records normally');
-  }
-
-  // (d) 🔴 NEVER A PASSWORD. A folder field accepts "sftp://user:secret@host",
-  //     and a log people send by email is the last place for it.
-  {
-    eq(redact('sftp://noar:hunter2@nas.local/vol1/RUSHES'),
-       'sftp://noar@nas.local/vol1/RUSHES', 'a password in a URL is removed');
-    eq(redact('failed on sftp://u:p@h/x — Permission denied'),
-       'failed on sftp://u@h/x — Permission denied', 'including inside a sentence');
-    eq(redact('ssh://a:b@c/d and sftp://e:f@g/h'),
-       'ssh://a@c/d and sftp://e@g/h', 'every one of them');
-    eq(redact('/Volumes/NAS/a:b/file.mov'), '/Volumes/NAS/a:b/file.mov',
-       'an ordinary path with a colon is left alone');
-    eq(redact(null), '', 'and nothing at all is not a crash');
-
-    const { dir } = scratch();
-    const l = new Logger().open(dir, true);
-    l.info('sync', 'pair 1: sftp://noar:hunter2@nas/vol → /local');
-    l.error('sftp', 'boom', 'sftp://noar:hunter2@nas/vol');
-    ok(!/hunter2/.test(l.read()), 'nothing that reaches the file carries the password');
-    ok(/noar@nas/.test(l.read()), 'while the rest of the address is still readable');
-  }
-
-  // (e) It stops at a ceiling instead of filling the disk, and says so.
-  {
-    const { dir } = scratch();
-    const l = new Logger().open(dir, true);
-    const big = 'x'.repeat(64 * 1024);
-    for (let i = 0; i < Math.ceil(MAX_BYTES / (64 * 1024)) + 2; i++) l.info('t', big);
-    ok(l.capped, 'it stops once the session has produced enough');
-    const st = fs.statSync(l.path());
-    ok(st.size < MAX_BYTES * 1.1, 'the file does not run away');
-    ok(/stopped here/.test(l.read()), 'and the file says why it ends there');
-  }
-
-  // (f) A log that cannot be written must never take the run with it.
-  {
-    // A file where a directory is expected: mkdir under it is ENOTDIR on every
-    // platform, which is the cleanest way to make opening the log fail.
-    const { dir } = scratch();
-    const blocked = path.join(dir, 'not-a-folder');
-    fs.writeFileSync(blocked, 'x');
-    const l = new Logger().open(blocked, true);
-    eq(l.enabled, false, 'an unwritable profile simply disables it');
-    l.info('sync', 'still fine');           // must not throw
-    eq(l.read(), '', 'and reading it back is empty rather than an error');
-    ok(true, 'nothing threw');
-  }
-
-  // (g) begin/end is what answers "which request never came back": a start
-  //     line with no matching end line is the one that hung.
-  {
-    const { dir } = scratch();
-    const l = new Logger().open(dir, true);
-    const t = l.begin('sftp', 'stat /vol/x');
-    t.end();
-    const hung = l.begin('sftp', 'read /vol/huge.mov');   // deliberately never ended
-    ok(/→ stat \/vol\/x/.test(l.read()), 'a request is logged when it starts');
-    ok(/← stat \/vol\/x/.test(l.read()), 'and again when it comes back');
-    ok(/→ read \/vol\/huge\.mov/.test(l.read()), 'the one still in flight has its start line');
-    ok(!/← read \/vol\/huge\.mov/.test(l.read()), 'and no end line — which is the tell');
-    l.begin('sftp', 'unlink /vol/y').fail(Object.assign(new Error('Permission denied'), { code: 'EACCES' }));
-    ok(/failed: unlink \/vol\/y/.test(l.read()), 'a failure names the operation');
-    ok(/EACCES/.test(l.read()), 'with the code the server gave');
-    ok(hung, 'the timer object exists');
-  }
-
-  // (i) The three ways a run could sit there doing nothing while the buttons
-  //     did nothing either. All reported from a real transfer to a NAS.
-  {
-    const sync = fs.readFileSync(path.join(__dirname, '..', 'src/main/core/sync.js'), 'utf8');
-    const lock = fs.readFileSync(path.join(__dirname, '..', 'src/main/core/lock.js'), 'utf8');
-    const sess = fs.readFileSync(path.join(__dirname, '..', 'src/main/core/session.js'), 'utf8');
-
-    // PAUSE only worked BETWEEN files. On a server at 1.5 MB/s one 17 MB track
-    // is eleven seconds of a button that appears dead.
-    ok(/token\.paused && !held/.test(sync), 'pause is honoured during a file, not only between two');
-    ok(/rs\.pause\(\);/.test(sync) && /held = false; rs\.resume\(\);/.test(sync),
-       'the read is actually held and resumed');
-
-    // readLockInfo is a RAW stream: the 45 s deadline on queued requests does
-    // not cover it, and release() runs in a finally — so a read that never
-    // delivered left the whole run unsettled at 100%.
-    ok(/READ_LOCK_TIMEOUT_MS/.test(lock), 'reading a lock file cannot wait for ever');
-    ok(/\} finally \{[\s\S]{0,600}?await locks\.release\(\);/.test(sess),
-       'the locks are still released whatever happened');
-    ok(/Releasing the folder locks/.test(sess), 'and the window says so instead of a silent 100%');
-    ok(/cleanup: sweeping leftovers/.test(sync) && /cleanup: done/.test(sync),
-       'the finishing phase leaves a trail in the log');
-  }
-
-  // (h) The wiring: a switch in the settings, and the log readable and
-  //     copyable from that window rather than from a Finder window.
-  {
-    const html  = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/index.html'), 'utf8');
-    const appjs = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/app.js'), 'utf8');
-    const pre   = fs.readFileSync(path.join(__dirname, '..', 'src/main/preload.js'), 'utf8');
-    const main  = fs.readFileSync(path.join(__dirname, '..', 'src/main/main.js'), 'utf8');
-    ok(html.includes('id="st-log"'), 'the settings carry the switch');
-    ok(html.includes('id="st-log-text"'), 'and show the log');
-    ok(/data-copy="st-log-text"/.test(html), 'with the copy button the error panels use');
-    ok(/ipcMain\.handle\('log-set'/.test(main) && /ipcMain\.handle\('log-info'/.test(main),
-       'main answers on both channels');
-    ok(/logSet\s*:.*invoke\('log-set'/.test(pre), 'preload exposes the switch');
-    ok(/log\.open\(app\.getPath\('userData'\), !!prefs\.data\.log\)/.test(main),
-       'and the launch opens it according to the preference');
-    ok(/setCopyBlock\('st-log-text'/.test(appjs), 'the whole log is what gets copied');
-    // 🔴 The panel was filled once at launch and never again: it showed the
-    //    three header lines for the rest of the session while the file on disk
-    //    held the whole run, and Copy copied that stale snapshot.
-    ok(/startLogWatch\(\);/.test(appjs), 'opening the settings re-reads the log');
-    ok(/logWatchTimer = setInterval/.test(appjs),
-       'and it keeps re-reading, so a run in progress can be watched');
-    ok(/stopLogWatch\(\)/.test(appjs), 'stopped when the window closes');
-    ok(/const atBottom = /.test(appjs),
-       'a refresh does not yank the view back down while something is being read');
-    ok(html.includes('id="st-log-save"') && /ipcMain\.handle\('log-save'/.test(main),
-       'and it can be saved as a .txt to attach to a message');
-    // The engine writes it, not the window: what matters is what the server
-    // actually answered, not what the interface believed.
-    const sftp = fs.readFileSync(path.join(__dirname, '..', 'src/main/fs/sftp.js'), 'utf8');
-    ok(/log\.begin\('sftp'/.test(sftp), 'every server request is timed');
-    ok(/TIMED OUT/.test(sftp), 'and a request that never answers says so');
-    // A disconnection we asked for fires the same handler a dropped one does.
-    // Logged at ERROR, it sent the reader of a support log hunting for a fault
-    // that was never there.
-    ok(/this\.closing = true;/.test(sftp) && /if \(this\.closing\) log\.info/.test(sftp),
-       'a deliberate disconnection is not reported as an error');
-  }
+  console.log('\n\n34. The diagnostic journal is gone (0.8.3)');
+  const src = p => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
+  ok(!fs.existsSync(path.join(__dirname, '..', 'src/main/log.js')), 'the module is gone');
+  const all = ['src/main/main.js', 'src/main/preload.js', 'src/main/core/session.js', 'src/main/core/sync.js',
+               'src/main/core/lock.js', 'src/main/fs/sftp.js'].map(src).join('\n');
+  ok(!/require\(['"][./]*log['"]\)/.test(all), 'nothing requires it');
+  ok(!/\blog\.(info|warn|error|debug|begin)\(/.test(all), 'and nothing calls it');
+  ok(!/'log-(info|set|clear|reveal|save)'/.test(all), 'no channel is left open for it');
+  ok(!/id="st-log/.test(src('src/renderer/index.html')), 'the settings no longer show it');
+  const { defaultPrefs } = require('../src/main/config');
+  ok(!('log' in defaultPrefs()), 'nor is there a preference for it');
+  ok(/rmSync\(path\.join\(app\.getPath\('userData'\), 'logs'\)/.test(src('src/main/main.js')),
+     'what an older version wrote in the profile is removed at launch');
 }
 
 // ══ 35. SFTP transfers, against a real server (0.6.5) ═════════════════════
@@ -3937,36 +3800,31 @@ function testNarrowedViewAndRunUi() {
   ok(/min-height:40px/.test(html), 'and the thumb cannot shrink to nothing on a long list');
   ok(/-webkit-scrollbar-thumb:hover/.test(html), 'with a hover state, like any other control');
 
-  // (d) During a run the progress panel takes the working area. Same elements,
-  //     same ids — only the shape changes, so every line that updates them
-  //     keeps working whichever form they are wearing.
-  ok(/\$\('bottombar'\)\.classList\.toggle\('kiosk', !!\(on && steps\)\);/.test(appjs),
-     'a run gets the big view');
+  // (d) During a run the progress panel stays a strip at the bottom (0.8.3 —
+  //     it covered the window, frosted, from 0.7.1 to 0.8.2). Same elements,
+  //     same ids; the list above stays in view and empties as files land.
+  ok(/\$\('bottombar'\)\.classList\.toggle\('run', !!\(on && steps\)\);/.test(appjs),
+     'a run wears the strip with its passes');
+  ok(!/kiosk/.test(appjs) && !/kiosk/.test(html), 'the full-window form is gone');
+  ok(!/#bottombar\{[^}]*backdrop-filter/.test(html), 'and the run panel is not frosted any more');
   ok(/classList\.toggle\('running', !!\(on && steps\)\)/.test(appjs), 'and the window says it is running');
   ok(/#app\.running #statusbar\{display:none;\}/.test(html), 'the chips describing the old comparison go away');
   ok(/#app\.running #sidebar\{pointer-events:none;\}/.test(html),
      'and the sidebar stops taking clicks, since they would change the plan and not the run');
-  ok(/#bottombar\.kiosk\{position:absolute;inset:0;/.test(html), 'the panel covers the working area');
-  // Frosted rather than opaque: the comparison stays visible underneath, so
-  // the run reads as something happening ON the window, not a second screen.
-  const kioskCss = html.slice(html.indexOf('#bottombar.kiosk{position:absolute'), html.indexOf('#bottombar.kiosk .pb-track-top'));
-  const alpha = /background:rgba\(\d+,\d+,\d+,\.(\d+)\)/.exec(kioskCss);
-  ok(alpha && Number('0.' + alpha[1]) < 0.75, 'its background lets the window show through');
-  ok(/backdrop-filter:blur\(\d+px\)/.test(kioskCss) && /-webkit-backdrop-filter:blur/.test(kioskCss),
-     'and what shows through is blurred, on both spellings of the property');
-  // Order matters: `#bottombar.open` sets a fixed height, so the kiosk rule has
-  // to come after it or the panel stays a 196 px strip.
-  ok(html.indexOf('#bottombar.open{height:196px;}') < html.indexOf('#bottombar.kiosk{position:absolute'),
-     'and its rule comes after the one that fixes the strip height');
+  ok(/#app\.running #syncmodes,#app\.running #pairwrap/.test(html) && /#app\.running #gridbody\{pointer-events:none;\}/.test(html),
+     'nor do the modes, the folders or the rows, now that they are in view');
+  ok(/#bottombar\.open\.run\{height:auto;\}/.test(html) &&
+     html.indexOf('#bottombar.open{height:196px;}') < html.indexOf('#bottombar.open.run{height:auto;}'),
+     'the run strip is as tall as what it holds, after the rule that fixes the strip height');
+  ok(/if \(state\.busy === 'sync'\) refreshRunGrid\(\);/.test(appjs), 'the list is asked for again while the run goes');
   // A comparison keeps the strip: the grid behind it is filling up.
-  ok(/setBusyUi\(true, 'Comparing…'\)/.test(appjs) || /setBusyUi\(true, title\)/.test(appjs) ||
-     /setBusyUi\(true, 'Checking the result…'\)/.test(appjs), 'a comparison is still announced in the strip');
+  ok(/setBusyUi\(true, 'COMPARING'\)/.test(appjs), 'a comparison is still announced in the strip');
 
   // (e) 🔴 The wait after a run had no name. syncto compares both folders again
   //     to confirm the result — seconds of a window answering to nothing, right
   //     after a run, which reads as a crash.
   const quiet = appjs.slice(appjs.indexOf('async function doCompareQuiet'));
-  ok(/setBusyUi\(true, 'Checking the result…'\)/.test(quiet.slice(0, 1200)), 'the re-comparison shows itself');
+  ok(/setBusyUi\(true, 'CHECKING'\)/.test(quiet.slice(0, 1200)), 'the re-comparison shows itself');
   ok(/setRecheck\('busy'/.test(appjs), 'and the summary card says what is still happening');
   ok(/Compared again: both folders now match/.test(appjs), 'then what it found');
   ok(/still need attention/.test(appjs), 'including when something is left');
@@ -4050,30 +3908,6 @@ async function testRunFiguresAndLogPerProcess() {
     B.save({ ui: { showEqual: false } });
     const lastRead = new Prefs(dir); lastRead.load();
     eq(lastRead.data.ui.showEqual, false, 'the most recent explicit change is the one kept');
-  }
-
-  // (d) 🔴 Two copies of syncto running side by side shared one log file. It
-  //     is emptied at launch, so the second to start wiped the first one's and
-  //     the two then wrote into it at once.
-  {
-    const { Logger } = require('../src/main/log');
-    const { dir } = scratch();
-    const l = new Logger().open(dir, true);
-    l.info('t', 'hello');
-    ok(l.path().includes(String(process.pid)), 'the log file carries the process id');
-    ok(/hello/.test(l.read()), 'and is written normally');
-
-    const logs = path.join(dir, 'logs');
-    const dead = path.join(logs, 'syncto-999999.log');
-    fs.writeFileSync(dead, 'from a run that is over');
-    new Logger().open(dir, true);
-    ok(!fs.existsSync(dead), 'the log of a process that has ended is removed');
-    ok(fs.existsSync(l.path()), 'and the one of a process that is running is not');
-
-    const theirs = path.join(logs, 'notes.txt');
-    fs.writeFileSync(theirs, 'not mine');
-    new Logger().open(dir, true);
-    ok(fs.existsSync(theirs), 'and a file that is not a syncto log is never touched');
   }
 
   // (e) The menu entry that starts a second copy, and the reason it spawns the
@@ -4398,15 +4232,27 @@ function testIpcArity() {
        'opaque, on the card surface, so the content is seen to pass behind it');
   }
 
-  // A hint that describes a safety behaviour has to describe the one in the
-  // code: the abandoned-lock window moved from 12 to 60 seconds in 0.6.2 and
-  // the settings panel kept telling people 12.
+  // The settings carry labels and nothing else (0.8.3). A description that
+  // has to be kept in step with the code — the abandoned-lock window moved
+  // from 12 to 60 s in 0.6.2 and the panel kept saying 12 — is gone with them.
   {
     const html = fs.readFileSync(path.join(root, 'src/renderer/index.html'), 'utf8');
-    const { DETECT_ABANDONED_MS } = require('../src/main/core/lock');
-    const m = /taken over after (\d+)&nbsp;seconds/.exec(html);
-    ok(m, 'the panel says when an abandoned lock is taken over');
-    eq(Number(m[1]) * 1000, DETECT_ABANDONED_MS, 'and says the number the engine actually uses');
+    const a = html.indexOf('<div class="ov" id="ov-settings">');
+    const panel = html.slice(a, html.indexOf('<div class="set-section" id="custom-section"', a));
+    ok(!/set-hint|m-sub/.test(panel), 'no paragraph of explanation in the settings');
+    const descs = [...panel.matchAll(/<span class="set-desc">([^<]+)</g)].map(m => m[1]);
+    eq(descs.length, 13, 'one short line beside each control');
+    ok(descs.every(d => d.length <= 48), 'short enough to fit beside it');
+    ok(/\.set-desc\{[^}]*white-space:nowrap;/.test(html), 'and it never wraps to a second line');
+    eq([...panel.matchAll(/set-sec-title">([^<]+)</g)].map(m => m[1]),
+       ['Main', 'S-FTP', 'Deletion', 'Notifications'], 'four sections, in this order');
+    eq([...panel.matchAll(/<option value="(\d+)"/g)].map(m => Number(m[1])), [1,2,3,4,5,6,7,8,9,10],
+       'up to ten transfers at a time, like FileZilla');
+    ok(!/st-perm-fallback|st-after|st-rep|st-log|st-ntfy-token|st-ntfy-problem/.test(html),
+       'and the switches that were removed are gone from the page');
+    ok(!/ntfy-steps|ntfy-sub/.test(panel), 'the QR code has no text around it');
+    ok(/<div class="ntfy-grid">\s*<div class="ntfy-fields">[\s\S]*st-ntfy-server[\s\S]*st-ntfy-topic[\s\S]*<\/div>\s*<div class="ntfy-qr">/.test(panel),
+       'and sits to the right of the server and topic fields');
   }
 
   // And when it is refused anyway, the message names the setting to change.
@@ -4679,8 +4525,9 @@ async function testSecurity() {
     ok(/sandbox: true/.test(main), 'the renderer runs inside the OS sandbox');
     ok(/OPENABLE\s*=\s*new Set/.test(main) && /open-path[\s\S]{0,700}OPENABLE\.has/.test(main),
        'open-path opens a document or a folder, not whatever it is handed');
-    ok(/sameServer\s*\?\s*cfg\.token\s*:\s*''/.test(main),
-       'and the stored ntfy token never travels to a server the window named');
+    // The ntfy token went in 0.8.3: there is nothing stored left to leak.
+    ok(!/token\s*:\s*cfg\.token/.test(main) && !/Authorization/.test(main),
+       'and no stored ntfy token travels anywhere, since none is kept');
     const ent = fs.readFileSync(path.join(root, 'build-resources/entitlements.mac.plist'), 'utf8');
     ok(!/<key>com\.apple\.security\.cs\.disable-library-validation<\/key>/.test(ent),
        'the signed app no longer accepts unsigned libraries');
@@ -4769,27 +4616,6 @@ async function testAuditFixes080() {
     const names = Object.values(db.sessions || {}).flatMap(x => Object.keys(x.items || {}));
     ok(!names.includes('A001_C003.mov'), 'the file that failed is not recorded as synchronized');
     eq(names.filter(n => /A001_C00/.test(n)).length, 5, 'and the five proven ones are');
-  }
-
-  // (d) 🔴 The report could never say "failed verification": it read a key
-  //     the payload did not carry, so it printed the green "Not one differed"
-  //     over a run that had found corruption.
-  {
-    const { buildReport, toHtml } = require('../src/main/core/report');
-    const rep = buildReport({
-      pairName: 'PROJET', leftPath: '/a', rightPath: '/b', variant: 'mirror',
-      compareVariant: 'timeSize', startedAt: 1, endedAt: 2, stats: {},
-      run: {
-        results: [{ rel: 'c1', ok: true }],
-        counters: { files: 5, bytes: 10 }, verified: 3, notes: [],
-        errors: [{ rel: 'c2', message: 'Checksum mismatch (xxh64).' },
-                 { rel: 'c3', message: 'Checksum mismatch (xxh64).' }],
-      },
-    });
-    eq(rep.errors.length, 2, 'the run’s errors reach the report');
-    const html = toHtml(rep);
-    ok(/2 files failed verification/.test(html), 'and the banner says so');
-    ok(!/Not one differed/.test(html), 'instead of claiming the opposite');
   }
 
   // (e) 🔴 A server that caps its READs. A short reply is not the end of the
@@ -5215,6 +5041,332 @@ function testLinux() {
   }
 }
 
+// ══ 48. Noar's list for 0.8.3 ═════════════════════════════════════════════
+async function testRequest083() {
+  console.log('\n\n48. Offline volumes, the run in the window, the simpler settings (0.8.3)');
+  const root = path.join(__dirname, '..');
+  const html  = fs.readFileSync(path.join(root, 'src/renderer/index.html'), 'utf8');
+  const appjs = fs.readFileSync(path.join(root, 'src/renderer/app.js'), 'utf8');
+  const { volumeRoot, offlineVolume } = require('../src/main/core/volume');
+
+  // (a) Which drive a path lives on, on every platform.
+  eq(volumeRoot('/Volumes/NAS_EDIT/PROJET/01', 'darwin'), '/Volumes/NAS_EDIT', 'a Mac volume');
+  eq(volumeRoot('E:\\RUSHES', 'win32'), 'E:\\', 'a Windows drive letter');
+  eq(volumeRoot('\\\\nas\\edit\\PROJET', 'win32'), '\\\\nas\\edit\\', 'a Windows share');
+  eq(volumeRoot('/media/noar/SSD/x', 'linux'), '/media/noar/SSD', 'a Linux removable drive');
+  eq(volumeRoot('/run/media/noar/SSD/x', 'linux'), '/run/media/noar/SSD', 'the other place Linux puts them');
+  eq(volumeRoot('/Users/noar/Movies', 'darwin'), null, 'a folder on the startup disk is on no volume');
+  eq(volumeRoot('sftp://nas/vol', 'darwin'), null, 'nor is a server');
+  const statOf = map => q => map[q] || null;
+  eq(offlineVolume('/Volumes/NAS/x', { platform: 'darwin', stat: statOf({}) }),
+     { root: '/Volumes/NAS', name: 'NAS' }, 'a Mac volume that is not there is offline');
+  eq(offlineVolume('/Volumes/NAS/x', { platform: 'darwin', stat: statOf({ '/': { dev: 1 }, '/Volumes/NAS': { dev: 2 } }) }),
+     null, 'one that is mounted is not');
+  eq(offlineVolume('/Volumes/NAS/x', { platform: 'darwin', stat: statOf({ '/': { dev: 1 }, '/Volumes/NAS': { dev: 1 } }) }),
+     { root: '/Volumes/NAS', name: 'NAS' }, 'an empty folder left in /Volumes, on the startup disk, is not a mounted drive');
+  eq(offlineVolume('F:\\x', { platform: 'win32', stat: statOf({}) }), { root: 'F:\\', name: 'F:' }, 'a drive letter with nothing behind it');
+
+  // (b) Comparing against a drive that is not mounted: refused, named, before
+  //     anything is scanned. A missing folder on a MOUNTED drive still compares.
+  {
+    const { L } = scratch();
+    write(L, 'a.mov', 'x');
+    const gone = `/Volumes/syncto-test-absent-${process.pid}/PROJET/01_RUSHES`;
+    const job = makeJob('', '', { sync: { variant: 'mirror' } });
+    delete job.left; delete job.right;
+    job.pairs = [{ left: L, right: gone }];
+    const m = new MultiSession();
+    let err = null;
+    try { await m.compare(job, { token: {} }); } catch (e) { err = e; }
+    ok(err && err.offline && err.offline.length === 1, 'the comparison refuses');
+    ok(err && new RegExp(`syncto-test-absent-${process.pid} is not mounted`).test(err.message), 'naming the volume');
+    ok(err && /It holds the destination\./.test(err.message) && /Connect it, then compare again/.test(err.message),
+       'what it holds, and what to do');
+    eq(m.comparedAt, 0, 'and leaves nothing to synchronize');
+    await m.close();
+
+    const { R } = scratch();
+    job.pairs = [{ left: L, right: path.join(R, 'new-folder') }];
+    const m2 = new MultiSession();
+    const cmp = await m2.compare(job, { token: {} });
+    ok(cmp && cmp.stats.createRight >= 1, 'a folder missing on a mounted drive is still a folder to create');
+    await m2.close();
+  }
+  {
+    const main = fs.readFileSync(path.join(root, 'src/main/main.js'), 'utf8');
+    ok(/offline: err\.offline \|\| null/.test(main), 'the channel carries which volumes');
+    ok(/res\.offline\.length > 1 \? 'Volumes not mounted' : 'Volume not mounted'/.test(appjs), 'and the window says it in its title');
+    ok(/allOffline \? `\$\{vols\.join\(', '\)\} not mounted`/.test(appjs), 'the badge names the drive instead of counting folders');
+  }
+
+  // (c) The run empties the list as it goes.
+  {
+    const { L, R } = scratch();
+    for (let i = 0; i < 6; i++) write(L, `clip_${i}.mov`, 'x'.repeat(2048));
+    const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+    const s = new Session();
+    const token = { cancelled: false, paused: false };
+    await s.compare(job, { token });
+    const before = s.rows(0, 100, {}).total;
+    const seen = [];
+    await s.sync(job, { token, onProgress: () => seen.push(s.rows(0, 100, {}).total) });
+    eq(before, 6, 'six rows to process before the run');
+    eq(seen[0], 6, 'all six still listed when the run starts');
+    ok(seen.some(n => n < 6), 'fewer while it is still running (before the read-back is over)');
+    eq(s.rows(0, 100, {}).total, 0, 'and none once everything has landed');
+    await s.close();
+  }
+  {
+    const { L, R } = scratch();
+    write(L, 'ok.mov', 'x');
+    write(L, 'bad.mov', 'y');
+    const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+    const s = new Session();
+    const token = { cancelled: false };
+    await s.compare(job, { token });
+    fs.rmSync(path.join(L, 'bad.mov'));
+    await s.sync(job, { token });
+    eq(s.rows(0, 100, {}).rows.map(r => r.rel), ['bad.mov'], 'a row that failed stays in the list');
+    await s.close();
+  }
+
+  // (d) The window.
+  ok(/#var-twoWay\.on\{box-shadow:inset 0 0 0 1\.5px var\(--blue\);\}/.test(html) &&
+     /#var-mirror\.on\{box-shadow:inset 0 0 0 1\.5px var\(--orange\);\}/.test(html) &&
+     /#var-update\.on\{box-shadow:inset 0 0 0 1\.5px var\(--green\);\}/.test(html) &&
+     /#var-custom\.on\{box-shadow:inset 0 0 0 1\.5px var\(--text3\);\}/.test(html),
+     'the chosen mode is outlined in its own colour');
+  const modes = html.slice(html.indexOf('<div class="modes-row">'), html.indexOf('<!-- ── Folder pairs'));
+  ok(/class="modes-sep"[\s\S]*id="btn-verify"/.test(modes), 'VERIFY sits on the modes line, after a separator');
+  const tbar = html.slice(html.indexOf('<div id="titlebar">'), html.indexOf('<div id="main">'));
+  ok(!/btn-verify/.test(tbar) && /id="btn-after"/.test(tbar) && /id="after-menu"/.test(tbar),
+     'and the title bar has the end-of-run menu where it used to be');
+  eq([...tbar.matchAll(/class="ctx-it" data-v="(\w+)"/g)].map(m => m[1]), ['none', 'quit', 'sleep', 'shutdown'],
+     'Do nothing, Quit, Sleep, Shut down');
+  ok(/state\.job\.sync\.afterSync = it\.dataset\.v;/.test(appjs) &&
+     /const action = \(state\.job\.sync && state\.job\.sync\.afterSync\) \|\| 'none';/.test(appjs),
+     'the choice goes into the job, and is read when the run ends — so it can change during the copy');
+  ok(!/#app\.running[^{]*#titlebar/.test(html), 'and the title bar stays live during a run');
+  ok(/\.recent-item\.cur\{background:rgba\(53,201,139,\.12\);\}/.test(html) &&
+     /\.recent-item\.cur \.recent-name\{color:var\(--green\);\}/.test(html), 'the job that is open is green in the list');
+
+  // (d2) A run you cannot miss: one word for the whole run, a big ring and
+  //      title in the colour of the pass, an outline that breathes — and all
+  //      of it still and grey the moment the run is paused.
+  ok(/title\.textContent = p\.paused \? 'PAUSED' : 'SYNCHRONIZING';/.test(appjs) && !/'COPYING'/.test(appjs),
+     'the title says SYNCHRONIZING for the whole run, not the name of a pass');
+  ok(/\$\('bottombar'\)\.classList\.toggle\('paused', state\.paused\);/.test(appjs),
+     'pausing is shown at once, without waiting for the engine');
+  ok(/#bottombar\.live\{box-shadow:inset 0 0 0 2px var\(--pb-color/.test(html) && /animation:runglow/.test(html),
+     'the strip is outlined in the colour of the pass, and breathes');
+  ok(/#bottombar\.live \.pb-pct-ring\{width:116px;height:116px;\}/.test(html) &&
+     /#bottombar\.live \.ring-txt\{font-size:30px;/.test(html) && /#bottombar\.live \.pb-title\{font-size:30px;/.test(html),
+     'the ring, the percentage and the title are big');
+  ok(/#bottombar\.live\.paused,#bottombar\.live\.paused \.pb-title::before,#bottombar\.live\.paused \.pb-fill::after\{animation:none;\}/.test(html),
+     'and everything stops moving when paused');
+  ok(/prefers-reduced-motion:reduce\)\{\s*#bottombar\.live,/.test(html), 'or when the system asks for less motion');
+
+  // (d3) A comparison wears the same strip, in the blue of its button.
+  ok(/classList\.toggle\('live', !!on\)/.test(appjs) && /classList\.toggle\('cmp', !!\(on && !steps\)\)/.test(appjs),
+     'the strip is live for a comparison as for a run');
+  ok(/setBusyUi\(true, 'COMPARING'\)/.test(appjs) && /setBusyUi\(true, 'CHECKING'\)/.test(appjs),
+     'COMPARING, and CHECKING for the look after a run');
+  ok(/'--pb-color',  cmp \? 'var\(--blue\)' : 'var\(--green\)'/.test(appjs), 'blue for a comparison, green for a run');
+  ok(/#bottombar\.live\{box-shadow:inset 0 0 0 2px var\(--pb-color/.test(html) && /#bottombar\.open\.live\{height:auto;\}/.test(html),
+     'one set of rules for both');
+
+  // (d6) The overview on the left empties with the list during a run, and
+  //      the comparison shows its percentage plainly (no "≈").
+  {
+    const { L, R } = scratch();
+    write(L, 'A/one.mov', 'x'.repeat(3000)); write(L, 'B/two.mov', 'y'.repeat(3000));
+    const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+    const s = new Session();
+    await s.compare(job, { token: {} });
+    const names = () => s.overview({}, [], null).rows.map(r => r.name).filter(Boolean);
+    ok(names().includes('A') && names().includes('B'), 'both folders are listed before the run');
+    await s.sync(job, { token: { cancelled: false } });
+    eq(names().filter(n => n === 'A' || n === 'B'), [], 'and neither once everything has landed');
+    await s.close();
+    ok(/if \(t - runOvAt >= 1000\) \{ runOvAt = t; await refreshOverview\(\); \}/.test(appjs), 'the window asks for it again while the run goes');
+    ok(!/'≈' \+/.test(appjs), 'the comparison percentage carries no ≈');
+  }
+
+  // (d7) 🔴 Dates on a NAS. Over SMB the Mac sends part of a file after the
+  //      copy has "finished" — when the verification flushes it — and the
+  //      server stamps the file with that moment, after syncto had set the
+  //      date. Every file ended up dated "today" and the next Mirror wanted to
+  //      copy them all again. Simulated here: the flush touches the file.
+  {
+    const { NativeFs } = require('../src/main/fs/native');
+    const P = NativeFs.prototype, orig = P.flush;
+    P.flush = async function (p) { const r = await orig.call(this, p); const now = new Date(); fs.utimesSync(p, now, now); return r; };
+    try {
+      const { L, R } = scratch();
+      const old = Date.parse('2026-08-13T15:40:00Z');
+      write(L, 'DCIM/DJI_0020.MP4', 'x'.repeat(5000), old);
+      write(L, 'DCIM/DJI_0352.MP4', 'y'.repeat(5000), old);
+      const job = makeJob(L, R, { sync: { variant: 'mirror', preserveTimes: true } });
+      const s = new Session();
+      await s.compare(job, { token: {} });
+      const run = await s.sync(job, { token: { cancelled: false } });
+      await s.close();
+      const got = fs.statSync(path.join(R, 'DCIM/DJI_0020.MP4')).mtimeMs;
+      ok(Math.abs(got - old) < 1500, 'the file on the destination keeps the source date, whatever the flush did');
+      ok(!run.notes.some(n => /could not/i.test(n)), 'with nothing to report');
+      const again = new Session();
+      const cmp = await again.compare(job, { token: {} });
+      eq(cmp.stats.filesToProcess, 0, 'so the next Mirror has nothing to copy again');
+      await again.close();
+    } finally { P.flush = orig; }
+  }
+
+  // (d7b) The order that keeps the date on a NAS (0.8.5): the file is flushed
+  //       BEFORE its date is set, never after — and only once.
+  {
+    const { NativeFs } = require('../src/main/fs/native');
+    const P = NativeFs.prototype, of = P.flush, om = P.setMTime;
+    const log = [];
+    P.flush = async function (p) { log.push('flush ' + path.basename(p)); return of.call(this, p); };
+    P.setMTime = async function (p, m) { log.push('date ' + path.basename(p)); return om.call(this, p, m); };
+    try {
+      const { L, R } = scratch();
+      write(L, 'clip.mov', 'x'.repeat(4000), Date.parse('2026-08-13T15:40:00Z'));
+      const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+      const s = new Session();
+      await s.compare(job, { token: {} });
+      await s.sync(job, { token: { cancelled: false } });
+      await s.close();
+      const f = log.findIndex(l => /^flush clip\.mov/.test(l)), d = log.indexOf('date clip.mov');
+      ok(f >= 0 && d > f, `flushed before the date is set (${log.filter(l => /clip/.test(l)).join(' → ')})`);
+      eq(log.filter(l => /^flush clip/.test(l)).length, 1, 'and flushed once, not a second time at the read-back');
+    } finally { P.flush = of; P.setMTime = om; }
+  }
+
+  // (d9) "Correct dates only" (0.8.4): identical content, only the date moves.
+  {
+    const old = Date.parse('2026-08-13T15:40:00Z'), today = Date.parse('2026-09-30T11:00:00Z');
+    const setup = () => {
+      const { L, R } = scratch();
+      write(L, 'same.mp4', 'x'.repeat(8000), old);  write(R, 'same.mp4', 'x'.repeat(8000), today);
+      write(L, 'diff.mp4', 'y'.repeat(8000), old);  write(R, 'diff.mp4', 'z'.repeat(8000), today);
+      return { L, R };
+    };
+    const run = async (L, R, on) => {
+      const job = makeJob(L, R, { sync: { variant: 'mirror', fixDatesOnly: on } });
+      const s = new Session();
+      await s.compare(job, { token: {} });
+      const res = await s.sync(job, { token: { cancelled: false } });
+      await s.close();
+      return res;
+    };
+    eq(defaultJob().sync.fixDatesOnly, false, 'off by default');
+    {
+      const { L, R } = setup();
+      const inoBefore = fs.statSync(path.join(R, 'same.mp4')).ino;
+      const res = await run(L, R, true);
+      const st = fs.statSync(path.join(R, 'same.mp4'));
+      ok(Math.abs(st.mtimeMs - old) < 1500, 'the identical file gets the source date back');
+      eq(st.ino, inoBefore, 'without being rewritten — it is the same file on disk');
+      eq(read(R, 'diff.mp4'), 'y'.repeat(8000), 'a file whose content differs is copied as usual');
+      eq(res.counters.files, 1, 'one file copied');
+      eq(res.counters.dated, 1, 'one date corrected');
+      ok(res.notes.some(n => /identical, byte for byte — only the date was corrected/.test(n)), 'and the summary says so');
+      const again = new Session();
+      const cmp = await again.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: {} });
+      eq(cmp.stats.filesToProcess, 0, 'the next Mirror has nothing left to do');
+      await again.close();
+    }
+    {
+      const { L, R } = setup();
+      const inoBefore = fs.statSync(path.join(R, 'same.mp4')).ino;
+      await run(L, R, false);
+      ok(fs.statSync(path.join(R, 'same.mp4')).ino !== inoBefore, 'switched off, the file is copied again, as before');
+    }
+  }
+
+  // (d10) Locks left behind by a force-quit (0.8.5).
+  {
+    const { NativeFs } = require('../src/main/fs/native');
+    const { acquireOne, LOCK_NAME } = require('../src/main/core/lock');
+    const nfs = new NativeFs();
+    // (a) A NAS where hard links are refused with ENOTSUP, as macOS says on SMB.
+    const origLink = fs.promises.link;
+    fs.promises.link = async () => { const e = new Error("ENOTSUP: operation not supported on socket, link"); e.code = 'ENOTSUP'; throw e; };
+    try {
+      const { dir } = scratch();
+      const from = path.join(dir, 'a'), to = path.join(dir, 'b');
+      fs.writeFileSync(from, 'x');
+      await nfs.renameStrict(from, to);
+      ok(fs.existsSync(to) && !fs.existsSync(from), 'a share without hard links falls back to a plain rename');
+      fs.writeFileSync(from, 'y');
+      let e = null; try { await nfs.renameStrict(from, to); } catch (err) { e = err; }
+      ok(e && e.code === 'EEXIST', 'and still refuses to overwrite a target that is there');
+    } finally { fs.promises.link = origLink; }
+    // (b) A lock nobody has touched for ten minutes, from another machine: taken
+    //     at once, not after a minute of watching.
+    {
+      const { L } = scratch();
+      const lp = path.join(L, LOCK_NAME);
+      fs.writeFileSync(lp, JSON.stringify({ format: 1, installId: 'someone-else', computerName: 'OTHER', userId: 'x', processId: 1, since: 0 }) + '\n');
+      const old = new Date(Date.now() - 10 * 60 * 1000); fs.utimesSync(lp, old, old);
+      const t = Date.now();
+      const lock = await acquireOne(nfs, L, {});
+      ok(Date.now() - t < 5000, `a lock silent for ten minutes is taken over at once (${Date.now() - t} ms)`);
+      await lock.release();
+    }
+  }
+
+  // (d8) The Size and Date columns can be resized, and the date fits by default.
+  ok(/var\(--szL,76px\) var\(--dtL,136px\)/.test(html) && /var\(--szR,76px\) var\(--dtR,136px\)/.test(html),
+     'a date column wide enough for "2026-08-13 15:40", on both sides');
+  eq([...html.matchAll(/data-col="(\w+)"/g)].map(m => m[1]), ['szL', 'dtL', 'szR', 'dtR'], 'four headings carry a grip');
+  ok(/grip\.className = 'col-grip'/.test(appjs) && /API\.savePrefs\(\{ ui: \{ cols \} \}\)/.test(appjs), 'dragged, and remembered');
+
+  // (e) What older job files and preferences carry.
+  {
+    const { dir } = scratch();
+    const file = path.join(dir, 'old.syncto');
+    fs.writeFileSync(file, JSON.stringify({ format: require('../src/main/config').JOB_FORMAT || 'syncto-job',
+      name: 'old', pairs: [{ left: '/a', right: '/b' }],
+      sync: { transferLanes: 16, permanentFallback: false, report: { enabled: true, html: true } } }));
+    let job = null;
+    try { job = require('../src/main/config').loadJob(file); } catch (_) {}
+    if (job) {
+      eq(job.sync.transferLanes, 10, 'more than ten transfers is brought back to ten');
+      eq(job.sync.permanentFallback, true, 'no trash means delete anyway, whatever the file said');
+      ok(!('report' in job.sync), 'and report settings are dropped');
+    }
+    ok(job, 'an older job file still loads');
+  }
+  ok(/Math\.min\(10, Number\(this\.cfg\.transferLanes\)/.test(fs.readFileSync(path.join(root, 'src/main/core/sync.js'), 'utf8')),
+     'the engine allows up to ten lanes');
+
+  // (d11) The Overview (0.8.5): a click selects, a double-click opens, a
+  //       lasso takes several folders at once.
+  {
+    const appjs = fs.readFileSync(path.join(root, 'src/renderer/app.js'), 'utf8');
+    const html  = fs.readFileSync(path.join(root, 'src/renderer/index.html'), 'utf8');
+    const click = appjs.slice(appjs.indexOf("if (lassoJustEnded) { lassoJustEnded = false; return; }"),
+                              appjs.indexOf('async function openOvRow(it)'));
+    ok(click.length > 0, 'the row click is guarded against the release of a lasso');
+    ok(/if \(e\.detail >= 2\) \{ await openOvRow\(it\); return; \}/.test(click),
+       'a double-click opens the folder');
+    const plain = click.slice(click.indexOf('e.detail >= 2'));
+    ok(/state\.ovSel = new Set\(\[key\]\)/.test(plain), 'a single click selects the folder alone');
+    ok(!/setScope\(/.test(plain) && !/ovOpen/.test(plain), 'and neither scopes the grid nor unfolds it');
+    const open = appjs.slice(appjs.indexOf('async function openOvRow(it)'), appjs.indexOf('let lassoJustEnded'));
+    ok(/ovOpen/.test(open) && /setScope\(/.test(open), 'opening unfolds it and scopes the grid on it');
+    ok(/\$\('ov-list'\)\.addEventListener\('mousedown'/.test(appjs), 'the lasso starts on the Overview list');
+    ok(/< 5\) return;/.test(appjs), 'only after the mouse has moved, so a click stays a click');
+    ok(/add: e\.metaKey \|\| e\.ctrlKey/.test(appjs), 'Cmd/Ctrl adds the lasso to the selection');
+    ok(/list\.scrollTop -= 12/.test(appjs) && /list\.scrollTop \+= 12/.test(appjs), 'the list scrolls near its edges');
+    ok(/\.ov-lasso\{/.test(html), 'the lasso is drawn');
+    ok(/body\.lassoing \.tooltip-float\{display:none/.test(html) &&
+       /classList\.contains\('lassoing'\)\) return;/.test(appjs), 'and no tooltip covers it');
+  }
+}
+
 (async function main() {
   console.log('syncto engine tests');
   console.log('scratch: ' + ROOT);
@@ -5271,6 +5423,7 @@ function testLinux() {
   testPerformance,
   testWindowTruth,
   testLinux,
+      testRequest083,
     ];
     const only = (process.env.SYNCTO_ONLY || '').split(',').map(x => x.trim()).filter(Boolean);
     // Each section on its own: an exception used to end the whole suite, so

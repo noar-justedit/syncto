@@ -34,10 +34,9 @@
 // SECOND PASS, once every file has been copied — same order as ingesto: copy
 // everything, then read everything back.
 
-const { OP, TEMP_EXT, OLD_EXT, ALWAYS_SKIP, OS_LITTER_FOLDERS, isSyncToInternal } = require('./compare');
+const { OP, TEMP_EXT, OLD_EXT, ALWAYS_SKIP, OS_LITTER_FOLDERS, isSyncToInternal, equalContent } = require('./compare');
 const { createHasher, hashStream, algoFor } = require('./hash');
 const { assertSafeRel } = require('./relpath');
-const { log } = require('../log');
 const { Versioner, runTimestamp, streamCopy } = require('./versioning');
 
 const RETRY_DEFAULT_DELAY = 5000;
@@ -123,8 +122,6 @@ function copyStream(srcFs, srcPath, dstFs, dstPath, hasher, onBytes, token) {
       if (t - lastTick >= 15000) {
         lastTick = t;
         const secs = (t - started) / 1000;
-        log.debug('copy', `… ${dstPath}`,
-          `${bytes} B in ${Math.round(secs)} s · ${(bytes / 1048576 / secs).toFixed(2)} MB/s`);
       }
       // Back-pressure. `held` has to be honoured here too: the drain handler
       // used to resume unconditionally, so a paused transfer restarted itself
@@ -159,6 +156,7 @@ class SyncRunner {
    *   },
    *   token: { cancelled, paused },
    *   onProgress(fn),
+   *   onRowDone(),                  // a row finished: the visible list changed
    *   trashItem(fsx, absPath) -> Promise<bool>
    * }
    */
@@ -217,7 +215,7 @@ class SyncRunner {
   // connections is the only way past it — which is exactly what a transfer
   // client does to go faster.
   laneCount(to, from) {
-    const n = Math.max(1, Math.min(8, Number(this.cfg.transferLanes) || 1));
+    const n = Math.max(1, Math.min(10, Number(this.cfg.transferLanes) || 1));
     if (n === 1) return 1;
     // A local side never limits anything: the same NativeFs serves every lane,
     // and reading four files at once from a disk is free. Only a server needs
@@ -304,6 +302,79 @@ class SyncRunner {
   absNode(node, side) { return this.abs(side, this.relOn(node, side)); }
 
 
+  // Are two files byte-for-byte the same? For "Correct dates only".
+  //
+  // Between two native folders (a local disk, a mounted NAS) the files are
+  // read with plain positioned reads, block after block, both in the same
+  // loop — no streams. The stream version (compare.js) pauses and resumes two
+  // streams in turn; on a NAS in the field (30/09/2026) a run using it sat at
+  // 0 % and Cancel did nothing, which is what a read waiting for an event that
+  // never comes looks like. Here every block is one awaited read with nothing
+  // to miss, Cancel is looked at between blocks, and Pause holds. A server
+  // (SFTP) side keeps the stream version: it has no positioned reads here.
+  async sameContent(from, srcFs, src, to, dstFs, dst, onBytes) {
+    const native = this.side(from).kind === 'native' && this.side(to).kind === 'native';
+    if (!native) {
+      const r = await equalContent(srcFs, src, dstFs, dst, onBytes, this.token);
+      if (r === null) throw new Error('Cancelled');
+      return r;
+    }
+    const fsp = require('fs').promises;
+    const BLOCK = 4 * 1024 * 1024;
+    const a = await fsp.open(src, 'r');
+    let b = null;
+    try {
+      b = await fsp.open(dst, 'r');
+      const bufA = Buffer.allocUnsafe(BLOCK), bufB = Buffer.allocUnsafe(BLOCK);
+      let pos = 0;
+      for (;;) {
+        if (this.token.cancelled) throw new Error('Cancelled');
+        while (this.token.paused && !this.token.cancelled) {
+          this.emit(true);
+          await new Promise(r => setTimeout(r, 200));
+        }
+        const [ra, rb] = await Promise.all([
+          a.read(bufA, 0, BLOCK, pos),
+          b.read(bufB, 0, BLOCK, pos),
+        ]);
+        if (ra.bytesRead !== rb.bytesRead) return false;
+        if (ra.bytesRead === 0) return true;
+        if (bufA.compare(bufB, 0, rb.bytesRead, 0, ra.bytesRead) !== 0) return false;
+        pos += ra.bytesRead;
+        if (onBytes) onBytes(ra.bytesRead);
+      }
+    } finally {
+      try { await a.close(); } catch (_) {}
+      if (b) { try { await b.close(); } catch (_) {} }
+    }
+  }
+
+  // 🔴 The date, once more, after the flush (0.8.3). On a NAS mounted over SMB
+  // the Mac keeps part of a file it has just written in its own cache and
+  // sends it to the server later. The date was set right after the copy — then
+  // the rest of the data reached the server when the verification flushed it,
+  // and the server stamped the file with the time of that write. Every file on
+  // the NAS ended up dated "today", and the next Mirror wanted to copy them all
+  // again. The flush has happened by now, so a date set here stays.
+  async keepDate(fsx, item) {
+    if (item.mtime == null) return;
+    const s = this.side(item.side);
+    if (!s || s.kind !== 'native') return;
+    let st = null;
+    try { st = await fsx.stat(item.path); } catch (_) { return; }
+    if (!st || Math.abs((st.mtime || 0) - item.mtime) <= 1000) return;
+    try {
+      await fsx.setMTime(item.path, item.mtime);
+      this.redated = (this.redated || 0) + 1;
+      const a = this.applied.get(item.rel);
+      if (a) {
+        if (item.side === 'left') a.mtimeL = item.mtime; else a.mtimeR = item.mtime;
+      }
+    } catch (err) {
+      this.notes.push(`Could not preserve the date of ${item.rel}: ${err.message}`);
+    }
+  }
+
   // Whether a copy landing on this side will be read back and compared.
   //
   // On a server the read-back is the whole file crossing the link a second
@@ -341,14 +412,15 @@ class SyncRunner {
       // Attempted, not succeeded: the ring has to reach the end of the plan
       // even when some files failed, while `done.files` stays the honest
       // count of files that really landed.
-      filesDone: this.done.files + (this.done.failed || 0), filesTotal: this.plan.files,
+      filesDone: this.done.files + (this.done.failed || 0) + (this.done.dated || 0), filesTotal: this.plan.files,
       bytesDone: this.done.workBytes, bytesTotal: this.plan.workBytes,
       // What the CURRENT pass has left to move, separately from the ring.
       // The ring counts the copy AND the read-back, so "remaining" over the
       // whole run is about twice the size of the folder — which is not what
       // anyone expects to read next to a listing that says 285 GB.
       passBytesDone : this.phase === 'verify'
-        ? Math.max(0, this.done.workBytes - this.done.bytes) : this.done.bytes,
+        ? Math.max(0, this.done.workBytes - this.done.bytes - (this.done.checked || 0))
+        : this.done.bytes + (this.done.checked || 0) / 2,
       passBytesTotal: this.phase === 'verify' ? this.plan.verifyBytes : this.plan.bytes,
       copiedBytes: this.done.bytes,
       deleted: this.done.deleted, deletionsTotal: this.plan.deletions,
@@ -372,6 +444,13 @@ class SyncRunner {
   record(node, ok, extra) {
     const r = Object.assign({ rel: node.rel, op: node.op, type: node.type, ok }, extra || {});
     this.results.push(r);
+    // A row that is done leaves the list while the run goes on: the window
+    // shows what is LEFT to do, emptying as the work lands. A failed row stays.
+    if (ok) {
+      node.doneInRun = true;
+      if (node.movePair != null && this.nodes && this.nodes[node.movePair]) this.nodes[node.movePair].doneInRun = true;
+      if (this.onRowDone) this.onRowDone();
+    }
     if (!ok) { this.done.errors++; this.errors.push({ rel: node.rel, message: r.error }); }
     return r;
   }
@@ -597,8 +676,6 @@ class SyncRunner {
     // anyone can read a file name.
     this.emit(false);
 
-    const t0 = Date.now();
-    log.debug('copy', `start ${n.rel} → ${to}`);
     const srcStat = await srcFs.stat(src);
     if (!srcStat) throw new Error('Source vanished before it could be copied.');
 
@@ -695,11 +772,34 @@ class SyncRunner {
     // the stream wrote straight through it.) The link is removed first, through
     // the deletion policy like every other thing that is replaced.
     if (existed && existed.type === 'symlink') {
-      log.warn('copy', `${n.rel}: a link is in the way on the ${to} side — removing it before writing`);
       // As a file, not as a folder: a link to a directory is still one entry
       // to unlink, and rmdir on it fails with ENOTDIR.
       await this.dispose(to, n, false);
       existed = null;
+    }
+
+    // "Correct dates only" (0.8.4). Same size on both sides and only the date
+    // differs: the two files are read side by side, byte for byte. Identical,
+    // the destination only gets the source's date back — nothing is written,
+    // nothing is put aside. Different, it is copied as usual. Made for a NAS
+    // whose files all ended up dated "today" (the 0.8.3 date bug): Mirror
+    // then wanted to copy hundreds of gigabytes that were already there.
+    if (this.cfg.fixDatesOnly && existed && existed.type === 'file' &&
+        existed.size === srcStat.size && srcStat.mtime) {
+      const same = await this.sameContent(from, srcFs, src, to, dstFs, dst,
+        b => {
+          this.done.workBytes += 2 * b;
+          this.done.checked = (this.done.checked || 0) + 2 * b;
+          this.meter.add(b); this.emit(false);
+        });
+      if (same) {
+        await dstFs.setMTime(dst, srcStat.mtime);
+        return {
+          dateOnly: true, bytes: 0, hash: null, algo: null,
+          mtime: srcStat.mtime, size: srcStat.size, dstMtime: srcStat.mtime,
+          srcId: srcStat.id || null, dstId: existed.id || null,
+        };
+      }
     }
 
     // An existing target is put aside before being replaced, so "overwrite"
@@ -740,6 +840,19 @@ class SyncRunner {
       }
     }
 
+    // 🔴 Flush BEFORE the date (0.8.5, the order ingesto has always used). On a
+    // NAS over SMB the Mac keeps the end of a file it has just written and
+    // sends it later; the server stamps the file at that moment. syncto used
+    // to set the date first and flush only at the read-back — so the date it
+    // had just set was overwritten, every file on the NAS was dated "today",
+    // and the next Mirror wanted to copy them all again (FreeFileSync, on the
+    // same NAS, kept the dates). Flushed here, nothing is left to arrive after
+    // the date. The read-back does not flush again: same number of flushes.
+    let flushed = false;
+    if (this.side(to).kind === 'native' && typeof dstFs.flush === 'function') {
+      try { flushed = (await dstFs.flush(tmp)) !== false; } catch (_) { flushed = false; }
+    }
+
     if (failSafe) {
       // Archive BEFORE the rename, and let a refusal abort the copy: the
       // temporary file is cleaned up and the target keeps its old content.
@@ -776,6 +889,9 @@ class SyncRunner {
         // filesystem, and made the manifest unusable with xxhsum -c.
         listRel: this.relOn(n, to),
         digest: copied.digest, size: srcStat.size, algo,
+        // The date it must carry, checked again after the read-back.
+        mtime: mtimeKept ? srcStat.mtime : null,
+        flushed,
       });
     }
 
@@ -804,14 +920,6 @@ class SyncRunner {
       // run and bounced the file back and forth for ever.
       if (st) { dstId = st.id; if (!mtimeKept) dstMtime = st.mtime; }
     } catch (_) {}
-
-    // The line that turns "it feels slow" into a number. Bytes, milliseconds
-    // and the rate they work out to, per file — which is what separates a slow
-    // link from a slow server from a slow disk on this side.
-    const ms = Date.now() - t0;
-    log.debug('copy', `${n.rel} \u2192 ${to}`,
-      `${copied.bytes} B in ${ms} ms \u00b7 ${
-        ms > 0 ? (copied.bytes / 1048576 / (ms / 1000)).toFixed(1) : '\u221e'} MB/s`);
 
     return {
       bytes: copied.bytes, hash: copied.digest, algo,
@@ -991,7 +1099,13 @@ class SyncRunner {
   // moves — instead of discovered file by file half way through a run.
   async preflight(plan) {
     const mode = this.cfg.deletion || 'recycler';
-    if (mode !== 'recycler' || this.cfg.permanentFallback) return;
+    if (mode !== 'recycler') return;
+    // With the fallback on (the default since 0.8.3) nothing is refused: a
+    // disk without a trash gets a permanent delete. The confirmation asks the
+    // question anyway (collectNoTrash), so the person is told BEFORE the run
+    // which folders that will be — the run itself does not pay for the probe.
+    if (this.cfg.permanentFallback && !this.collectNoTrash) return;
+    this.noTrash = [];
 
     // Which sides will actually lose a file: deletions, and overwrites, which
     // put the replaced version aside the same way.
@@ -1010,13 +1124,13 @@ class SyncRunner {
     for (const side of sides) {
       if (await this.trashWorks(side)) continue;
       const where = this.side(side).path;
+      if (this.cfg.permanentFallback) { this.noTrash.push({ side, path: where }); continue; }
       // Wording matters here: this is the message that has to get a user
       // moving again, so it names the folder and the exact controls to change.
       const err = new Error(
         `The recycle bin does not work on ${where} — network volumes usually have none. ` +
         `syncto will not delete or replace anything permanently while "Move to the trash" is ` +
-        `selected. In Settings › Deletion, either set "When removing" to "Delete permanently", ` +
-        `or turn on "No trash? delete anyway" to fall back automatically wherever there is no bin.`);
+        `selected. In Settings › Deletion, set "Default action" to "Delete permanently".`);
       err.preflight = true;
       throw err;
     }
@@ -1100,7 +1214,8 @@ class SyncRunner {
       this.inFlight++;
       try {
         const res = await this.withRetry(item.n.rel, () => this.copyOne(item, lane));
-        this.done.files++;
+        if (res.dateOnly) this.done.dated = (this.done.dated || 0) + 1;
+        else this.done.files++;
         this.record(item.n, true, {
           side: item.to, bytes: res.bytes, hash: res.hash, algo: res.algo,
         });
@@ -1125,6 +1240,11 @@ class SyncRunner {
       this.emit(false);
     });
 
+    if (this.done.dated) {
+      this.notes.push(`${this.done.dated} file${this.done.dated > 1 ? 's were' : ' was'} identical, byte for byte — ` +
+        'only the date was corrected, nothing was copied.');
+    }
+
     // A checksum list is a list of fingerprints that were CHECKED. With the
     // read-back off for a server, nothing checked anything on that side, so
     // there is no list to write — and saying so is the point: a sidecar full
@@ -1148,9 +1268,6 @@ class SyncRunner {
       this.current = '';
       this.plan.verifyBytes = this.toVerify.reduce((t, i) => t + (i.size || 0), 0);
       this.emit(true, 'Verifying…');
-      log.info('verify', `reading back ${this.toVerify.length} file(s)`);
-      const vStart = Date.now();
-      let vBytes = 0;
       const vLanes = this.laneCount(this.toVerify[0].side, this.toVerify[0].side);
       // keepGoing: a mismatch on one file used to end the pass, leaving every
       // file after it copied but never read back — and recorded as
@@ -1163,9 +1280,8 @@ class SyncRunner {
         this.inFlight++;
         this.emit(false);
         const fsx = this.fsFor(item.side, lane);
-        const vT0 = Date.now();
         try {
-          const flushed = await fsx.flush(item.path);
+          const flushed = item.flushed ? true : await fsx.flush(item.path);
           if (flushed === false && !this._flushWarned) {
             this._flushWarned = true;
             this.notes.push('The write cache could not be flushed on this volume, so the ' +
@@ -1176,13 +1292,7 @@ class SyncRunner {
             b => { this.done.workBytes += b; this.meter.add(b); this.emit(false); }, this.token);
           if (back !== item.digest) throw new Error(`Checksum mismatch (${item.algo}).`);
           item.ok = true;
-          {
-            const ms = Date.now() - vT0;
-            vBytes += item.size || 0;
-            log.debug('verify', item.rel,
-              `${item.size || 0} B in ${ms} ms \u00b7 ${
-                ms > 0 ? ((item.size || 0) / 1048576 / (ms / 1000)).toFixed(1) : '\u221e'} MB/s`);
-          }
+          await this.keepDate(fsx, item);
           if (this.cfg.writeChecksumList) {
             this.checksums[item.side].push({ rel: item.listRel || item.rel, hash: item.digest, size: item.size });
           }
@@ -1205,19 +1315,18 @@ class SyncRunner {
         this.emit(false);
       }, true);
 
+      if (this.redated) {
+        this.notes.push(`The destination changed the date of ${this.redated} file${this.redated > 1 ? 's' : ''} ` +
+          'after the copy (the write cache of a network share); syncto set the original date back.');
+      }
+
       // Anything copied but NOT read back must not be recorded as
       // synchronized: the database is what makes the next run skip a file, so
       // a file whose proof was never taken has to be looked at again.
       this.dropUnproven();
       // Not back to 'copy': what follows writes nothing, and the interface
       // must not flash green again as if a new file were being transferred.
-      {
-        const ms = Date.now() - vStart;
-        log.info('verify', `read back ${vBytes} B in ${Math.round(ms / 1000)} s \u00b7 ${
-          ms > 0 ? (vBytes / 1048576 / (ms / 1000)).toFixed(1) : '\u221e'} MB/s`);
-      }
       this.phase = 'cleanup';
-      log.info('sync', 'cleanup: removing emptied folders');
     }
 
     // 5. delete folders, deepest first
@@ -1240,9 +1349,7 @@ class SyncRunner {
     //    half-written copies, never user data, and the comparison hides them —
     //    so nothing else would ever remove them. We hold the lock on both
     //    folders here, so no other machine is writing them right now.
-    log.info('sync', 'cleanup: sweeping leftovers from interrupted runs');
     await this.sweepLeftovers();
-    log.info('sync', 'cleanup: done');
 
     // Prune stale revisions once everything else is done.
     for (const side of ['left', 'right']) {

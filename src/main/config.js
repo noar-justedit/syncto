@@ -91,7 +91,9 @@ function defaultJob() {
       copyLevel        : 'secure',
       writeChecksumList: false,
       deletion         : 'recycler',    // permanent | recycler | versioning
-      permanentFallback: false,
+      // No trash on a disk: delete anyway, and say so in the confirmation
+      // before the run (0.8.3 — no longer a setting, see loadJob).
+      permanentFallback: true,
       versioning: {
         leftFolder : '', rightFolder: '',
         style      : 'timestampFolder', // replace | timestampFolder | timestampFile
@@ -109,6 +111,10 @@ function defaultJob() {
       // four files at once seeks instead of reading.
       transferLanes  : 4,
       failSafe       : true,
+      // Same size, different date: read both, and when they are identical only
+      // set the date back instead of copying (0.8.4). Off by default — it
+      // reads the destination, which a plain run never does.
+      fixDatesOnly   : false,
       preserveTimes  : true,
       copyPermissions: false,
       retryCount     : 2,
@@ -123,10 +129,6 @@ function defaultJob() {
       // What to do once the run is over: none | quit | sleep | shutdown.
       // Only ever fires on a clean run — see the renderer's countdown.
       afterSync      : 'none',
-      report: {
-        enabled: false, html: true, csv: false, json: false,
-        folder : '',                    // empty -> Documents/syncto reports
-      },
     },
     autoSync: {
       enabled: false,
@@ -139,9 +141,6 @@ const PREFS_REVISION = 2;
 
 function defaultPrefs() {
   return {
-    // The diagnostic journal. Off by default, emptied at every launch, and
-    // read back in the settings window so it can be copied and sent.
-    log: false,
     revision: PREFS_REVISION,
     window: { width: 1280, height: 820 },
     lastJobPath: '',
@@ -154,9 +153,10 @@ function defaultPrefs() {
     // readable password is ever written to this file.
     // { id, name, host, port, username, keyPath, savePassword, passwordEnc, passphraseEnc }
     servers: [],
-    // Phone notifications, same mechanism as ingesto. The access token is
-    // ciphertext from the OS credential store, like every other secret here.
-    ntfy: { enabled: false, server: 'https://ntfy.sh', topic: '', tokenEnc: '', onlyOnProblem: false },
+    // Phone notifications, same mechanism as ingesto. A server, a topic, on or
+    // off — sent after every run. (The access token and "only when there is a
+    // problem" went in 0.8.3.)
+    ntfy: { enabled: false, server: 'https://ntfy.sh', topic: '' },
     // The identity of each SFTP server, learnt at the first connection and
     // compared at every one after. { "host:port": "SHA256:…" }. Not a secret —
     // a public key fingerprint — so it lives in the file in clear, which is
@@ -514,43 +514,25 @@ class Prefs {
   }
 
   // ── ntfy ─────────────────────────────────────────────────────────────────
-  // What the settings panel is allowed to see: everything except the token,
-  // which it only ever learns the existence of.
-  ntfyForUi() {
-    const n = this.data.ntfy || {};
-    return {
-      enabled: !!n.enabled,
-      server : n.server || 'https://ntfy.sh',
-      topic  : n.topic || '',
-      hasToken: !!n.tokenEnc,
-      onlyOnProblem: !!n.onlyOnProblem,
-    };
-  }
+  ntfyForUi() { return this.ntfyConfig(); }
 
-  // Decrypted, for an immediate send. Stays in the main process.
   ntfyConfig() {
     const n = this.data.ntfy || {};
     return {
       enabled: !!n.enabled,
       server : n.server || 'https://ntfy.sh',
       topic  : n.topic || '',
-      token  : secrets.decrypt(n.tokenEnc),
-      onlyOnProblem: !!n.onlyOnProblem,
     };
   }
 
-  // patch may carry `token`; it is encrypted here and never stored readable.
-  // An empty string clears it, `undefined` leaves it alone — so re-saving the
-  // panel without retyping the token does not wipe it.
   saveNtfy(patch) {
     const n = Object.assign({}, this.data.ntfy);
     if (patch.enabled !== undefined) n.enabled = !!patch.enabled;
     if (patch.server  !== undefined) n.server  = String(patch.server || '').trim() || 'https://ntfy.sh';
     if (patch.topic   !== undefined) n.topic   = String(patch.topic || '').trim();
-    if (patch.onlyOnProblem !== undefined) n.onlyOnProblem = !!patch.onlyOnProblem;
-    if (patch.token !== undefined) {
-      n.tokenEnc = patch.token ? (secrets.encrypt(patch.token) || '') : '';
-    }
+    // Removed in 0.8.3. A token stored by an older version is dropped here,
+    // not left behind in the preferences with nothing to show or clear it.
+    delete n.token; delete n.tokenEnc; delete n.onlyOnProblem;
     this.data.ntfy = n;
     this.save();
     return this.ntfyForUi();
@@ -592,10 +574,10 @@ function scrubSecrets(data) {
       if (typeof pair.right === 'string') pair.right = captureUrlPassword(data, pair.right);
     }
   }
-  if (data.ntfy && typeof data.ntfy === 'object' && data.ntfy.token) {
-    const enc = secrets.encrypt(data.ntfy.token);
-    if (enc) data.ntfy.tokenEnc = enc;
-    delete data.ntfy.token;
+  // The ntfy token is no longer a setting (0.8.3): whatever an older version
+  // stored, readable or encrypted, does not survive a write.
+  if (data.ntfy && typeof data.ntfy === 'object') {
+    delete data.ntfy.token; delete data.ntfy.tokenEnc; delete data.ntfy.onlyOnProblem;
   }
   if (!Array.isArray(data.servers)) return;
   for (const s of data.servers) {
@@ -667,8 +649,13 @@ function loadJob(file) {
   if (job.sync && (!job.sync.versioning || typeof job.sync.versioning !== 'object')) {
     job.sync.versioning = defaultJob().sync.versioning;
   }
-  if (job.sync && (!job.sync.report || typeof job.sync.report !== 'object')) {
-    job.sync.report = defaultJob().sync.report;
+  if (job.sync) {
+    // Reports went in 0.8.3: an older job's settings are dropped on load.
+    delete job.sync.report;
+    // "No trash? delete anyway" is no longer a choice (0.8.3).
+    job.sync.permanentFallback = true;
+    const lanes = Number(job.sync.transferLanes);
+    job.sync.transferLanes = Number.isFinite(lanes) ? Math.min(10, Math.max(1, Math.round(lanes))) : 4;
   }
   if (!Array.isArray(job.pairs) || !job.pairs.length) job.pairs = [{ left: '', right: '' }];
   delete job.left; delete job.right;

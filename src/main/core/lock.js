@@ -47,7 +47,6 @@ const os = require('os');
 const fsNode = require('fs');
 const nodePath = require('path');
 const { LOCK_NAME } = require('./compare');
-const { log } = require('../log');
 
 const EMIT_LIFE_SIGN_MS   = 5000;                        // heartbeat period
 const POLL_LIFE_SIGN_MS   = 2000;                        // how often a waiter looks
@@ -183,8 +182,6 @@ async function readLockInfo(fsx, lockPath) {
       resolve(v);
     };
     const timer = setTimeout(() => {
-      log.warn('lock', `no answer reading ${lockPath} within ${
-        Math.round(READ_LOCK_TIMEOUT_MS / 1000)} s`);
       finish(null);
     }, READ_LOCK_TIMEOUT_MS);
     try { rs = fsx.createReadStream(lockPath); } catch (_) { return finish(null); }
@@ -193,7 +190,7 @@ async function readLockInfo(fsx, lockPath) {
     let total = 0;
     rs.on('data', c => {
       total += c.length;
-      if (total > MAX_LOCK_BYTES) { log.warn('lock', `${lockPath} is too large to be a lock file`); return finish(null); }
+      if (total > MAX_LOCK_BYTES) return finish(null);
       chunks.push(c);
     });
     rs.on('error', () => finish(null));
@@ -479,7 +476,6 @@ async function acquireOne(fsx, folderPath, opts) {
   let ghostTries = 0;   // create fails "exists" but no lock file is there
   let takeoverTries = 0;
 
-  log.info('lock', `acquiring ${folderPath}`);
   for (;;) {
     if (token && token.cancelled) throw new Error('Cancelled');
 
@@ -489,21 +485,11 @@ async function acquireOne(fsx, folderPath, opts) {
       await fsx.writeExclusive(lockPath, payload);
       const lock = new DirLock(fsx, lockPath, local, onLost, (opts || {}).timing);
       lock._startHeartbeat();
-      log.info('lock', `acquired ${folderPath}`);
       return lock;
     } catch (err) {
       if (!/exist/i.test(err.code || err.message || '')) {
-        log.error('lock', `cannot create the lock file in ${folderPath}`,
-          (err.code ? err.code + ' ' : '') + err.message);
         throw err;
       }
-      // Reported as "already exists" — which SFTPv3 cannot distinguish from a
-      // plain failure, so the log says what was really seen.
-      // The message already carries the code on a native filesystem; printing
-      // it twice ("EEXIST EEXIST: file already exists") reads like a bug.
-      const detail = err.message && err.code && err.message.startsWith(err.code)
-        ? err.message : (err.code ? err.code + ' ' : '') + err.message;
-      log.info('lock', `${folderPath} is already locked (or the server refused the create)`, detail);
       createErr = err;
     }
 
@@ -521,8 +507,6 @@ async function acquireOne(fsx, folderPath, opts) {
         // The create said "exists" and there is no file. On SFTP that is what a
         // refused write looks like — a permission problem, a full quota, a
         // read-only export — because SFTPv3 answers "Failure" to all of them.
-        log.warn('lock', `${folderPath}: the create was refused but no lock file is there ` +
-          `(attempt ${ghostTries + 1}/5) — check that this account may write here`);
         if (++ghostTries >= 5) throw createErr;
         await sleep(POLL_LIFE_SIGN_MS);
         continue;
@@ -537,8 +521,6 @@ async function acquireOne(fsx, folderPath, opts) {
     }
 
     // Unknown owner (another machine): watch the file for life signs.
-    log.info('lock', `${folderPath} held by ${describe(info)} — watching for ` +
-      `${Math.round(DETECT_ABANDONED_MS / 1000)} s of silence`);
     const alive = await watchLifeSigns(fsx, lockPath, info, onStatus, token);
     if (alive) { takeoverTries = 0; continue; }
     await takeOver(fsx, lockPath, onStatus, info, ++takeoverTries);
@@ -548,9 +530,19 @@ async function acquireOne(fsx, folderPath, opts) {
 
 // Polls the lock file. Returns true if it is still being fed, false once it has
 // been silent for DETECT_ABANDONED_MS.
+// A lock whose file has not been touched for this long was already abandoned
+// when we found it: a running syncto rewrites it every 5 s. The minute on top
+// of the detection window absorbs a clock that disagrees between this machine
+// and the server holding the file.
+const ALREADY_ABANDONED_MS = DETECT_ABANDONED_MS + 60000;
+
 async function watchLifeSigns(fsx, lockPath, info, onStatus, token) {
   let last = await fsx.stat(lockPath);
   if (!last) return false;                        // vanished: free to take
+  // Left behind by a syncto that was force-quit, crashed or lost its power —
+  // two minutes ago or two weeks ago. Watching it for another minute proved
+  // nothing new, and people deleted it by hand rather than wait (0.8.5).
+  if (last.mtime && Date.now() - last.mtime > ALREADY_ABANDONED_MS) return false;
   let lastChange = Date.now();
   let lastSize = last.size, lastMtime = last.mtime;
 
@@ -686,12 +678,9 @@ async function acquireAll(entries, opts) {
       return l ? `${l.path}: ${l.lost}` : null;
     },
     async release() {
-      log.info('lock', `releasing ${held.length} folder lock(s)`);
-      const t0 = Date.now();
       for (const l of held) {
-        try { await l.release(); } catch (err) { log.warn('lock', `release failed: ${l.path}`, err.message); }
+        try { await l.release(); } catch (_) { /* the next run takes it over */ }
       }
-      log.info('lock', `released in ${Date.now() - t0} ms`);
     },
   };
 }

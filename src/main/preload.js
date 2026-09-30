@@ -32,11 +32,6 @@ const api = {
   openExternal : (u)    => ipcRenderer.invoke('open-external', u),
   openPath     : (p)    => ipcRenderer.invoke('open-path', p),
   copyText     : (t)    => ipcRenderer.invoke('copy-text', t),
-  logInfo      : ()     => ipcRenderer.invoke('log-info'),
-  logSet       : (on)   => ipcRenderer.invoke('log-set', on),
-  logClear     : ()     => ipcRenderer.invoke('log-clear'),
-  logReveal    : ()     => ipcRenderer.invoke('log-reveal'),
-  logSave      : ()     => ipcRenderer.invoke('log-save'),
   diskFree     : (p)    => ipcRenderer.invoke('disk-free', p),
   folderExists : (p)    => ipcRenderer.invoke('folder-exists', p),
 
@@ -50,8 +45,7 @@ const api = {
   preflight  : (job)     => ipcRenderer.invoke('preflight', job),
   takeMigrationNotes: () => ipcRenderer.invoke('take-migration-notes'),
 
-  // After the run, and phone notifications. `ntfyGet` never returns the
-  // access token — only whether one is stored.
+  // After the run, and phone notifications.
   // BOTH arguments. The handler refuses to touch the machine unless `clean`
   // is exactly true, and this bridge used to forward the action alone — so
   // `clean` arrived undefined, every request was refused as "the run did not

@@ -20,6 +20,7 @@
 // The renderer never receives the whole tree: it asks for windows of rows and
 // sends back edits by index. That keeps a 200 000-file comparison responsive.
 
+const fs = require('fs');
 const { Comparer, CAT, OP, CHECKSUM_FILE } = require('./compare');
 const { PathFilter } = require('./filter');
 const { applyDirections, computeStats, operationFor, applyFolderRules,
@@ -28,11 +29,10 @@ const { loadPairDb, savePairDb, buildSession, pairIdFor, readSideSession } = req
 const { SyncRunner } = require('./sync');
 const { FsPool, parseLocation, redactLocation } = require('../fs/afs');
 const { NativeFs } = require('../fs/native');
-const { buildReport, toHtml, toCsv, toJson } = require('./report');
 const { formatChecksumList, parseChecksumList, createHasher, hashStream } = require('./hash');
 const { isSafeRel } = require('./relpath');
+const { offlineVolume } = require('./volume');
 const { acquireAll, clearStaleLock, isLockFileName, DETECT_ABANDONED_MS } = require('./lock');
-const { log } = require('../log');
 
 // How the overview panel is ordered, at every level of its tree. Size,
 // descending, is the default and the one the panel was born with: the point of
@@ -121,15 +121,7 @@ class Session {
       config: cmp, token, onProgress,
       expected: this.expected,
     });
-    const t0 = Date.now();
-    log.info('compare', `${redactLocation(this.left.path)} \u2194 ${redactLocation(this.right.path)}` +
-      ` \u00b7 by ${cmp.compareVariant} \u00b7 symlinks=${cmp.symlinks || 'exclude'}` +
-      ` \u00b7 db=${this.db && this.db.available ? this.expected + ' items' : 'none'}`);
     const res = await comparer.run();
-    log.info('compare', `done: ${res.nodes.length} items in ${Date.now() - t0} ms` +
-      (res.errors && res.errors.length ? ` \u00b7 ${res.errors.length} error(s)` : '') +
-      (res.cancelled ? ' (cancelled)' : ''));
-    for (const e of (res.errors || []).slice(0, 20)) log.warn('compare', e.path || '', e.message);
     this.nodes  = res.nodes;
     this._touched();
     this.errors = res.errors;
@@ -205,6 +197,7 @@ class Session {
     // everything under it, nothing else.
     const scope = v.scope && v.scope.rel ? v.scope.rel : '';
     for (const n of this.nodes) {
+      if (n.doneInRun) continue;           // landed during the run in progress
       if (scope && n.rel !== scope && !n.rel.startsWith(scope + '/')) continue;
       if (!v.showEqual && !askedForEqual && n.op === OP.NONE) continue;
       if (!v.showExcluded && !n.active) continue;
@@ -335,6 +328,9 @@ class Session {
     const opened = new Set(open || []);
     const groups = new Map();   // displayed rel -> { name, type, items, bytes, idx, active }
     for (const n of this.nodes) {
+      // Landed during the run in progress: it leaves the panel as it leaves
+      // the grid — both list what is LEFT to do (0.8.3).
+      if (n.doneInRun && !all) continue;
       // Walked rather than split: at 400 000 rows an array per node — rebuilt
       // every time a folder is unfolded — was 138 ms of pure allocation.
       const rel = n.rel;
@@ -519,9 +515,14 @@ class Session {
       trashItem: (opts || {}).trashItem,
       token: { cancelled: false },
     });
+    runner.collectNoTrash = true;
     try {
       await runner.preflight(runner.buildPlan());
-      return [];
+      // Not a refusal: a notice the confirmation shows before the run.
+      return (runner.noTrash || []).map(t => ({
+        notice: true, noTrash: true, side: t.side, path: redactLocation(t.path),
+        message: `No trash on ${redactLocation(t.path)} — what is removed or replaced there will be deleted permanently.`,
+      }));
     } catch (err) {
       return [{ message: err.message, preflight: !!err.preflight }];
     }
@@ -531,7 +532,7 @@ class Session {
   // lane, per server side. A connection that cannot be opened is not an error:
   // the run simply uses fewer lanes, which is slower and never wrong.
   async _openLanes(job) {
-    const want = Math.max(1, Math.min(8, Number((job.sync || {}).transferLanes) || 1));
+    const want = Math.max(1, Math.min(10, Number((job.sync || {}).transferLanes) || 1));
     const out = { left: [this.left], right: [this.right] };
     if (want <= 1) return out;
     for (const which of ['left', 'right']) {
@@ -542,19 +543,16 @@ class Session {
         try {
           out[which].push(await this.pool.openLane(loc, i));
         } catch (err) {
-          log.warn('sync', `only ${out[which].length} connection(s) to the ${which} server: ${err.message || err}`);
           break;
         }
       }
-      log.info('sync', `${which}: ${out[which].length} connection(s) for the transfer`);
     }
     return out;
   }
 
   // ── Synchronize ──────────────────────────────────────────────────────────
-  // opts.skipReport: MultiSession aggregates one report across pairs itself.
   async sync(job, opts) {
-    const { onProgress, token, trashItem, appVersion, defaultReportFolder, skipReport } = opts || {};
+    const { onProgress, token, trashItem } = opts || {};
     if (!this.nodes.length && !this.comparedAt) throw new Error('Run a comparison first.');
 
     // A folder that could not be READ during the comparison looks empty, and
@@ -592,6 +590,7 @@ class Session {
       config: Object.assign({}, job.sync),
       lanes,
       token, onProgress, trashItem,
+      onRowDone: () => this._touched(),
     });
     let run;
     try {
@@ -679,11 +678,7 @@ class Session {
           this.nodes, run.applied, this.db,
           job.compare.compareVariant || 'timeSize',
           this.left.path, this.right.path, keepRel);
-        log.info('db', `writing the database on both sides (${
-          session && session.items ? Object.keys(session.items).length : 0} items)`);
-        const dbT = Date.now();
         dbStamp = await savePairDb(this.left, this.right, pairId, session);
-        log.info('db', `written in ${Date.now() - dbT} ms`);
       } catch (err) {
         // This is an ERROR, not a note. A two-way run whose database was not
         // written looks perfect and lies to the next one: delete a file the
@@ -699,49 +694,6 @@ class Session {
       }
     }
 
-    // Report.
-    const report = buildReport({
-      appVersion,
-      pairName: job.name, leftPath: this.left.path, rightPath: this.right.path,
-      variant: job.sync.variant, compareVariant: job.compare.compareVariant,
-      copyLevel: job.sync.copyLevel,
-      deletion: job.sync.deletion, versioningStyle: job.sync.versioning.style,
-      filter: { include: job.compare.includeFilter, exclude: job.compare.excludeFilter },
-      startedAt, endedAt, run, stats: this.stats, comparisonErrors: this.errors,
-    });
-
-    const written = [];
-    const rc = job.sync.report || {};
-    if (rc.enabled && !skipReport) {
-      const stamp = run.stamp.replace(/[: ]/g, '_');
-      const baseName = `syncto_${(job.name || 'job').replace(/[^\w.-]+/g, '_')}_${stamp}`;
-      // Reports never land inside a synchronized folder by default: the next
-      // mirror run would see them as strays on the target and delete them.
-      const outDir = rc.folder || defaultReportFolder || null;
-      const targets = [];
-      if (rc.html) targets.push([baseName + '.html', toHtml(report)]);
-      if (rc.csv)  targets.push([baseName + '.csv',  toCsv(report)]);
-      if (rc.json) targets.push([baseName + '.json', toJson(report)]);
-      for (const [name, content] of targets) {
-        try {
-          if (outDir) {
-            const nfs = this.pool.native;
-            await nfs.mkdir(outDir);
-            await writeText(nfs, nfs.join(outDir, name), content);
-            written.push(nfs.join(outDir, name));
-          } else {
-            const t = this.right;
-            const p = t.fs.join(t.path, name);
-            await writeText(t.fs, p, content);
-            written.push(p);
-          }
-        } catch (err) {
-          run.notes.push(`Could not write the report ${name}: ${err.message}`);
-        }
-      }
-    }
-
-    this.lastResults = run.results;   // MultiSession reads these for its merged report
     return {
       counters : run.counters,
       verified : run.verified || 0,
@@ -752,10 +704,8 @@ class Session {
       stopped  : run.stopped,
       startedAt, endedAt,
       durationMs: endedAt - startedAt,
-      reportFiles: written,
       checksumFiles: sidecars,
       dbStamp,
-      report,
     };
   }
 
@@ -852,6 +802,8 @@ class MultiSession {
     this.stats = null;
     this.pairs = this._pairsOf(job);
     if (!this.pairs.length) throw new Error('Set at least one folder pair.');
+    const offline = offlineVolumesOf(this.pairs);
+    if (offline.length) throw offlineError(offline);
     this.sessions = this.pairs.map(() => new Session());
     const multi = this.pairs.length > 1;
 
@@ -946,7 +898,7 @@ class MultiSession {
       // used to leave its heading behind, so five synchronized pairs produced
       // a list of five rows that looked like work and hid the "nothing to do"
       // message the window has for exactly this case.
-      if (vis.length) { if (multi) all.push({ hdr: true, p }); shown++; }
+      if (vis.length) { if (multi) all.push({ hdr: true, p, vis }); shown++; }
       for (const i of vis) all.push({ p, i });
     }
     const slice = all.slice(offset || 0, (offset || 0) + (limit || 200));
@@ -957,12 +909,16 @@ class MultiSession {
       rows: slice.map(e => {
         if (e.hdr) {
           const pr = this.pairs[e.p];
-          const st = this.sessions[e.p].stats || {};
+          const s = this.sessions[e.p];
+          const st = s.stats || {};
           return {
             hdr: true, idx: -1,
             pair: e.p + 1, pairs: this.pairs.length,
             left: pr.left, right: pr.right, label: pairLabel(pr),
-            todo: st.filesToProcess || 0,
+            // During a run the count follows the list as it empties.
+            todo: s.nodes.some(n => n.doneInRun)
+              ? e.vis.filter(i => { const n = s.nodes[i]; return n.type === 'file' && n.op !== OP.NONE && n.active; }).length
+              : (st.filesToProcess || 0),
           };
         }
         const r = this.sessions[e.p]._row(this.sessions[e.p].nodes[e.i]);
@@ -1080,7 +1036,7 @@ class MultiSession {
   }
 
   async sync(job, opts) {
-    const { onProgress, token, trashItem, appVersion, defaultReportFolder } = opts || {};
+    const { onProgress, token, trashItem } = opts || {};
     if (!this.comparedAt) throw new Error('Run a comparison first.');
 
     // The plan in memory belongs to the folders that were COMPARED. Nothing
@@ -1098,7 +1054,7 @@ class MultiSession {
     // Before the locks, not after: acquireAll creates a base folder that does
     // not exist yet, which would make a missing drive look like an empty one
     // from the next comparison on.
-    const blocking = await this.preflight(job, opts);
+    const blocking = (await this.preflight(job, opts)).filter(w => !w.notice);
     if (blocking.length) {
       const b = blocking[0];
       throw new Error((b.label ? `[${b.label}] ` : '') + b.message);
@@ -1106,12 +1062,6 @@ class MultiSession {
 
     const startedAt = Date.now();
     const multi = this.sessions.length > 1;
-    log.info('sync', `START ${job.sync.variant} · ${this.sessions.length} pair(s) · ` +
-      `deletion=${job.sync.deletion || 'recycler'} · lockFolders=${job.sync.lockFolders !== false}`);
-    for (let i = 0; i < this.pairs.length; i++) {
-      log.info('sync', `  pair ${i + 1}: ${redactLocation(this.pairs[i].left)} → ${redactLocation(this.pairs[i].right)}`);
-    }
-
     // Lock every folder this run will write to, before touching anything.
     // Another machine synchronizing the same folders waits (or we wait for it).
     let locks = null;
@@ -1144,7 +1094,6 @@ class MultiSession {
         // place (typically the startup disk, under an empty mount point).
         mayCreate: creatable,
         onFolder: (p, i, n) => {
-          log.info('lock', `folder ${i + 1}/${n}`);
           if (onProgress) onProgress({
             phase: 'lock', waiting: true,
             current: `Locking folder ${i + 1} of ${n}…`,
@@ -1178,9 +1127,9 @@ class MultiSession {
 
     const perPair = [];
     let doneBytes = 0, doneFiles = 0, cancelled = false;
-    const counters = { files: 0, bytes: 0, deleted: 0, folders: 0, moved: 0, errors: 0, failed: 0 };
+    const counters = { files: 0, bytes: 0, deleted: 0, folders: 0, moved: 0, errors: 0, failed: 0, dated: 0 };
     let verified = 0;
-    const allErrors = [], allNotes = [], reportFiles = [], checksumFiles = [];
+    const allErrors = [], allNotes = [], checksumFiles = [];
 
     for (let p = 0; p < this.sessions.length; p++) {
       if (token && token.cancelled) { cancelled = true; break; }
@@ -1192,9 +1141,8 @@ class MultiSession {
       let res;
       try {
         res = await this.sessions[p].sync(pairJob, {
-          token, trashItem, appVersion, defaultReportFolder,
+          token, trashItem,
           lockLost: () => !!lockLost,
-          skipReport: multi,             // one merged report at the end instead
           onProgress: prog => onProgress && onProgress(Object.assign({}, prog, {
             pair: p + 1, pairs: this.pairs.length, pairLabel: pairLabel(pr),
             bytesDone: doneBytes + (prog.bytesDone || 0),
@@ -1226,62 +1174,11 @@ class MultiSession {
         rel: multi ? `[${pairLabel(pr)}] ${e.rel}` : e.rel,
       })));
       allNotes.push(...res.notes.map(n => multi ? `[${pairLabel(pr)}] ${n}` : n));
-      reportFiles.push(...(res.reportFiles || []));
       checksumFiles.push(...(res.checksumFiles || []));
       cancelled = cancelled || res.cancelled;
     }
     const endedAt = Date.now();
 
-    // Merged report (multi-pair only — a single pair already wrote its own).
-    if (multi && job.sync.report && job.sync.report.enabled && perPair.length) {
-      const mergedRun = {
-        results: [], counters, plan: { bytes: bytesTotal },
-        notes: allNotes, cancelled,
-      };
-      // Rebuild raw results with pair-prefixed paths for the report writer.
-      for (let p = 0; p < perPair.length; p++) {
-        const lbl = pairLabel(this.pairs[p]);
-        for (const r of (this.sessions[p].lastResults || [])) {
-          mergedRun.results.push(Object.assign({}, r, { rel: `[${lbl}] ${r.rel}` }));
-        }
-      }
-      const report = buildReport({
-        appVersion,
-        pairName: job.name,
-        leftPath : this.pairs.map(x => x.left).join('  ·  '),
-        rightPath: this.pairs.map(x => x.right).join('  ·  '),
-        variant: job.sync.variant, compareVariant: job.compare.compareVariant,
-        copyLevel: job.sync.copyLevel,
-        deletion: job.sync.deletion, versioningStyle: '',
-        filter: { include: job.compare.includeFilter, exclude: job.compare.excludeFilter },
-        startedAt, endedAt, run: mergedRun,
-        stats: this.stats, comparisonErrors: [],
-      });
-      const stamp = new Date(startedAt).toISOString().slice(0, 16).replace(/[:T]/g, '_');
-      const baseName = `syncto_${(job.name || 'job').replace(/[^\w.-]+/g, '_')}_${stamp}`;
-      const outDir = job.sync.report.folder || defaultReportFolder || null;
-      if (outDir) {
-        const nfs = this.sessions[0].pool.native;
-        try {
-          await nfs.mkdir(outDir);
-          const targets = [];
-          if (job.sync.report.html) targets.push([baseName + '.html', toHtml(report)]);
-          if (job.sync.report.csv)  targets.push([baseName + '.csv',  toCsv(report)]);
-          if (job.sync.report.json) targets.push([baseName + '.json', toJson(report)]);
-          for (const [name, content] of targets) {
-            await writeText(nfs, nfs.join(outDir, name), content);
-            reportFiles.push(nfs.join(outDir, name));
-          }
-        } catch (err) {
-          allNotes.push(`Could not write the merged report: ${err.message}`);
-        }
-      }
-    }
-
-    log.info('sync', `END errors=${counters.errors} files=${counters.files} ` +
-      `deleted=${counters.deleted || 0} in ${Math.round((endedAt - startedAt) / 1000)} s` +
-      (cancelled ? ' (cancelled)' : ''));
-    for (const e of allErrors.slice(0, 50)) log.error('sync', e.rel || '(run)', e.message);
 
     if (lockLost) {
       const msg = `The folder lock was lost during the run (${lockLost}) — another machine took over, ` +
@@ -1311,7 +1208,7 @@ class MultiSession {
       lockLost,
       startedAt, endedAt,
       durationMs: endedAt - startedAt,
-      reportFiles, checksumFiles,
+      checksumFiles,
       locked: locks ? locks.count : 0,
       pairsDone: perPair.length, pairsTotal: this.pairs.length,
     };
@@ -1322,7 +1219,6 @@ class MultiSession {
         if (onProgress) onProgress({ phase: 'sync', pass: 'cleanup', current: 'Releasing the folder locks…' });
         await locks.release();
       }
-      log.info('sync', 'finished');
     }
   }
 
@@ -1459,6 +1355,54 @@ async function clearStaleLocks(job, items, opts) {
   return results;
 }
 
+// ── A drive that is not mounted ────────────────────────────────────────────
+// Checked before anything is scanned. A folder missing on a mounted drive will
+// be created; a folder missing because its whole drive is absent would be
+// "created" too — as a plan to copy everything into nothing. The comparison
+// refuses and names the drive instead.
+function offlineVolumesOf(pairs) {
+  const fsx = new NativeFs();
+  const byRoot = new Map();
+  pairs.forEach((p, i) => {
+    for (const side of ['left', 'right']) {
+      const raw = String(p[side] || '').trim();
+      if (!raw || /^sftp:\/\//i.test(raw)) continue;
+      let abs = raw;
+      try { abs = fsx.resolve(raw); } catch (_) {}
+      let there = false;
+      try { there = fs.existsSync(abs); } catch (_) { there = true; }
+      if (there) continue;
+      const vol = offlineVolume(abs);
+      if (!vol) continue;
+      const e = byRoot.get(vol.root) || { root: vol.root, name: vol.name, uses: [] };
+      e.uses.push({ pair: i + 1, side });
+      byRoot.set(vol.root, e);
+    }
+  });
+  return [...byRoot.values()];
+}
+
+function offlineError(list) {
+  const multi = list.some(v => v.uses.some(u => u.pair > 1));
+  // "It holds the destination of pairs 1 and 2."
+  const holds = v => {
+    const bySide = { left: [], right: [] };
+    for (const u of v.uses) if (!bySide[u.side].includes(u.pair)) bySide[u.side].push(u.pair);
+    const part = (side, word) => {
+      const ps = bySide[side];
+      if (!ps.length) return '';
+      if (!multi) return `the ${word}`;
+      const n = ps.length > 1 ? `pairs ${ps.slice(0, -1).join(', ')} and ${ps[ps.length - 1]}` : `pair ${ps[0]}`;
+      return `the ${word} of ${n}`;
+    };
+    return [part('left', 'source'), part('right', 'destination')].filter(Boolean).join(' and ');
+  };
+  const one = v => `${v.name} is not mounted (${v.root}). It holds ${holds(v)}.`;
+  const err = new Error(list.map(one).join(' ') + ` Connect ${list.length > 1 ? 'them' : 'it'}, then compare again.`);
+  err.offline = list.map(v => ({ root: v.root, name: v.name }));
+  return err;
+}
+
 // ── Checking a job's folders WITHOUT comparing anything ────────────────────
 // Called when a job is opened, which is the moment a stale path can still be
 // fixed cheaply — before a comparison plans a full copy against it, and before
@@ -1494,7 +1438,9 @@ async function checkJobPaths(job, opts) {
       catch (_) { exists = true; }   // unreadable is not missing — never claim it is
       if (exists) continue;
 
+      const vol = offlineVolume(fsx.resolve(here));
       const entry = {
+        offline: vol ? vol.name : '',
         pairIndex: i, pair: i + 1, side, path: here,
         label: multi ? `Pair ${i + 1}` : '',
         hadHistory: false, lastRun: 0, items: 0,

@@ -225,26 +225,20 @@ function jobToUi() {
   renderFilterBtn();
 
   // Versioning is no longer exposed: a job that carried it falls back to trash.
-  $('st-lanes').value = String(j.sync.transferLanes || 4);
+  $('st-lanes').value = String(Math.min(10, Math.max(1, j.sync.transferLanes || 4)));
   $('st-verify-remote').checked = j.sync.verifyRemote !== false;
   $('st-deletion').value  = j.sync.deletion === 'versioning' ? 'recycler' : j.sync.deletion;
-  $('st-perm-fallback').checked = !!j.sync.permanentFallback;
 
   $('st-cksum').checked    = !!j.sync.writeChecksumList;
   $('st-lock').checked     = j.sync.lockFolders !== false;
   $('st-failsafe').checked = j.sync.failSafe !== false;
   $('st-times').checked    = j.sync.preserveTimes !== false;
+  $('st-fixdates').checked = !!j.sync.fixDatesOnly;
   $('st-perms').checked    = !!j.sync.copyPermissions;
   $('st-retry').value      = j.sync.retryCount;
   $('st-retry-delay').value= Math.round((j.sync.retryDelayMs || 5000) / 1000);
   $('st-ignore').checked   = !!j.sync.ignoreErrors;
-  $('st-after').value     = j.sync.afterSync || 'none';
-
-  $('st-rep').checked      = !!j.sync.report.enabled;
-  $('st-rep-html').checked = !!j.sync.report.html;
-  $('st-rep-csv').checked  = !!j.sync.report.csv;
-  $('st-rep-json').checked = !!j.sync.report.json;
-  $('st-rep-folder').value = j.sync.report.folder || '';
+  renderAfterBtn();
 
   for (const sel of document.querySelectorAll('select.cust')) {
     sel.value = j.sync.custom[sel.dataset.k] || 'none';
@@ -277,23 +271,20 @@ function uiToJob() {
   j.sync.transferLanes = Number($('st-lanes').value) || 1;
   j.sync.verifyRemote  = $('st-verify-remote').checked;
   j.sync.deletion = $('st-deletion').value;
-  j.sync.permanentFallback = $('st-perm-fallback').checked;
+  // No trash on that disk: the file is deleted anyway, and the confirmation
+  // says so before the run (0.8.3 — no longer a setting).
+  j.sync.permanentFallback = true;
 
   j.sync.writeChecksumList = $('st-cksum').checked;
   j.sync.lockFolders       = $('st-lock').checked;
   j.sync.failSafe          = $('st-failsafe').checked;
   j.sync.preserveTimes     = $('st-times').checked;
+  j.sync.fixDatesOnly      = $('st-fixdates').checked;
   j.sync.copyPermissions   = $('st-perms').checked;
   j.sync.retryCount        = Math.max(0, parseInt($('st-retry').value, 10) || 0);
   j.sync.retryDelayMs      = Math.max(1, parseInt($('st-retry-delay').value, 10) || 5) * 1000;
   j.sync.ignoreErrors      = $('st-ignore').checked;
-  j.sync.afterSync         = $('st-after').value;
-
-  j.sync.report.enabled = $('st-rep').checked;
-  j.sync.report.html    = $('st-rep-html').checked;
-  j.sync.report.csv     = $('st-rep-csv').checked;
-  j.sync.report.json    = $('st-rep-json').checked;
-  j.sync.report.folder  = $('st-rep-folder').value.trim();
+  // afterSync is set by the title-bar menu, straight into the job.
 
   for (const sel of document.querySelectorAll('select.cust')) j.sync.custom[sel.dataset.k] = sel.value;
 
@@ -350,6 +341,13 @@ function renderEmptyState(res) {
     if (act) { b.textContent = act.label; b.dataset.act = act.key; }
   };
   const n = v => v.toLocaleString();
+
+  // (0) A run emptied the list: everything landed, the run is not over yet
+  // (a read-back or the clean-up may still be going).
+  if (state.busy === 'sync') {
+    set('', ICO_EMPTY_FOLDER, 'Everything is on its way', 'The list is empty — the run finishes below.');
+    return;
+  }
 
   // (1) Nothing has been compared yet.
   if (!s) {
@@ -904,8 +902,7 @@ async function doCompare() {
   renderScopeBar();
   state.busy = 'compare';
   state.speeds = [];
-  setBusyUi(true, 'Comparing…');
-  $('pb-title').textContent = 'Comparing…';
+  setBusyUi(true, 'COMPARING');
   $('btn-pause').style.display = 'none';
   resetCompareProgress();
 
@@ -915,6 +912,14 @@ async function doCompare() {
   setBusyUi(false);
   $('btn-pause').style.display = '';
 
+  if (!res.ok && res.offline) {
+    // A drive that is not mounted: said in so many words, and the folders
+    // that live on it turn red in the pair rows.
+    invalidateComparison('Volume not mounted — connect it and compare again.');
+    showError(res.offline.length > 1 ? 'Volumes not mounted' : 'Volume not mounted', res.error);
+    offerRelinkForJob(true);
+    return;
+  }
   if (!res.ok) { invalidateComparison('Comparison failed — compare again.'); showError('Comparison failed', res.error); return; }
 
   // Aborted halfway: the tree covers only the part that was scanned. Showing
@@ -1039,7 +1044,7 @@ function renderRelinkList() {
         `${e.items ? `, holding ${e.items.toLocaleString()} items` : ''}.</div>`
       : '';
     return `<div class="rl-row" data-i="${i}">
-      <div class="rl-hd"><span class="rl-tag">${esc(tag)}</span><span class="rl-state">missing</span></div>
+      <div class="rl-hd"><span class="rl-tag">${esc(tag)}</span><span class="rl-state">${e.offline ? esc(e.offline) + ' not mounted' : 'missing'}</span></div>
       <div class="rl-path gone">${esc(e.path)}</div>
       ${hist}
       <div class="rl-acts"><button class="rl-btn" data-a="browse">Browse…</button></div>
@@ -1102,51 +1107,13 @@ function renderMissingBadge(n) {
   const el = $('missing-badge');
   if (!el) return;
   el.style.display = n > 0 ? '' : 'none';
-  el.textContent = n > 0 ? `${n} folder${n > 1 ? 's' : ''} missing — fix` : '';
-}
-
-// ── The diagnostic journal ─────────────────────────────────────────────────
-// Shown inside the settings so it can be read and copied without going near a
-// Finder window — the point is that somebody can send it in two clicks. The
-// Copy button is the one the error panels use, so what lands on the clipboard
-// is the whole tail, not the part that happens to be scrolled into view.
-function showLog(text, keepScroll) {
-  $('st-log-box').style.display = $('st-log').checked ? '' : 'none';
-  const body = $('st-log-text');
-  if (body.textContent === (text || '')) return;      // nothing new to draw
-  // Scrolled up to read something? A refresh every 1.5 s that yanks the view
-  // back to the bottom makes the panel unreadable while a run is going.
-  const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 24;
-  body.textContent = text || '';
-  if (!keepScroll || atBottom) body.scrollTop = body.scrollHeight;
-  setCopyBlock('st-log-text', String(text || '').split('\n'));
-}
-
-// While the settings are open the log is re-read on a timer, so a run that is
-// happening RIGHT NOW can be watched line by line. Stopped when the window
-// closes: there is no point reading a file nobody is looking at.
-let logWatchTimer = null;
-
-function startLogWatch() {
-  refreshLogUi();
-  clearInterval(logWatchTimer);
-  logWatchTimer = setInterval(() => {
-    if (!$('ov-settings').classList.contains('open')) return stopLogWatch();
-    if (!$('st-log').checked) return;
-    refreshLogUi(true);
-  }, 1500);
-}
-
-function stopLogWatch() { clearInterval(logWatchTimer); logWatchTimer = null; }
-
-async function refreshLogUi(keepScroll) {
-  try {
-    const li = await API.logInfo();
-    if (!li) return;
-    $('st-log').checked = !!li.enabled;
-    $('st-log-path').textContent = li.file || '';
-    showLog(li.text, keepScroll);
-  } catch (_) { /* the journal must never stop the window from opening */ }
+  // A drive that is not mounted is named: "NAS_EDIT not mounted" says what to
+  // do, "2 folders missing" makes you go and find out.
+  const vols = [...new Set((state.missingPaths || []).filter(e => e.offline).map(e => e.offline))];
+  const allOffline = (state.missingPaths || []).length && (state.missingPaths || []).every(e => e.offline);
+  el.textContent = n <= 0 ? ''
+    : allOffline ? `${vols.join(', ')} not mounted`
+    : `${n} folder${n > 1 ? 's' : ''} missing — fix`;
 }
 
 // ── Lock files a previous run left behind ──────────────────────────────────
@@ -1210,9 +1177,21 @@ async function checkBeforeSync() {
   try { res = await API.preflight(state.job); }
   catch (_) { return true; }          // the engine refuses again if need be
   if (!res.ok || !res.warnings.length) return true;
+  const tag = w => w.label ? '[' + esc(w.label) + '] ' : '';
+
+  // A disk with no trash does not stop the run: the files there are deleted
+  // for good, and this is where the person learns it — before, not after.
+  const notices = res.warnings.filter(w => w.notice);
+  if (notices.length) {
+    $('cf-warn').style.display = '';
+    $('cf-warn-body').insertAdjacentHTML('beforeend', notices
+      .map(w => `<div class="err-item">${tag(w)}${esc(w.message)}</div>`).join(''));
+  }
+  const blocking = res.warnings.filter(w => !w.notice);
+  if (!blocking.length) return true;
 
   $('cf-block').style.display = '';
-  $('cf-block-body').innerHTML = res.warnings
+  $('cf-block-body').innerHTML = blocking
     .map(w => `<div class="err-item">${w.label ? '[' + esc(w.label) + '] ' : ''}${esc(w.message)}</div>`)
     .join('');
   $('cf-ok').disabled = true;
@@ -1295,7 +1274,7 @@ async function doSync() {
   state.paused = false;
   state.speeds = [];
   setBusyUi(true, 'Synchronizing…', true);
-  $('pb-title').textContent = 'Synchronizing…';
+  $('pb-title').textContent = 'SYNCHRONIZING';
   $('pb-ring').classList.remove('spin');
   setStatLabels('Files', 'Left to copy', 'Speed', 'ETA');
   { const del = $('s-del-box'); if (del) del.style.display = ''; }
@@ -1348,7 +1327,7 @@ async function doCompareQuiet() {
   // It used to run with nothing on screen at all: a few seconds — minutes on a
   // big tree — of a window that answers to nothing, right after a run, which
   // reads as a crash. It is a comparison, so it says so, in the strip.
-  setBusyUi(true, 'Checking the result…');
+  setBusyUi(true, 'CHECKING');
   $('pb-ring').classList.add('spin');
   $('pb-pct').textContent = '';
   setStatLabels('Items scanned', 'Data read', 'Scan rate', 'Elapsed');
@@ -1384,11 +1363,14 @@ const RING_LEN = 182.2;
 
 function setBusyUi(on, title, steps) {
   $('bottombar').classList.toggle('open', on);
-  // A RUN — the thing with passes — gets the whole working area and hides the
-  // chips describing a comparison that is no longer what is happening. A
-  // comparison keeps the strip at the bottom: the grid behind it is filling up
-  // and that is worth watching.
-  $('bottombar').classList.toggle('kiosk', !!(on && steps));
+  // A RUN — the thing with passes — keeps the strip at the bottom like a
+  // comparison, with its passes and direction of travel added. The list above
+  // stays in view and empties as the files land.
+  $('bottombar').classList.toggle('run', !!(on && steps));
+  // A comparison wears the same strip as a run — big ring, big title, an
+  // outline that breathes — in the blue of the COMPARE button.
+  $('bottombar').classList.toggle('live', !!on);
+  $('bottombar').classList.toggle('cmp', !!(on && !steps));
   document.getElementById('app').classList.toggle('running', !!(on && steps));
   // Only a synchronization has passes. A comparison is one sweep, and drawing
   // a "Verify" step beside it would promise something that is not happening.
@@ -1410,9 +1392,11 @@ function setBusyUi(on, title, steps) {
     if (title) $('pb-title').textContent = title;
     state.paused = false;
     const bar = $('bottombar');
-    bar.style.setProperty('--pb-color', 'var(--green)');
-    bar.style.setProperty('--pb-color2', '#00ffaa');
-    bar.style.setProperty('--pb-glow', 'var(--green-g)');
+    bar.classList.remove('paused');
+    const cmp = !steps;
+    bar.style.setProperty('--pb-color',  cmp ? 'var(--blue)' : 'var(--green)');
+    bar.style.setProperty('--pb-color2', cmp ? '#7bc8ff' : '#00ffaa');
+    bar.style.setProperty('--pb-glow',   cmp ? 'rgba(77,144,240,.45)' : 'var(--green-g)');
     $('pb-title').style.color = '';
     const lbl = $('btn-pause-lbl'), ico = $('btn-pause-ico');
     if (lbl) lbl.textContent = 'PAUSE';
@@ -1493,7 +1477,7 @@ API.onCompareProgress(p => {
     const frac = Math.min((done + inPair) / pairs, 0.99);
     cmpMaxFrac = Math.max(cmpMaxFrac, frac);      // never let it fall back
     ring.setAttribute('stroke-dashoffset', RING_LEN * (1 - cmpMaxFrac));
-    $('pb-pct').textContent = '≈' + Math.round(cmpMaxFrac * 100) + '%';
+    $('pb-pct').textContent = Math.round(cmpMaxFrac * 100) + '%';
   } else {
     // Honest about not knowing: a spinning arc, and the real count in the
     // middle instead of a percentage that would be made up.
@@ -1541,7 +1525,31 @@ function renderFlow(p) {
                 + (p.paused ? ' paused' : '');
 }
 
+// The list shows what is LEFT to do: the engine drops a row the moment it
+// lands, and the window asks for the list again a couple of times a second.
+let runGridAt = 0, runGridBusy = false, runOvAt = 0;
+async function refreshRunGrid() {
+  const t = Date.now();
+  if (runGridBusy || t - runGridAt < 400) return;
+  runGridAt = t; runGridBusy = true;
+  try {
+    const res = await API.getRows(0, 1, state.view);
+    state.total = res.total;
+    $('gridspacer').style.height = (state.total * ROWH) + 'px';
+    $('gridscroll').style.display = state.total ? '' : 'none';
+    $('gridempty').style.display  = state.total ? 'none' : '';
+    if (!state.total) renderEmptyState(res);
+    state.rows.clear();
+    await renderWindow();
+    // The overview on the left empties with the list: once a second is
+    // plenty for a panel of folders.
+    if (t - runOvAt >= 1000) { runOvAt = t; await refreshOverview(); }
+  } catch (_) { /* a missed refresh is caught up by the next one */ }
+  finally { runGridBusy = false; }
+}
+
 API.onSyncProgress(p => {
+  if (state.busy === 'sync') refreshRunGrid();
   // Waiting on another machine's lock: no throughput to show, just who and how long.
   if (p.phase === 'lock') {
     renderFlow(Object.assign({}, p, { way: '' }));
@@ -1584,11 +1592,14 @@ API.onSyncProgress(p => {
   const title = $('pb-title');
   // After the verification pass only folder deletions and pruning remain —
   // nothing is being copied, so the title must not claim it is.
-  title.textContent = p.paused ? 'Paused'
-                    : verifying ? 'VERIFYING · xxHash64'
-                    : p.pass === 'cleanup' ? 'FINISHING…'
-                    : 'COPYING';
-  title.style.color = p.paused ? '' : (verifying ? 'var(--blue)' : 'var(--green)');
+  // One word for the whole run: SYNCHRONIZING. Which part of it is going on
+  // (copy, read-back, finish) is what the step chips beside it say, and the
+  // colour follows them — blue while reading back.
+  title.textContent = p.paused ? 'PAUSED' : 'SYNCHRONIZING';
+  bar.classList.toggle('paused', !!p.paused);
+  // The colour comes from --pb-color on the strip (green, blue while reading
+  // back, grey when paused) — not from an inline style that would outlast it.
+  title.style.color = '';
 
   // Sampled about twice a second. Pushed per event it held the last quarter
   // of a second at a high file rate — a line of noise rather than a trend —
@@ -1749,6 +1760,7 @@ function showSummary(res) {
   // "Files copied" is now the number that really landed, so the ones that
   // failed need a line of their own instead of hiding inside it.
   if (res.counters.failed) cells.splice(1, 0, ['Files not copied', res.counters.failed]);
+  if (res.counters.dated) cells.splice(1, 0, ['Dates corrected', res.counters.dated]);
   if (res.counters.moved) cells.splice(2, 0, ['Files moved', res.counters.moved]);
   if (res.verified) cells.splice(2, 0, ['Files verified', res.verified]);
   $('sum-grid').innerHTML = cells
@@ -1767,13 +1779,9 @@ function showSummary(res) {
     .map(n => `<div class="err-item">${esc(n)}</div>`).join('');
   setCopyBlock('sum-notes-body', res.notes.slice(), copyHeader(`${res.notes.length} notes`));
 
-  const files = (res.reportFiles || []).concat(res.checksumFiles || []);
+  const files = (res.checksumFiles || []).slice();
   $('sum-files').innerHTML = files
     .map(f => `<span class="file-link" data-path="${esc(f)}">${esc(f)}</span>`).join('');
-
-  const html = (res.reportFiles || []).find(f => f.endsWith('.html'));
-  $('sum-open-report').style.display = html ? '' : 'none';
-  $('sum-open-report').dataset.path = html || '';
 
   $('ov-summary').classList.add('open');
 }
@@ -1781,10 +1789,6 @@ function showSummary(res) {
 $('sum-files').addEventListener('click', e => {
   const el = e.target.closest('.file-link');
   if (el) API.revealPath(el.dataset.path);
-});
-$('sum-open-report').addEventListener('click', () => {
-  const p = $('sum-open-report').dataset.path;
-  if (p) API.openPath(p);
 });
 
 // ── Copyable error / note blocks ───────────────────────────────────────────
@@ -1839,7 +1843,6 @@ function showError(title, msg) {
   setCopyBlock('sum-errors-body', [msg], copyHeader(title));
   $('sum-notes').style.display = 'none';
   $('sum-files').innerHTML = '';
-  $('sum-open-report').style.display = 'none';
   $('ov-summary').classList.add('open');
 }
 
@@ -1913,13 +1916,8 @@ function bind() {
   $('btn-verify').addEventListener('click', doVerify);
   $('btn-settings').addEventListener('click', () => {
     jobToUi(); $('ov-settings').classList.add('open');
-    // The log is read from disk HERE, not once at launch. It was loaded at
-    // startup and never again, so the panel showed the three header lines for
-    // the rest of the session — and the Copy button copied that, while the
-    // real log on disk had the whole run in it.
-    startLogWatch();
   });
-  $('set-close').addEventListener('click', () => { uiToJob(); $('ov-settings').classList.remove('open'); persist(); stopLogWatch(); });
+  $('set-close').addEventListener('click', () => { uiToJob(); $('ov-settings').classList.remove('open'); persist(); });
 
   // Per-job filter modal: closing applies and re-compares if a result is shown.
   $('btn-filter').addEventListener('click', () => { jobToUi(); $('ov-filter').classList.add('open'); });
@@ -1966,37 +1964,14 @@ function bind() {
     $('btn-pause-lbl').textContent = state.paused ? 'RESUME' : 'PAUSE';
     $('btn-pause-ico').innerHTML   = state.paused ? PLAY_PATHS : PAUSE_PATHS;
     $('btn-pause').classList.toggle('go', state.paused);
+    // Said at once: a paused engine sends no progress, so waiting for it to
+    // say "paused" would leave the strip beating over a run that is stopped.
+    $('bottombar').classList.toggle('paused', state.paused);
+    $('pb-title').textContent = state.paused ? 'PAUSED' : 'SYNCHRONIZING';
+    $('pb-title').style.color = '';     // the strip's colour rules take it from here
     if (state.paused) await API.syncPause(); else await API.syncResume();
   });
 
-
-  $('st-rep-browse').addEventListener('click', async () => { const p = await API.browseFolder('Report folder'); if (p) $('st-rep-folder').value = p; });
-
-  // Diagnostics. The journal is written by the engine, not the window: what
-  // matters is what the filesystem and the server actually answered, not what
-  // the interface believed at the time.
-  $('st-log').addEventListener('change', async e => {
-    const res = await API.logSet(e.target.checked);
-    e.target.checked = !!(res && res.enabled);
-    showLog(res && res.text);
-  });
-  $('st-log-refresh').addEventListener('click', async () => {
-    const li = await API.logInfo();
-    showLog(li && li.text);
-  });
-  $('st-log-clear').addEventListener('click', async () => showLog(await API.logClear()));
-  $('st-log-save').addEventListener('click', async () => {
-    const b = $('st-log-save');
-    const res = await API.logSave();
-    if (res && res.canceled) return;
-    // Said on the button itself: a save dialog that closes with no sign of
-    // what happened leaves people clicking it again.
-    b.textContent = res && res.ok ? 'SAVED' : 'FAILED';
-    b.classList.toggle('done', !!(res && res.ok));
-    if (res && res.path) $('st-log-path').textContent = res.path;
-    setTimeout(() => { b.textContent = 'SAVE .TXT'; b.classList.remove('done'); }, 1800);
-  });
-  $('st-log-path').addEventListener('click', () => API.logReveal());
 
 
 
@@ -2424,7 +2399,7 @@ async function refreshOverview() {
     <div class="ov-row${g.idx === state.selIdx ? ' sel' : ''}${g.active ? '' : ' off'}${scoped ? ' scoped' : ''}${state.ovSel.has(key) ? ' picked' : ''}"
          data-idx="${g.idx}" data-name="${esc(g.name)}" data-rel="${esc(g.rel)}" data-type="${g.type}"
          data-pair="${g.pairIdx}" data-active="${g.active ? 1 : 0}" data-kids="${g.kids ? 1 : 0}"
-         data-tip="${g.pairLabel ? '[' + esc(g.pairLabel) + '] ' : ''}${esc(g.rel)} — ${g.items} item${g.items === 1 ? '' : 's'}, ${esc(fmtBytes(g.bytes))}.${g.kids ? ' Click to open it here and show it in the grid.' : ' Click to show it in the grid.'}">
+         data-tip="${g.pairLabel ? '[' + esc(g.pairLabel) + '] ' : ''}${esc(g.rel)} — ${g.items} item${g.items === 1 ? '' : 's'}, ${esc(fmtBytes(g.bytes))}.${g.kids ? ' Click to select · double-click to open it and show it in the grid.' : ' Click to select · double-click to show it in the grid.'}">
       <div class="ov-chk"><input type="checkbox" ${g.active ? 'checked' : ''} data-act="toggle"></div>
       <div class="ov-pct"><div class="bar" style="width:${g.pct}%"></div><div class="lbl">${g.pct}%</div></div>
       <div class="ov-name" style="padding-left:${g.depth * 11}px">${twist}${g.type === 'folder' ? ICON_FOLDER : ICON_FILE}<span>${esc(g.name)}</span></div>
@@ -2505,6 +2480,7 @@ async function setScope(pairIdx, rel, label) {
 // alone unfolds WITHOUT touching the grid, for reading down a tree while the
 // grid stays where it is.
 $('ov-list').addEventListener('click', async e => {
+  if (lassoJustEnded) { lassoJustEnded = false; return; }   // the release of a lasso
   const it = e.target.closest('.ov-row');
   // Nothing under the pointer: the empty part of the panel is the way back to
   // the whole run.
@@ -2556,10 +2532,26 @@ $('ov-list').addEventListener('click', async e => {
     return;
   }
 
+  if (e.detail >= 2) { await openOvRow(it); return; }
+
+  // A plain click only SELECTS (0.8.5). Unfolding and narrowing the grid to
+  // the folder is the double-click below: a click that also opened the folder
+  // pushed every row under it down the panel, and picking three folders in a
+  // row meant chasing them.
+  state.ovSel = new Set([key]);
+  state.ovAnchor = key;
+  await refreshOverview();
+});
+
+// Double-click: open the folder in the panel and show it in the grid. Read
+// from the click's own count rather than a 'dblclick' listener: the first
+// click redraws the panel, so the two clicks do not land on the same element
+// and the browser would not always call it a double-click.
+async function openOvRow(it) {
+  const key = it.dataset.pair + ':' + it.dataset.rel;
+  const kids = it.dataset.kids === '1';
   const idx = Number(it.dataset.idx);
   if (idx >= 0) state.selIdx = idx;
-  // A plain click restarts the selection on this row — the anchor a Shift
-  // range will measure from.
   state.ovSel = new Set([key]);
   state.ovAnchor = key;
   const pairIdx = Number(it.dataset.pair);
@@ -2572,6 +2564,76 @@ $('ov-list').addEventListener('click', async e => {
   }
   await setScope(Number.isNaN(pairIdx) ? 0 : pairIdx, it.dataset.rel, label);
   await renderWindow();
+}
+
+// ── Lasso: drag across the panel to select several rows at once (0.8.5) ──
+// From anywhere in the list — a row or the empty space below — except the
+// tick box and the arrow. Cmd/Ctrl adds to what is already selected. A press
+// that does not move is an ordinary click; one that moves more than a few
+// pixels becomes a lasso, and the click that follows the release is ignored.
+let lasso = null;
+let lassoJustEnded = false;
+function lassoApply(finalPass) {
+  const list = $('ov-list');
+  const lr = list.getBoundingClientRect();
+  const top = Math.min(lasso.y0, lasso.y1) - list.scrollTop + lr.top;
+  const bot = Math.max(lasso.y0, lasso.y1) - list.scrollTop + lr.top;
+  const hit = new Set(lasso.add ? lasso.before : []);
+  for (const row of list.querySelectorAll('.ov-row')) {
+    const r = row.getBoundingClientRect();
+    const key = row.dataset.pair + ':' + row.dataset.rel;
+    if (r.bottom > top && r.top < bot) hit.add(key);
+    if (!finalPass) row.classList.toggle('picked', hit.has(key));
+  }
+  return hit;
+}
+function lassoDraw() {
+  const list = $('ov-list');
+  const x = Math.min(lasso.x0, lasso.x1), y = Math.min(lasso.y0, lasso.y1);
+  lasso.el.style.cssText = `left:${x}px;top:${y}px;width:${Math.abs(lasso.x1 - lasso.x0)}px;height:${Math.abs(lasso.y1 - lasso.y0)}px`;
+  if (!lasso.el.parentNode) list.appendChild(lasso.el);
+}
+$('ov-list').addEventListener('mousedown', e => {
+  if (e.button !== 0 || e.shiftKey) return;
+  if (e.target.closest('[data-act="toggle"]') || e.target.closest('.ov-twist')) return;
+  const list = $('ov-list');
+  const lr = list.getBoundingClientRect();
+  // Not on the scrollbar.
+  if (e.clientX > lr.left + list.clientWidth) return;
+  const x = e.clientX - lr.left + list.scrollLeft, y = e.clientY - lr.top + list.scrollTop;
+  lasso = { x0: x, y0: y, x1: x, y1: y, moved: false, add: e.metaKey || e.ctrlKey,
+            before: new Set(state.ovSel), el: document.createElement('div') };
+  lasso.el.className = 'ov-lasso';
+  const move = ev => {
+    if (!lasso) return;
+    const r = list.getBoundingClientRect();
+    // Near the top or bottom edge, the list scrolls so a long run can be taken.
+    if (ev.clientY < r.top + 18) list.scrollTop -= 12;
+    else if (ev.clientY > r.bottom - 18) list.scrollTop += 12;
+    lasso.x1 = Math.max(0, Math.min(list.clientWidth, ev.clientX - r.left)) + list.scrollLeft;
+    lasso.y1 = Math.max(0, ev.clientY - r.top + list.scrollTop);
+    if (!lasso.moved && Math.abs(lasso.y1 - lasso.y0) + Math.abs(lasso.x1 - lasso.x0) < 5) return;
+    lasso.moved = true;
+    document.body.classList.add('lassoing');
+    lassoDraw();
+    lassoApply(false);
+  };
+  const up = async () => {
+    document.removeEventListener('mousemove', move);
+    document.removeEventListener('mouseup', up);
+    document.body.classList.remove('lassoing');
+    const l = lasso; lasso = null;
+    if (!l || !l.moved) return;
+    lasso = l; const hit = lassoApply(true); lasso = null;
+    l.el.remove();
+    lassoJustEnded = true;
+    setTimeout(() => { lassoJustEnded = false; }, 0);
+    state.ovSel = hit;
+    if (hit.size) state.ovAnchor = [...hit][hit.size - 1];
+    await refreshOverview();
+  };
+  document.addEventListener('mousemove', move);
+  document.addEventListener('mouseup', up);
 });
 
 $('ov-list').addEventListener('contextmenu', async e => {
@@ -2780,6 +2842,27 @@ function installSplitters(ui) {
       wrap.dataset.ratio = ratio.toFixed(3);
     },
     () => API.savePrefs({ ui: { paneL: Number(wrap.dataset.ratio) || 0.5 } }));
+
+  // Size and Date columns, each side. The date needs room for "2026-08-13
+  // 15:40" in full — a truncated date is exactly what you are reading when a
+  // comparison says two copies differ.
+  const COL_DEFAULT = { szL: 76, dtL: 136, szR: 76, dtR: 136 };
+  const cols = Object.assign({}, COL_DEFAULT, ui.cols || {});
+  const setCol = (k, w) => { cols[k] = w; wrap.style.setProperty('--' + k, w + 'px'); };
+  for (const k of Object.keys(cols)) setCol(k, cols[k]);
+  for (const cell of document.querySelectorAll('#gridhead > div[data-col]')) {
+    const k = cell.dataset.col;
+    const grip = document.createElement('span');
+    grip.className = 'col-grip';
+    grip.setAttribute('data-tip', 'Drag to resize · double-click to reset');
+    cell.appendChild(grip);
+    let startX = 0, startW = 0;
+    grip.addEventListener('mousedown', e => { startX = e.clientX; startW = cols[k]; });
+    drag(grip, 'x',
+      ev => setCol(k, Math.round(Math.min(360, Math.max(48, startW + (startX - ev.clientX))))),
+      () => API.savePrefs({ ui: { cols } }));
+    grip.addEventListener('dblclick', () => { setCol(k, COL_DEFAULT[k]); API.savePrefs({ ui: { cols } }); });
+  }
 }
 
 // ── Drop zones — drag a volume or folder anywhere in the window ────────────
@@ -2911,6 +2994,51 @@ function startAfterCountdown(action) {
   }, 1000);
 }
 
+// ── When it finishes: the title-bar menu ───────────────────────────────────
+// Read from the job at the END of the run, so a change made while the files
+// are being copied is the one that counts.
+const AFTER_UI = {
+  none    : ['Do nothing',  '<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/>'],
+  quit    : ['Quit syncto', '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>'],
+  sleep   : ['Sleep',       '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>'],
+  shutdown: ['Shut down',   '<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/>'],
+};
+
+function renderAfterBtn() {
+  const v = (state.job && state.job.sync && AFTER_UI[state.job.sync.afterSync]) ? state.job.sync.afterSync : 'none';
+  const b = $('btn-after');
+  b.dataset.v = v;
+  b.classList.toggle('set', v !== 'none');
+  b.querySelector('svg').innerHTML = AFTER_UI[v][1];
+  b.dataset.tip = `When it finishes: ${AFTER_UI[v][0].toLowerCase()}`;
+  for (const it of document.querySelectorAll('#after-menu .ctx-it')) {
+    it.classList.toggle('on', it.dataset.v === v);
+    it.setAttribute('aria-checked', it.dataset.v === v ? 'true' : 'false');
+  }
+}
+
+function closeAfterMenu() { $('after-menu').classList.remove('open'); }
+
+function bindAfterMenu() {
+  $('btn-after').addEventListener('click', e => {
+    e.stopPropagation();
+    renderAfterBtn();
+    $('after-menu').classList.toggle('open');
+  });
+  $('after-menu').addEventListener('click', e => {
+    const it = e.target.closest('.ctx-it[data-v]');
+    if (!it) return;
+    state.job.sync.afterSync = it.dataset.v;
+    renderAfterBtn();
+    closeAfterMenu();
+    persist();
+  });
+  document.addEventListener('click', e => {
+    if (!e.target.closest('.after-wrap')) closeAfterMenu();
+  });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeAfterMenu(); });
+}
+
 // Called once a run is over, before anything else can grab attention.
 async function afterRun(res) {
   // The notification goes out whatever happened — that is the point of being
@@ -2950,51 +3078,35 @@ async function loadNtfyUi() {
   $('st-ntfy-en').checked      = n.enabled;
   $('st-ntfy-server').value    = n.server;
   $('st-ntfy-topic').value     = n.topic;
-  $('st-ntfy-problem').checked = n.onlyOnProblem;
-  // The token itself never comes back here. Only whether one is stored.
-  $('st-ntfy-token').value = '';
-  $('st-ntfy-token').placeholder = n.hasToken
-    ? 'stored — type a new one to replace it'
-    : 'only for a server that needs one';
 }
 
-function ntfyPatchFromUi(includeToken) {
-  const p = {
+function ntfyPatchFromUi() {
+  return {
     enabled: $('st-ntfy-en').checked,
     server : $('st-ntfy-server').value.trim(),
     topic  : $('st-ntfy-topic').value.trim(),
-    onlyOnProblem: $('st-ntfy-problem').checked,
   };
-  // An empty box means "leave what is stored alone", not "erase it" — the
-  // panel never held the token in the first place.
-  const t = $('st-ntfy-token').value;
-  if (includeToken && t) p.token = t;
-  return p;
 }
 
 function bindAfterAndNtfy() {
+  bindAfterMenu();
   $('after-cancel').addEventListener('click', () => {
     stopCountdown();
     $('status-note').textContent = 'Cancelled — the machine was left alone.';
   });
   $('after-now').addEventListener('click', fireAfterAction);
 
-  for (const id of ['st-ntfy-en', 'st-ntfy-server', 'st-ntfy-topic', 'st-ntfy-problem']) {
-    $(id).addEventListener('change', () => API.ntfySave(ntfyPatchFromUi(false)));
+  for (const id of ['st-ntfy-en', 'st-ntfy-server', 'st-ntfy-topic']) {
+    $(id).addEventListener('change', () => API.ntfySave(ntfyPatchFromUi()));
   }
-  $('st-ntfy-token').addEventListener('change', () => {
-    if ($('st-ntfy-token').value) API.ntfySave(ntfyPatchFromUi(true));
-  });
-
-  $('ntfy-site').addEventListener('click', () => API.openExternal('https://ntfy.sh/'));
 
   $('st-ntfy-test').addEventListener('click', async () => {
     const res = $('st-ntfy-res');
     const topic = $('st-ntfy-topic').value.trim();
     if (!topic) { res.textContent = 'Enter a topic first.'; res.style.color = 'var(--orange)'; return; }
     res.textContent = 'Sending…'; res.style.color = 'var(--text3)';
-    await API.ntfySave(ntfyPatchFromUi(true));
-    const r = await API.ntfyTest(ntfyPatchFromUi(true));
+    await API.ntfySave(ntfyPatchFromUi());
+    const r = await API.ntfyTest(ntfyPatchFromUi());
     if (r && r.ok) { res.textContent = '✓ Sent — check your phone.'; res.style.color = 'var(--green)'; }
     else { res.textContent = '✗ ' + ((r && r.error) || 'Failed'); res.style.color = 'var(--red)'; }
   });
@@ -3335,6 +3447,8 @@ function installTooltips() {
     const el = e.target.closest('[data-tip]');
     if (!el) return;
     if (tip) tip.remove();
+    tip = null;
+    if (document.body.classList.contains('lassoing')) return;   // no tooltip while a lasso is drawn
     tip = document.createElement('div');
     tip.className = 'tooltip-float';
     tip.textContent = el.dataset.tip;
@@ -3381,7 +3495,6 @@ function installTooltips() {
   renderRecent();
   await loadNtfyUi();
   onPathChanged();
-  await refreshLogUi();
   // Marked, not raised: see showRelink.
   offerRelinkForJob(true);
   document.title = `syncto ${state.version}`;

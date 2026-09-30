@@ -15,8 +15,7 @@ areas worth scrutiny:
   (`sftp://user:pass@host/…`) is moved into the operating system's credential
   store (macOS Keychain, Windows Credential Manager, libsecret) as soon as it is
   seen, and the path is rewritten without it. Nothing readable is written to the
-  preferences or to a `.syncto` job file, and the diagnostic journal redacts the
-  same shape. Where there is no usable credential store, syncto says so and asks
+  preferences or to a `.syncto` job file. Where there is no usable credential store, syncto says so and asks
   for the password each time rather than writing it down.
 - **Host key verification.** Since 0.8.0 the server's key is remembered at the
   first connection and compared at every one after. A key that has changed stops

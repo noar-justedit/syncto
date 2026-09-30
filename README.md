@@ -3,8 +3,8 @@
 
 Open-source folder sync for video and audio professionals. Same feature set as
 FreeFileSync, rebuilt from scratch with the ingesto interface: progress ring,
-live throughput graph, ETA, a checksum-verified copy that reads every file back,
-and an exportable copy report.
+live throughput graph, ETA, and a checksum-verified copy that reads every file
+back.
 
 **macOS · Windows · Linux** (AppImage and `.deb`).
 
@@ -26,9 +26,9 @@ Licensed under the **GNU General Public License v3.0** (see [`LICENSE`](./LICENS
 |---|---|
 | ![connect to a server](docs/screenshots/syncto-server.png) | ![filter](docs/screenshots/syncto-filter.png) |
 
-| Settings | After the run, and the phone |
+| Settings | Phone notifications |
 |---|---|
-| ![settings](docs/screenshots/syncto-settings.png) | ![after the run and ntfy](docs/screenshots/syncto-ntfy.png) |
+| ![settings](docs/screenshots/syncto-settings.png) | ![phone notifications](docs/screenshots/syncto-ntfy.png) |
 
 | Auto-sync confirmation | Another machine is running |
 |---|---|
@@ -52,7 +52,6 @@ interface in them stays the interface you get.</sub>
 | **Verified copy** | one mode: every file read back and compared (xxHash64), with an optional checksum sidecar |
 | **Deletion** | trash or permanent — always announced, never silent |
 | **Filter** | per-job include/exclude patterns, name- or path-anchored |
-| **Report** | HTML, CSV and JSON, with every checksum |
 | **Reveal** | right-click any row or folder field → open it in Finder / Explorer, either side |
 | **Locking** | one machine at a time per folder, safe over any network share |
 | **Remote** | local disks, mounted network shares, and SFTP |
@@ -239,7 +238,7 @@ the checksum list, and does not record it in the database, so the next run
 re-examines it. The size check still happens before the rename, so a truncated
 copy never takes a good file's name.
 
-Switch on **Write a checksum list** in the settings to get
+Switch on **Write checksum** in the settings to get
 `syncto-checksums.txt` at the root of each target: the shield button in the
 title bar re-checks a folder against it months later, without the original
 source.
@@ -255,9 +254,8 @@ silently:
 - **Trash** (default) — recoverable. Local volumes only.
 - **Permanent** — gone.
 
-Network shares and SFTP have no trash: syncto stops and tells you rather than
-deleting quietly — switch to permanent deletion (or flip the dedicated switch
-in the settings) for those.
+Network shares and SFTP have no trash. There, syncto deletes permanently — and
+says so in the confirmation, before the run, naming the folders concerned.
 
 ### Several machines, same folders
 
@@ -314,8 +312,9 @@ as moves.
 
 ### When it finishes
 
-**Settings › After the synchronization** offers *Do nothing*, *Quit syncto*,
-*Sleep* and *Shut down*. The choice is saved with the job.
+The power icon in the title bar offers *Do nothing*, *Quit syncto*, *Sleep* and
+*Shut down*. It can be changed while the files are being copied — the choice is
+read when the run ends — and it is saved with the job.
 
 It only fires on a clean run — an error, a cancellation or a lost folder lock
 leaves the machine on, so you can read what happened. And a 30-second countdown
@@ -324,23 +323,22 @@ with a **Cancel** button always comes first.
 There is no hibernate entry on purpose: macOS has no such command, and on
 Windows it only works when hibernation is enabled, which it usually is not.
 
-**Settings › Phone notifications** sends a message through
+**Settings › Notifications** sends a message through
 [ntfy](https://ntfy.sh) when a run ends — the job name, what was copied, how
 long it took, and the first error if there was one. Set a server (the public
 one or your own), a topic, and scan the QR code to install the app. A problem
 raises the priority so the phone actually rings.
 
 On the public server the topic *is* the password: anyone who knows it can read
-your notifications, so make it long. An access token, for a server that needs
-one, is stored in the system credential store like every other secret here.
+your notifications, so make it long. Servers that require an access token are
+not supported.
 
 ### When something fails
 
-**Ignore errors** (Settings) decides what happens after the first failure. Off
-— the default — the run stops there, writes its database and its report, and
-tells you why. On, it works through every remaining item and lists the failures
-at the end. Off is the right choice for a backup you are watching; on is the
-right choice for an overnight job over a flaky network.
+**Continue on error** (Settings) decides what happens after the first failure.
+On — the default — the run works through every remaining item and lists the
+failures at the end. Off, it stops there, writes its database, and tells you
+why: the right choice for a run you are watching.
 
 **Retries** are separate and always apply: a failing item is attempted the
 configured number of times before it counts as a failure at all.
@@ -374,10 +372,9 @@ settings, compared and synchronized in one go.
 |---|---|---|
 | `.syncto.db` | root of both folders | the last synchronized state, for two-way sync and move detection. Hidden, gzipped. Delete it and two-way sync restarts from scratch. |
 | `.syncto.lock` | root of each folder, while running | who is synchronizing right now. Removed at the end; reclaimed automatically after a crash. |
-| `syncto-checksums.txt` | root of each target | the checksum list, when **Write a checksum list** is on (merged run after run) |
+| `syncto-checksums.txt` | root of each target | the checksum list, when **Write checksum** is on (merged run after run) |
 | `*.syncto_tmp` | next to a file being written | fail-safe copy. A leftover means a run was interrupted; the comparison ignores it and the next synchronization removes it, reporting how much space it reclaimed. |
 | `*.syncto_old` | next to a file being replaced, on SFTP | the previous version, parked for the instant it takes to rename its replacement into place. SFTP cannot replace a file atomically, and deleting the target first would lose it if the connection dropped. Swept like any leftover. |
-| `syncto_<job>_<date>.html` | `Documents/syncto reports` | the report. Written outside the synchronized folders on purpose. |
 | `install-id` | `~/.syncto/` | identifies this installation to the directory lock, so two machines sharing a hostname cannot mistake each other's lock for their own. Delete it and a new one is generated. |
 
 ---
