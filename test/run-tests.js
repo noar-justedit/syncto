@@ -4997,7 +4997,7 @@ function testLinux() {
     const sh = fs.readFileSync(path.join(root, 'scripts/build-linux.sh'), 'utf8');
     ok(/id -u\)" = "0"/.test(sh), 'the Linux build refuses to run as root');
     ok(/node_ok\(\)/.test(sh) && /20\.19/.test(sh), 'and checks the Node version before anything');
-    ok(/npm test/.test(sh), 'it runs the test suite before packaging');
+    ok(!/npm test/.test(sh), 'it does not run the test suite: tests are run by hand before a release, like the Mac and Windows builds');
     ok(/dpkg-deb -f dist\/\*\.deb Depends \| grep -q libsecret-1-0/.test(sh),
        'and checks the dependency in the .deb it produced, not in the config');
     ok(pkg.scripts['build:linux'] === 'bash scripts/build-linux.sh', 'npm run build:linux goes through it');

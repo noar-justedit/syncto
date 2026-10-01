@@ -1,0 +1,12 @@
+# Private working notes — never go to GitHub
+CLAUDE.md
+docs/notes/
+.claude/
+
+# Dependencies and build output
+node_modules/
+dist/
+
+# macOS / editors
+.DS_Store
+Icon?

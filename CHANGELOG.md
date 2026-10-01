@@ -4,6 +4,134 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.8.5] — 2026-09-30
+
+Files copied to a NAS keep their date, a NAS with wrong dates can be repaired
+without copying again, and the Overview selects with a click and a lasso.
+
+### Fixed
+
+- 🔴 **Dates on a NAS over SMB.** A Mirror left every file dated the day of the
+  copy, even with *Preserve dates* on, and the next Mirror wanted to copy the
+  whole folder again. The Mac keeps the end of a freshly written file in its
+  cache and sends it later; the server then re-dated the file after syncto had
+  set the date. syncto now has the Mac send the whole file first, sets the date
+  after that, and checks it once more after the read-back.
+- **Locks left behind by a force-quit.** On a NAS, taking over an abandoned lock
+  failed with *"ENOTSUP … Delete it manually"*; it works now. A lock that was
+  already old when the run starts is taken over at once instead of after the
+  usual wait.
+
+### Added
+
+- **Correct dates only** (Settings › Main, off by default). When a file has the
+  same size on both sides and only its date differs, syncto reads both copies
+  byte for byte: identical → only the destination's date is corrected, nothing
+  is written; different → copied as usual. Counted as *Dates corrected* in the
+  summary. Pause and Cancel work while it reads.
+- **Overview.** A click selects a folder; a double-click opens it (unfolds it and
+  narrows the list to its contents); the arrow unfolds with one click without
+  narrowing; a lasso selects every row the rectangle touches, Cmd/Ctrl adds to
+  the selection, and the list scrolls near its edges.
+
+### Changed
+
+- ⚠️ A single click in the Overview no longer narrows the list on the right. Use
+  a double-click for that.
+
+Checks: 1106.
+
+## [0.8.4] — 2026-09-30 (never published)
+
+The first version of the NAS date fix, *Correct dates only*, resizable *Size*
+and *Date* columns (grip on the left edge of each heading, double-click to
+reset, widths remembered, wider date column by default) and an Overview that
+empties during a run. Superseded by 0.8.5, which reworks the date fix (flush
+before the date) and adds the lasso and the lock fixes. The comparison shows
+its percentage without the *≈*. Checks: 1090.
+
+## [0.8.3] — 2026-09-30
+
+### Added
+
+- **A volume that is not mounted stops the comparison** and names the drive
+  (*"NAS_EDIT is not mounted (/Volumes/NAS_EDIT). It holds the destination of
+  pairs 1 and 2…"*). Before, the missing folder read as an empty one and the
+  comparison planned a copy of everything into it. A folder missing on a mounted
+  drive is still a folder to create. On macOS an empty leftover folder in
+  `/Volumes` counts as not mounted. Missing folders and volumes are red again.
+- **The run happens in the window.** A strip at the bottom replaces the frosted
+  overlay: SYNCHRONIZING (green while copying, blue while reading back), PAUSED
+  (grey), COMPARING then CHECKING (blue). The list empties as files land; a
+  failed file stays. Modes, folders and rows take no clicks during a run.
+- **Settings fit on one screen**: Main, S-FTP, Deletion, Notifications. Up to 10
+  simultaneous files on an SFTP server (4 by default).
+- The chosen mode is outlined in its colour; VERIFY sits on the modes line;
+  *When it finishes* moved to the title bar (power icon, changeable during a
+  run); the open job is green in the Jobs list.
+
+### Changed
+
+- ⚠️ **Where there is no recycle bin, deletion is permanent** (most NAS shares,
+  every SFTP server), and the confirmation says so before the run, naming the
+  folders. "No trash? delete anyway" is gone.
+- ⚠️ A self-hosted ntfy server that requires an access token no longer receives
+  notifications; the token is erased from the preferences. The phone is now
+  told after every run.
+
+### Removed
+
+- Reports (HTML, CSV, JSON); the summary and the checksum list remain.
+- The diagnostic journal; what an older version wrote is deleted at first launch.
+
+Checks: 1071.
+
+## [0.8.2] — 2026-09-25
+
+### Added
+
+- **Linux**: an AppImage and a `.deb` (Ubuntu, Debian and derivatives), built on
+  a Linux machine with `scripts/build-linux.sh`. Sleep and shutdown go through
+  `systemctl`.
+
+### Changed
+
+- **Server passwords need a desktop keyring** (GNOME Keyring or KWallet). Without
+  one, Electron falls back to a store encrypted with a key written in its own
+  source; syncto refuses it and asks for the password at each connection.
+
+### Fixed
+
+- An intermittent test failure (about one run in thirty): the test SFTP server's
+  generated host key was sometimes rejected by ssh2's own parser. Test-only; the
+  application never generates keys.
+
+Checks: 1065.
+
+## [0.8.1] — 2026-09-24
+
+### Changed
+
+- **A colour per mode**: 2 WAYS blue (neutral), MIRROR orange (it removes: a
+  decision), UPDATE green (never removes), CUSTOM grey (claims nothing). Red
+  stays reserved for rows that will be deleted now.
+- A crash in one section of the test suite no longer ends the whole run: it is
+  named and the other sections still run.
+
+Checks: 1050.
+
+## [0.8.0] — 2026-09-24
+
+Result of a full audit: security (SFTP host keys, relative paths), engine
+defects, speed (×3–10 on the measured cases) and interface. The
+`disable-library-validation` entitlement was removed. Checks: 1044. The detail
+of each finding was kept in the private working notes, not in this file.
+
+## [0.7.4] — 2026-09-21
+
+The UI charter: three surfaces and no structural borders, a cyan accent
+reserved for the logo, and the new *Loop* icon. Checks: 928.
+
 ## [0.7.3] — 2026-09-20
 
 "After the synchronization: shut down" never worked. Neither did sleep.

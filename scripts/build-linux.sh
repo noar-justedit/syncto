@@ -113,9 +113,6 @@ fi
 # sitting in dist/ beside it is left alone.
 rm -rf dist/*.AppImage dist/*.deb dist/linux-unpacked dist/linux-* dist/latest-linux.yml
 
-echo "→ Running the test suite"
-npm test
-
 echo "→ Building AppImage + deb"
 npx electron-builder --config electron-builder.yml --linux AppImage deb
 

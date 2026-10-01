@@ -14,30 +14,10 @@ Licensed under the **GNU General Public License v3.0** (see [`LICENSE`](./LICENS
 
 ## Screenshots
 
-| Main window — two folder pairs compared | Copy pass |
-|---|---|
-| ![syncto main window](docs/screenshots/syncto-main.png) | ![copy phase](docs/screenshots/syncto-sync.png) |
+![syncto 0.8.5 — a Mirror compared and ready to synchronize](docs/screenshots/screenshot.png)
 
-| Verification pass — every file read back | Run summary |
-|---|---|
-| ![verification pass](docs/screenshots/syncto-verify.png) | ![summary](docs/screenshots/syncto-summary.png) |
-
-| Connect to a server (SFTP) | Filter — per job |
-|---|---|
-| ![connect to a server](docs/screenshots/syncto-server.png) | ![filter](docs/screenshots/syncto-filter.png) |
-
-| Settings | Phone notifications |
-|---|---|
-| ![settings](docs/screenshots/syncto-settings.png) | ![phone notifications](docs/screenshots/syncto-ntfy.png) |
-
-| Auto-sync confirmation | Another machine is running |
-|---|---|
-| ![auto-sync](docs/screenshots/syncto-autosync.png) | ![waiting on a lock](docs/screenshots/syncto-lock.png) |
-
-<sub>Taken from the running application, not mocked up: `scripts/shots-linux.sh`
-drives the real window through the DevTools protocol over a real dataset and
-writes these files. They are regenerated at every release, which is how the
-interface in them stays the interface you get.</sub>
+<sub>The main window in 0.8.5: a Mirror between two folders, compared. Creations
+in green, updates in orange, deletions in red, moves in blue.</sub>
 
 ---
 
@@ -156,7 +136,7 @@ From a terminal, `./build.sh` at the project root does the same:
 
 **Build Linux on Linux:** `bash scripts/build-linux.sh` on an Ubuntu, Debian or
 Pop!_OS machine. It checks Node (20.19 or newer — the `apt` one is too old, the
-script says how to get a current one), runs the test suite, and writes
+script says how to get a current one), and writes
 `dist/syncto-<version>-linux-x86_64.AppImage` and
 `dist/syncto_<version>_amd64.deb`. electron-builder can produce an AppImage
 from a Mac, but the `.deb` it makes there is not valid, so the Linux packages
