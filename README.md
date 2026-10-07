@@ -48,21 +48,21 @@ Go to **https://nodejs.org**, click the green **LTS** button, run the installer.
 (or **Code → Download ZIP** and unzip it wherever you like).
 
 ### Step 3 — Build the app
-1. Open the `syncto/scripts/` folder
-2. **Double-click `build-mac.command`**
+1. Open the `syncto` folder
+2. **Double-click `build_mac.command`**
    - If macOS asks for confirmation, click **"Open"**
    - A Terminal window opens and builds everything automatically
    - The first run takes 2–3 minutes (downloading dependencies)
 3. When it's done, the script offers to open the `dist/` folder
 
-For Windows, **double-click `scripts/build-win-from-mac.command`** — it
-cross-builds from your Mac.
+For Windows, **double-click `build_windows.command`** — it cross-builds from
+your Mac.
 
 Double-click only ever works on a `.command` file: macOS opens a `.sh` in a text
 editor. And if a launcher ever answers **"you do not have appropriate access
 privileges"**, the folder travelled somewhere that drops file permissions (a
 FAT/exFAT stick, a sync from Windows, some unzip tools). Open Terminal in the
-`syncto` folder and run `chmod +x build.sh scripts/*.sh scripts/*.command`
+`syncto` folder and run `chmod +x *.command build.sh scripts/*.sh scripts/*.command`
 once — the launchers repair themselves after that.
 
 **Building the Windows version from a Mac works.** syncto's own code compiles
@@ -76,7 +76,7 @@ once with `brew install --cask wine-stable` if you want it.
 ### Signing and notarization (macOS)
 
 **There is nothing to run first.** The macOS build does all of it — double-click
-`scripts/build-mac.command`, or run `./build.sh`, and that is the whole
+`build_mac.command`, or run `./build.sh`, and that is the whole
 procedure, now and for every build after.
 
 With a **Developer ID Application** certificate in your keychain it signs the
@@ -152,6 +152,27 @@ come from a Linux machine — the same rule as ingesto.
 
 ### Test without building (dev mode)
 Install Node.js (Step 1), then double-click `scripts/dev.command`.
+
+### Publishing to GitHub (maintainer)
+Double-click `scripts/push_github.command` in the folder to publish. It makes
+the repository's `main` branch exactly identical to the folder — additions,
+changes and removals, executable bits included — after listing the changes and
+waiting for `y`. It refuses unless `version.json` and `package.json` agree on a
+version higher than the one on GitHub, never forces a push, and holds
+`version.json` back until the GitHub Release `vX.Y.Z` exists, because that file
+is what makes every installed copy announce the update. So: run it, publish the
+Release with its binaries, run it again.
+
+It needs git (`xcode-select --install`) and Node.js. The first push asks for
+GitHub credentials: either sign in once with the GitHub CLI
+(`brew install gh && gh auth login`), which the script then uses, or answer
+git's prompt with your GitHub user name and a personal access token (not your
+password); macOS keeps it in the keychain.
+
+### For developers and AI assistants
+`AGENTS.md` holds the working rules, `ETAT_PROJET.md` the state of the project
+(architecture, decisions and their reasons, known issues, where the version
+number lives). Both are in French.
 
 ---
 

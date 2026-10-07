@@ -4,6 +4,55 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.8.7] — 2026-10-07
+
+Each pass of a run has its own name and its own ring, and a second ring shows
+the whole run.
+
+### Changed
+
+- **The run strip names each pass and shows two rings.** The title reads
+  *SYNCHRONIZING* while files are copied, *VERIFYING* while they are read back
+  (in blue), *FINISHING* for the last tidy-up. The inner ring and the big figure
+  follow the pass going on, from 0 to 100 %; a thinner outer ring, with
+  *TOTAL x %* under the figure, follows the whole run. In a job with several
+  pairs, each pair copies then reads back, so the inner ring starts again for
+  each of them; the outer ring runs from start to end. A comparison still shows
+  one ring.
+
+## [0.8.6] — 2026-10-05
+
+A folder picked again keeps its two-way history, and syncto's own files no
+longer show up in Windows Explorer.
+
+### Fixed
+
+- **A re-pointed pair keeps its history.** The synchronization history of a
+  pair is filed under its two paths, so picking a folder again — a renamed
+  drive, a volume that came back under another name, the relink window — started
+  from nothing: in 2 WAYS, a file deleted on one side came back from the other.
+  syncto now remembers the paths a pair had before the change and reads the
+  history there, but only when both folders hold the same copy of it; pointing
+  at a different folder still starts fresh, and swapping the sides is not
+  mistaken for a re-point.
+
+### Changed
+
+- **`.syncto.db` and `.syncto.lock` are hidden on Windows.** The leading dot
+  hides them on macOS and Linux; Windows ignores it, so both showed up in every
+  synchronized folder. syncto now sets Windows' *hidden* attribute on them.
+  `syncto-checksums.txt` stays visible: it is the proof of the read-back.
+- The build launchers are now `build_mac.command` and `build_windows.command`,
+  at the top of the folder.
+
+### Added
+
+- `scripts/push_github.command`: publishes the folder to GitHub, removals
+  included, only for a new version, and holds `version.json` back until the
+  Release exists.
+- `AGENTS.md` and `ETAT_PROJET.md`: working rules and project state, for
+  whoever (or whichever AI) picks the project up.
+
 ## [0.8.5] — 2026-09-30
 
 Files copied to a NAS keep their date, a NAS with wrong dates can be repaired

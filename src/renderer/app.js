@@ -59,9 +59,55 @@ function ensurePairs(j) {
   if (!Array.isArray(j.pairs) || !j.pairs.length) {
     j.pairs = [{ left: j.left || '', right: j.right || '' }];
   }
-  j.pairs = j.pairs.map(p => ({ left: p.left || '', right: p.right || '' }));
+  j.pairs = j.pairs.map(p => {
+    const out = { left: p.left || '', right: p.right || '' };
+    if (p.was && typeof p.was.left === 'string' && typeof p.was.right === 'string') {
+      out.was = { left: p.was.left, right: p.was.right };
+    }
+    return out;
+  });
   delete j.left; delete j.right;
   return j;
+}
+
+// (0.8.6) Changes one folder of a pair, remembering the paths the pair had
+// before. The synchronization history is filed under the two paths, so without
+// this a renamed drive or a folder picked again in the relink window started
+// from nothing — in 2 WAYS, a file deleted on one side came back from the
+// other. The engine reads the history under `was` when the new paths have
+// none, and only if both folders hold it.
+//
+// Kept from the FIRST edit until a run has written the history under the new
+// paths: two edits in a row (a wrong folder, then the right one) still point
+// back at the paths that have a history. A swap is not an edit — see swapPair.
+function setPairPath(pair, side, value) {
+  if (!pair || pair[side] === value) return;
+  if (!pair.was && pair.left.trim() && pair.right.trim()) {
+    pair.was = { left: pair.left, right: pair.right };
+  }
+  pair[side] = value;
+  // Back where it was: nothing to carry over.
+  if (pair.was && pair.was.left === pair.left && pair.was.right === pair.right) delete pair.was;
+}
+
+// Source and destination trade places, and so do the former paths: the
+// history of (A → B) is never read as the history of (B → A).
+function swapPair(p) {
+  if (!p) return;
+  const t = p.left; p.left = p.right; p.right = t;
+  if (p.was) p.was = { left: p.was.right, right: p.was.left };
+}
+
+// (0.8.6) After a run: the pairs whose history now lives under their current
+// paths no longer need their former ones.
+function dropCarriedPaths(res) {
+  if (!res || !Array.isArray(res.dbSaved) || !res.dbSaved.length) return;
+  let changed = false;
+  for (const p of state.job.pairs || []) {
+    if (!p.was) continue;
+    if (res.dbSaved.some(d => d.left === p.left && d.right === p.right)) { delete p.was; changed = true; }
+  }
+  if (changed) persist();
 }
 
 // Lucide "server". Same glyph in the two main fields and in every pair row.
@@ -258,8 +304,8 @@ function uiToJob() {
   for (const row of document.querySelectorAll('#pairrows .prow')) {
     const i = Number(row.dataset.i);
     if (!j.pairs[i]) continue;
-    j.pairs[i].left  = row.querySelector('.pr-left').value.trim();
-    j.pairs[i].right = row.querySelector('.pr-right').value.trim();
+    setPairPath(j.pairs[i], 'left',  row.querySelector('.pr-left').value.trim());
+    setPairPath(j.pairs[i], 'right', row.querySelector('.pr-right').value.trim());
   }
 
   // Time tolerance (2 s), DST shifts, symlink policy and the size filter keep
@@ -1081,7 +1127,7 @@ async function applyRelink() {
   const pairs = ensurePairs(state.job).pairs;
   for (const e of done) {
     if (!pairs[e.pairIndex]) continue;
-    pairs[e.pairIndex][e.side === 'left' ? 'left' : 'right'] = e.chosen;
+    setPairPath(pairs[e.pairIndex], e.side === 'left' ? 'left' : 'right', e.chosen);
   }
   jobToUi();
   persist();
@@ -1274,7 +1320,8 @@ async function doSync() {
   state.paused = false;
   state.speeds = [];
   setBusyUi(true, 'Synchronizing…', true);
-  $('pb-title').textContent = 'SYNCHRONIZING';
+  state.runPass = 'copy';
+  $('pb-title').textContent = runTitle('copy', false);
   $('pb-ring').classList.remove('spin');
   setStatLabels('Files', 'Left to copy', 'Speed', 'ETA');
   { const del = $('s-del-box'); if (del) del.style.display = ''; }
@@ -1291,6 +1338,7 @@ async function doSync() {
     showError('Synchronization failed', res.error);
     return;
   }
+  dropCarriedPaths(res);
   showSummary(res);
   setRecheck('busy', 'Comparing both folders again to confirm the result…');
   await doCompareQuiet();
@@ -1359,7 +1407,14 @@ async function doCompareQuiet() {
 }
 
 // ── Progress panel ─────────────────────────────────────────────────────────
-const RING_LEN = 182.2;
+const RING_LEN = 169.6;       // inner ring, r = 27
+const RING_ALL_LEN = 210.5;   // outer ring, r = 33.5: the whole run (0.8.7)
+
+// (0.8.7) The title names the pass going on: copying, then reading back.
+function runTitle(pass, paused) {
+  if (paused) return 'PAUSED';
+  return pass === 'verify' ? 'VERIFYING' : pass === 'cleanup' ? 'FINISHING' : 'SYNCHRONIZING';
+}
 
 function setBusyUi(on, title, steps) {
   $('bottombar').classList.toggle('open', on);
@@ -1382,6 +1437,8 @@ function setBusyUi(on, title, steps) {
   if (on) {
     $('pb-pct').textContent = '0%';
     $('pb-ring').setAttribute('stroke-dashoffset', RING_LEN);
+    $('pb-ring-all').setAttribute('stroke-dashoffset', RING_ALL_LEN);
+    $('pb-pct-all').textContent = steps ? 'TOTAL 0%' : '';
     $('pb-fill').style.width = '0%';
     $('s-files').textContent = '—'; $('s-size').textContent = '—';
     $('s-spd').textContent = '—'; $('s-eta').textContent = '—';
@@ -1558,10 +1615,17 @@ API.onSyncProgress(p => {
     $('pb-pct').textContent   = '…';
     return;
   }
+  // The whole run (copy and read-back together): outer ring and top bar.
   const pct = p.bytesTotal > 0 ? Math.min(100, (p.bytesDone / p.bytesTotal) * 100)
             : p.filesTotal > 0 ? (p.filesDone / p.filesTotal) * 100 : 0;
-  $('pb-pct').textContent = Math.round(pct) + '%';
-  $('pb-ring').setAttribute('stroke-dashoffset', RING_LEN * (1 - pct / 100));
+  // (0.8.7) The pass going on, from 0 to 100 %: inner ring and big figure.
+  // A pass with no bytes to move (deletions only) follows the whole run.
+  const passPct = p.passBytesTotal > 0
+    ? Math.min(100, Math.max(0, (p.passBytesDone || 0) / p.passBytesTotal) * 100) : pct;
+  $('pb-pct').textContent = Math.round(passPct) + '%';
+  $('pb-ring').setAttribute('stroke-dashoffset', RING_LEN * (1 - passPct / 100));
+  $('pb-pct-all').textContent = 'TOTAL ' + Math.round(pct) + '%';
+  $('pb-ring-all').setAttribute('stroke-dashoffset', RING_ALL_LEN * (1 - pct / 100));
   $('pb-fill').style.width = pct + '%';
   // With several files in flight, naming one of them and nothing else would
   // read as a single slow file. Say how many are going at once.
@@ -1592,10 +1656,11 @@ API.onSyncProgress(p => {
   const title = $('pb-title');
   // After the verification pass only folder deletions and pruning remain —
   // nothing is being copied, so the title must not claim it is.
-  // One word for the whole run: SYNCHRONIZING. Which part of it is going on
-  // (copy, read-back, finish) is what the step chips beside it say, and the
-  // colour follows them — blue while reading back.
-  title.textContent = p.paused ? 'PAUSED' : 'SYNCHRONIZING';
+  // (0.8.7) The title names the pass: SYNCHRONIZING while copying, VERIFYING
+  // while reading back (in blue), FINISHING for the tail. Noar's choice; until
+  // 0.8.6 it said SYNCHRONIZING for the whole run.
+  state.runPass = p.pass;
+  title.textContent = runTitle(p.pass, p.paused);
   bar.classList.toggle('paused', !!p.paused);
   // The colour comes from --pb-color on the strip (green, blue while reading
   // back, grey when paused) — not from an inline style that would outlast it.
@@ -1967,7 +2032,7 @@ function bind() {
     // Said at once: a paused engine sends no progress, so waiting for it to
     // say "paused" would leave the strip beating over a run that is stopped.
     $('bottombar').classList.toggle('paused', state.paused);
-    $('pb-title').textContent = state.paused ? 'PAUSED' : 'SYNCHRONIZING';
+    $('pb-title').textContent = runTitle(state.runPass, state.paused);
     $('pb-title').style.color = '';     // the strip's colour rules take it from here
     if (state.paused) await API.syncPause(); else await API.syncResume();
   });
@@ -2004,8 +2069,7 @@ function bind() {
     }
     if (e.target.closest('.pr-swap')) {
       uiToJob();
-      const p = state.job.pairs[i];
-      if (p) { const t = p.left; p.left = p.right; p.right = t; }
+      swapPair(state.job.pairs[i]);
       jobToUi();
       onPathChanged();
       return;
@@ -2176,7 +2240,7 @@ async function onPathChanged() {
 // swaps that row only.
 function swapAllPairs() {
   uiToJob();
-  for (const p of state.job.pairs) { const t = p.left; p.left = p.right; p.right = t; }
+  for (const p of state.job.pairs) swapPair(p);
   jobToUi();
   onPathChanged();
 }
@@ -2773,6 +2837,7 @@ async function autoRun() {
     notifyRunFailed(res.error);
     return;
   }
+  dropCarriedPaths(res);
   const c = res.counters;
   const bits = [];
   if (c.files)  bits.push(`${c.files} copied`);

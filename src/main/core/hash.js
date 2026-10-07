@@ -20,17 +20,13 @@
 // binary to compile, which is what makes cross-building for Windows from a Mac
 // possible in the first place.
 //
-// Copy levels, same ladder as ingesto:
+// One copy mode (see algoFor below): xxHash64 is computed on the source while
+// writing, then recomputed by reading the target back. Catches silent
+// corruption. Roughly halves throughput on a fast drive because everything is
+// read twice.
 //
-//   fast      copy only. Fastest, trusts the filesystem.
-//   verified  compares the size of the target after writing. Catches a truncated
-//             or interrupted copy, costs nothing.
-//   secure    xxHash64 computed on the source while writing, then recomputed by
-//             reading the target back. Catches silent corruption. Roughly halves
-//             throughput on a fast drive because everything is read twice.
-//
-// The checksum list written at the secure level (optional, see the settings) is
-// what lets anyone re-verify the copy months later without the source.
+// The checksum list (optional, see the settings) is what lets anyone re-verify
+// the copy months later without the source.
 //
 // xxHash is not cryptographic: it detects accidental corruption, not tampering.
 // That is the right trade-off here — it runs several GB/s where MD5 crawls.

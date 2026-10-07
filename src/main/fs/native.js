@@ -40,6 +40,9 @@ class NativeFs {
   constructor() {
     this.kind = 'native';
     this.sep  = path.sep;
+    // Both replaceable by the test suite, which runs on Linux (see setHidden).
+    this._platform = process.platform;
+    this._attrib = runAttrib;
   }
 
   // Identifies the physical device, used to cap parallel operations per drive.
@@ -269,6 +272,32 @@ class NativeFs {
   }
 
   supportsTrash() { return true; }
+
+  // (0.8.6) Windows only: sets or clears the "hidden" attribute. The dot in
+  // front of .syncto.db hides it on macOS and Linux; Windows ignores the dot
+  // and only hides what carries the attribute, so the database sat in plain
+  // sight in every synchronized folder. Node has no API for it, hence the
+  // system's attrib.exe. Best effort: answers false instead of throwing, a
+  // file left visible is never a reason to fail a run. A no-op elsewhere.
+  async setHidden(p, hidden) {
+    if (this._platform !== 'win32') return false;
+    // attrib does not understand the \\?\ long-path prefix.
+    let q = String(p || '');
+    if (q.startsWith('\\\\?\\UNC\\')) q = '\\\\' + q.slice(8);
+    else if (q.startsWith('\\\\?\\')) q = q.slice(4);
+    try { await this._attrib([hidden ? '+h' : '-h', q]); return true; }
+    catch (_) { return false; }
+  }
+}
+
+function runAttrib(args) {
+  const exe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'attrib.exe');
+  return new Promise((resolve, reject) => {
+    // windowsHide: attrib is a console program, and without it every database
+    // write would flash a black window over syncto.
+    require('child_process').execFile(exe, args, { windowsHide: true, timeout: 10000 },
+      err => (err ? reject(err) : resolve()));
+  });
 }
 
 module.exports = { NativeFs, READ_BLOCK, SCAN_LANES };

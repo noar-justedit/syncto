@@ -329,6 +329,9 @@ class DirLock {
     // The in-flight append has to finish first: one landing AFTER the unlink
     // would recreate the file and block other machines for a full minute.
     if (this._beating) { try { await this._beating; } catch (_) {} }
+    // Same for attrib: Windows refuses to delete a file another program has
+    // open, and a lock left behind blocks the folder for every machine.
+    if (this._hiding) { try { await this._hiding; } catch (_) {} }
     if (this.lost) return;              // not ours any more — deleting it would evict its owner
     try {
       const cur = await readLockInfo(this.fs, this.path);
@@ -484,6 +487,13 @@ async function acquireOne(fsx, folderPath, opts) {
     try {
       await fsx.writeExclusive(lockPath, payload);
       const lock = new DirLock(fsx, lockPath, local, onLost, (opts || {}).timing);
+      // (0.8.6) Hidden on Windows, like the database (the dot does it
+      // elsewhere). Not awaited: a share slow to answer attrib must not delay
+      // the run. The heartbeat only appends, which Windows allows on a hidden
+      // file; release() waits for it before deleting the file.
+      if (typeof fsx.setHidden === 'function') {
+        lock._hiding = fsx.setHidden(lockPath, true).catch(() => false);
+      }
       lock._startHeartbeat();
       return lock;
     } catch (err) {

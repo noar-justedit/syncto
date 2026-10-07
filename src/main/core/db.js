@@ -28,7 +28,7 @@
 // by-difference decisions rather than guessing.
 //
 // Several folder pairs can share a base folder, so entries are keyed by a pair
-// id that is generated once and stored in the configuration file.
+// id (see pairIdFor).
 
 const zlib = require('zlib');
 const { promisify } = require('util');
@@ -120,11 +120,24 @@ async function writeDb(fsx, basePath, doc) {
   const tmp = target + '.syncto_tmp';
   try {
     await writeFileBuffer(fsx, tmp, buf);
-    await fsx.rename(tmp, target);
+    try {
+      await fsx.rename(tmp, target);
+    } catch (err) {
+      // (0.8.6) Windows can refuse to replace a file that carries the hidden
+      // attribute. Clear it and try once more; anything else is a real error.
+      if (typeof fsx.setHidden !== 'function' || !['EPERM', 'EACCES'].includes(err.code)) throw err;
+      await fsx.setHidden(target, false);
+      await fsx.rename(tmp, target);
+    }
   } catch (err) {
     try { await fsx.unlink(tmp); } catch (_) {}
     throw err;
   }
+  // (0.8.6) The file just renamed into place is new, and so visible on
+  // Windows: hide it again after every write. (The lock is hidden too, in
+  // lock.js; syncto-checksums.txt never is: it is the proof of the read-back
+  // and meant to be found.)
+  if (typeof fsx.setHidden === 'function') await fsx.setHidden(target, true);
 }
 
 // The in-memory view handed to the direction engine.
@@ -272,17 +285,6 @@ function newPairId() {
   return 'pair-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
 }
 
-// The identity of a folder pair inside the database file.
-//
-// A saved job carries an explicit id, so renaming or moving a folder keeps its
-// history. An unsaved job has none, and generating a random one every run would
-// silently break two-way sync — the next run would never find the session it
-// just wrote. So the fallback is derived from the two paths: same pair, same id,
-// run after run, saved or not.
-//
-// The order matters (left and right are recorded separately), which is why the
-// two paths are not sorted: swapping sides deliberately starts a fresh history
-// rather than reading the old one backwards.
 // The pair's own session as ONE side stores it. loadPairDb needs both sides to
 // agree, which is right for deciding directions and useless here: the whole
 // question is what the surviving side remembers about a side that is missing.
@@ -293,6 +295,20 @@ async function readSideSession(fsx, basePath, pairId) {
   return sess || null;
 }
 
+// The identity of a folder pair inside the database file.
+//
+// Derived from the two paths: same pair, same id, run after run, saved or not —
+// a random id per run would silently break two-way sync, the next run never
+// finding the session it just wrote. (An explicit id is only honoured for a
+// single-pair job that still carries the legacy job-level one.)
+//
+// Changing a path therefore changes the id. Since 0.8.6 the window keeps the
+// former paths of a re-pointed pair, and Session.compare reads the history
+// under them when the new id has none (previousPairId in session.js).
+//
+// The order matters (left and right are recorded separately), which is why the
+// two paths are not sorted: swapping sides deliberately starts a fresh history
+// rather than reading the old one backwards.
 function pairIdFor(explicit, leftPath, rightPath) {
   if (explicit) return explicit;
   const norm = p => String(p || '').replace(/[\\/]+$/, '').toLowerCase();

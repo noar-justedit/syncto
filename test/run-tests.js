@@ -5153,8 +5153,17 @@ async function testRequest083() {
   // (d2) A run you cannot miss: one word for the whole run, a big ring and
   //      title in the colour of the pass, an outline that breathes — and all
   //      of it still and grey the moment the run is paused.
-  ok(/title\.textContent = p\.paused \? 'PAUSED' : 'SYNCHRONIZING';/.test(appjs) && !/'COPYING'/.test(appjs),
-     'the title says SYNCHRONIZING for the whole run, not the name of a pass');
+  // (0.8.7) Noar's choice changed: the title now names the pass.
+  {
+    const rt = appjs.slice(appjs.indexOf('function runTitle('), appjs.indexOf('}', appjs.indexOf('function runTitle(')) + 1);
+    const runTitle = new Function('return ' + rt)();
+    eq([runTitle('copy', false), runTitle('verify', false), runTitle('cleanup', false), runTitle('verify', true)],
+       ['SYNCHRONIZING', 'VERIFYING', 'FINISHING', 'PAUSED'],
+       'the title names the pass: SYNCHRONIZING, VERIFYING, FINISHING, or PAUSED');
+    ok(/title\.textContent = runTitle\(p\.pass, p\.paused\);/.test(appjs) &&
+       /\$\('pb-title'\)\.textContent = runTitle\(state\.runPass, state\.paused\);/.test(appjs),
+       'during the run and when resuming from a pause');
+  }
   ok(/\$\('bottombar'\)\.classList\.toggle\('paused', state\.paused\);/.test(appjs),
      'pausing is shown at once, without waiting for the engine');
   ok(/#bottombar\.live\{box-shadow:inset 0 0 0 2px var\(--pb-color/.test(html) && /animation:runglow/.test(html),
@@ -5364,6 +5373,336 @@ async function testRequest083() {
     ok(/\.ov-lasso\{/.test(html), 'the lasso is drawn');
     ok(/body\.lassoing \.tooltip-float\{display:none/.test(html) &&
        /classList\.contains\('lassoing'\)\) return;/.test(appjs), 'and no tooltip covers it');
+  }
+
+  // (d12) A re-pointed pair keeps its history (0.8.6). The history is filed
+  //       under an id made from the two paths, so a renamed drive — or a folder
+  //       picked again in the relink window — used to start from nothing: in
+  //       2 WAYS, a clip deleted on one side came back from the other.
+  {
+    const { readSideSession, pairIdFor } = require('../src/main/core/db');
+    const { NativeFs } = require('../src/main/fs/native');
+    const nfs = new NativeFs();
+    const twoWay = (L, R, was) => {
+      const j = makeJob(L, R, { sync: { variant: 'twoWay' } });
+      if (was) j.pairWas = was;
+      return j;
+    };
+    async function syncedTwoWay() {
+      const { dir, L, R } = scratch();
+      write(L, 'A001/CLIP_1.mov', 'x'.repeat(900));
+      write(L, 'A001/CLIP_2.mov', 'y'.repeat(700));
+      await runPair(twoWay(L, R));
+      return { dir, L, R };
+    }
+    async function planFor(job, rel) {
+      const s = new Session();
+      const cmp = await s.compare(job, { token: {} });
+      const n = s.nodes.find(x => x.rel === rel);
+      return { s, cmp, op: n ? n.op : null };
+    }
+
+    // The reported case: the destination folder was renamed, and a clip
+    // deleted on the source since the last run.
+    const c = await syncedTwoWay();
+    const R2 = path.join(c.dir, 'R_renamed');
+    fs.renameSync(c.R, R2);
+    fs.unlinkSync(path.join(c.L, 'A001/CLIP_1.mov'));
+
+    const before = await planFor(twoWay(c.L, R2), 'A001/CLIP_1.mov');
+    await before.s.close();
+    eq(before.op, OP.CREATE_LEFT, 'without the former paths, the deleted clip would be copied back (the old behaviour)');
+
+    const after = await planFor(twoWay(c.L, R2, { left: c.L, right: c.R }), 'A001/CLIP_1.mov');
+    eq(after.op, OP.DELETE_RIGHT, 'with them, the deletion is carried to the renamed folder');
+    ok(after.cmp.historyCarried, 'the comparison says the history was carried over');
+    eq(after.cmp.dbNote, null, 'and does not claim there is no database');
+    await after.s.sync(twoWay(c.L, R2, { left: c.L, right: c.R }), { token: {}, appVersion: 'test' });
+    const newId = after.s.pairId;
+    await after.s.close();
+    ok(!exists(R2, 'A001/CLIP_1.mov'), 'the run deletes it there');
+    ok(!!(await readSideSession(nfs, c.L, newId)) && !!(await readSideSession(nfs, R2, newId)),
+       'the history is now written under the new paths, on both sides');
+    ok(!!(await readSideSession(nfs, c.L, pairIdFor(null, c.L, c.R))),
+       'and the old session is left in place (another job may still use those paths)');
+    const again = await planFor(twoWay(c.L, R2), 'A001/CLIP_2.mov');
+    await again.s.close();
+    eq(again.cmp.dbNote, null, 'the next run finds its history without the former paths');
+    ok(!again.cmp.historyCarried, 'under its own id');
+
+    // A swap is not a re-point: the history of A → B is never read as B → A.
+    {
+      const d = await syncedTwoWay();
+      const sw = await planFor(twoWay(d.R, d.L, { left: d.L, right: d.R }), 'A001/CLIP_1.mov');
+      await sw.s.close();
+      ok(!sw.cmp.historyCarried, 'former paths that now sit on the other side are ignored');
+    }
+
+    // Pointing at a DIFFERENT folder (a copied job sent to another drive):
+    // nothing on that side, so a fresh start — and the original pair keeps
+    // its own history untouched.
+    {
+      const d = await syncedTwoWay();
+      const R3 = path.join(d.dir, 'OTHER_DRIVE');
+      fs.mkdirSync(R3);
+      const other = await planFor(twoWay(d.L, R3, { left: d.L, right: d.R }), 'A001/CLIP_1.mov');
+      ok(!other.cmp.historyCarried, 'a different folder holds no copy of the history: nothing carried');
+      eq(other.op, OP.CREATE_RIGHT, 'and it is filled like any new destination');
+      await other.s.sync(twoWay(d.L, R3, { left: d.L, right: d.R }), { token: {}, appVersion: 'test' });
+      await other.s.close();
+      const orig = await planFor(twoWay(d.L, d.R), 'A001/CLIP_1.mov');
+      await orig.s.close();
+      eq(orig.cmp.dbNote, null, 'the original pair still finds its own history');
+    }
+
+    // Through MultiSession, the path every run of the window takes.
+    {
+      const d = await syncedTwoWay();
+      const R2m = path.join(d.dir, 'R_moved');
+      fs.renameSync(d.R, R2m);
+      fs.unlinkSync(path.join(d.L, 'A001/CLIP_2.mov'));
+      const job = twoWay('', '');
+      job.pairs = [{ left: d.L, right: R2m, was: { left: d.L, right: d.R } }];
+      const m = new MultiSession();
+      const cmp = await m.compare(job, { token: {} });
+      eq(cmp.stats.deleteRight, 1, 'each pair hands its former paths to the engine');
+      const res = await m.sync(job, { token: {}, appVersion: 'test' });
+      await m.close();
+      eq(res.dbSaved, [{ left: d.L, right: R2m }], 'and the run says which pairs now have their history under the new paths');
+    }
+
+    // The job file keeps them, cleaned.
+    {
+      const cfg = require('../src/main/config');
+      const { dir } = scratch();
+      const file = path.join(dir, 'moved.syncto');
+      fs.writeFileSync(file, JSON.stringify({ format: cfg.JOB_FORMAT, name: 'moved', pairs: [
+        { left: '/Volumes/RAID 1/P', right: '/b', was: { left: '/Volumes/RAID/P', right: '/b' } },
+        { left: '/c', right: '/d', was: { left: '', right: '/d' } },
+        { left: '/e', right: '/f', was: 'nonsense' },
+      ] }));
+      const job = cfg.loadJob(file);
+      eq(job.pairs[0].was, { left: '/Volumes/RAID/P', right: '/b' }, 'a job file keeps the former paths of a pair');
+      ok(!('was' in job.pairs[1]) && !('was' in job.pairs[2]), 'and drops anything incomplete or malformed');
+      const out = cfg.saveJob(path.join(dir, 'out.syncto'),
+        Object.assign({}, job, { pairs: [{ left: 'sftp://noar@nas/vol', right: '/b',
+          was: { left: 'sftp://noar:s3cret@nas/old', right: '/b' } }] }));
+      ok(!/s3cret/.test(JSON.stringify(out)) && !/s3cret/.test(fs.readFileSync(path.join(dir, 'out.syncto'), 'utf8')),
+         'no password travels in the former paths either');
+    }
+
+    // The window: every way a folder changes goes through setPairPath, a swap
+    // swaps the former paths too, and a finished run clears them.
+    {
+      const app = fs.readFileSync(path.join(root, 'src/renderer/app.js'), 'utf8');
+      const ens = app.slice(app.indexOf('function ensurePairs(j)'), app.indexOf('function setPairPath('));
+      ok(/out\.was = \{ left: p\.was\.left, right: p\.was\.right \}/.test(ens), 'ensurePairs keeps the former paths');
+      const set = app.slice(app.indexOf('function setPairPath('), app.indexOf('function swapPair('));
+      ok(/if \(!pair\.was && pair\.left\.trim\(\) && pair\.right\.trim\(\)\)/.test(set),
+         'the former paths are taken at the first edit only, from a complete pair');
+      const ui = app.slice(app.indexOf('function uiToJob()'), app.indexOf('j.compare.detectMoves', app.indexOf('function uiToJob()')));
+      ok(/setPairPath\(j\.pairs\[i\], 'left'/.test(ui) && /setPairPath\(j\.pairs\[i\], 'right'/.test(ui),
+         'typing and browsing go through it');
+      const rel = app.slice(app.indexOf('async function applyRelink()'), app.indexOf('function dismissRelink()'));
+      ok(/setPairPath\(pairs\[e\.pairIndex\]/.test(rel), 'so does the relink window');
+      const sw = app.slice(app.indexOf('function swapPair('), app.indexOf('function dropCarriedPaths('));
+      ok(/p\.was = \{ left: p\.was\.right, right: p\.was\.left \}/.test(sw), 'a swap swaps the former paths');
+      ok(/swapPair\(state\.job\.pairs\[i\]\)/.test(app) && /for \(const p of state\.job\.pairs\) swapPair\(p\);/.test(app),
+         'for one row and for all of them');
+      ok((app.match(/dropCarriedPaths\(res\);/g) || []).length === 2, 'both the manual run and auto-sync clear them afterwards');
+    }
+  }
+
+  // (d14) scripts/push_github.command: GitHub becomes exactly this folder,
+  //       only for a new version, with version.json held back until its
+  //       Release exists. Run for real against a local repository.
+  {
+    const cp = require('child_process');
+    const script = path.join(root, 'scripts/push_github.command');
+    const src = fs.readFileSync(script, 'utf8');
+    ok((fs.statSync(script).mode & 0o111) !== 0, 'the push script is executable');
+    ok(!/--force|push\s+-f\b|\+main/.test(src), 'it never forces a push');
+    ok(/push origin HEAD:main/.test(src), 'it pushes to main');
+    ok(fs.existsSync(path.join(root, 'build_mac.command')) && fs.existsSync(path.join(root, 'build_windows.command')),
+       'the build launchers are build_mac.command and build_windows.command');
+    for (const f of ['build_mac.command', 'build_windows.command']) {
+      const t = fs.readFileSync(path.join(root, f), 'utf8');
+      ok(/^cd "\$\(dirname "\$0"\)"$/m.test(t) && /bash scripts\/build-/.test(t), `${f} runs its script from the project folder`);
+      ok((fs.statSync(path.join(root, f)).mode & 0o111) !== 0, `${f} is executable`);
+    }
+    const has = c => { try { cp.execSync(`command -v ${c}`, { stdio: 'ignore' }); return true; } catch (_) { return false; } };
+    if (!has('git')) {
+      console.log('\n  (push script not run: git missing here)');
+    } else {
+      const { dir } = scratch();
+      const git = (cwd, args) => cp.execFileSync('git', args, { cwd, encoding: 'utf8',
+        env: Object.assign({}, process.env, { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' }) });
+      // What GitHub holds: 1.0.0, with a file the new version no longer has.
+      const seed = path.join(dir, 'seed');
+      fs.mkdirSync(path.join(seed, 'scripts'), { recursive: true });
+      const pkg = v => JSON.stringify({ name: 'demo', version: v, repository: { url: 'https://github.com/someone/demo.git' } });
+      fs.writeFileSync(path.join(seed, 'package.json'), pkg('1.0.0'));
+      fs.writeFileSync(path.join(seed, 'version.json'), JSON.stringify({ version: '1.0.0' }));
+      fs.writeFileSync(path.join(seed, 'old.txt'), 'gone in 1.1.0');
+      git(seed, ['init', '-q', '-b', 'main']); git(seed, ['add', '-A']); git(seed, ['commit', '-q', '-m', 'seed']);
+      const bare = path.join(dir, 'remote.git');
+      git(dir, ['clone', '-q', '--bare', seed, bare]);
+      // The unzipped folder: 1.1.0, old.txt removed, a script without its +x.
+      const zip = path.join(dir, 'demo');
+      fs.mkdirSync(path.join(zip, 'scripts'), { recursive: true });
+      fs.copyFileSync(script, path.join(zip, 'scripts/push_github.command'));
+      fs.writeFileSync(path.join(zip, 'package.json'), pkg('1.1.0'));
+      fs.writeFileSync(path.join(zip, 'version.json'), JSON.stringify({ version: '1.1.0' }));
+      fs.writeFileSync(path.join(zip, 'new.sh'), 'echo hi');
+      fs.chmodSync(path.join(zip, 'new.sh'), 0o644);
+      const push = (release, answer) => {
+        try {
+          return cp.execFileSync('bash', [path.join(zip, 'scripts/push_github.command')], { input: answer + '\n', encoding: 'utf8',
+            env: Object.assign({}, process.env, { PUSH_GITHUB_REMOTE: bare, PUSH_GITHUB_RELEASE: release, TMPDIR: dir }) });
+        } catch (e) { return 'EXIT ' + e.status + ' ' + (e.stdout || ''); }
+      };
+      const remote = f => { try { return git(bare, ['show', 'main:' + f]); } catch (_) { return null; } };
+
+      let out = push('no', 'n');
+      eq(JSON.parse(remote('package.json')).version, '1.0.0', '"n" sends nothing');
+      out = push('no', 'y');
+      ok(/Sent: demo 1\.1\.0/.test(out), 'a "y" sends the new version');
+      eq(remote('old.txt'), null, 'a file removed from the folder is removed from GitHub');
+      ok(/100755 blob \S+\tnew\.sh/.test(git(bare, ['ls-tree', 'main'])), 'scripts arrive executable');
+      eq(JSON.parse(remote('version.json')).version, '1.0.0', 'version.json waits while the Release does not exist');
+      out = push('no', 'y');
+      ok(/already on GitHub/.test(out), 'running again before the Release sends nothing');
+      out = push('yes', 'y');
+      eq(JSON.parse(remote('version.json')).version, '1.1.0', 'once the Release exists, version.json goes');
+      out = push('yes', 'y');
+      ok(/^EXIT 1/.test(out) && /not higher than 1\.1\.0/.test(out), 'the same version is never sent twice');
+      fs.writeFileSync(path.join(zip, 'version.json'), JSON.stringify({ version: '1.2.0' }));
+      out = push('yes', 'y');
+      ok(/^EXIT 1/.test(out) && /package\.json says 1\.1\.0/.test(out), 'version.json and package.json must agree');
+    }
+  }
+
+  // (d15) .syncto.db and .syncto.lock are hidden on Windows (0.8.6). The dot
+  //       hides them on macOS and Linux only; Windows wants the attribute, set
+  //       after every write of the database because each one puts a new file
+  //       in place.
+  {
+    const { writeDb, readDb } = require('../src/main/core/db');
+    const { NativeFs } = require('../src/main/fs/native');
+    const winFs = (calls, opts) => {
+      const n = new NativeFs();
+      n._platform = 'win32';
+      n._attrib = async args => { calls.push(args.join(' ')); if (opts && opts.fail) throw new Error('attrib missing'); };
+      return n;
+    };
+    const doc = { format: 'syncto-db', version: 1, sessions: {} };
+
+    {
+      const { L } = scratch();
+      const calls = [];
+      await writeDb(winFs(calls), L, doc);
+      eq(calls, ['+h ' + path.join(L, '.syncto.db')], 'on Windows the database is hidden right after it is written');
+      await writeDb(winFs(calls), L, doc);
+      eq(calls.length, 2, 'and again at every write, since each one puts a new file in place');
+    }
+    {
+      const { L } = scratch();
+      const calls = [];
+      await writeDb(new NativeFs(), L, doc);
+      const n = new NativeFs(); n._attrib = async a => calls.push(a);
+      await writeDb(n, L, doc);
+      eq(calls, [], 'nothing is run on macOS or Linux, where the dot already hides it');
+    }
+    {
+      const { L } = scratch();
+      const calls = [];
+      await writeDb(winFs(calls, { fail: true }), L, doc);
+      ok(!!(await readDb(new NativeFs(), L)), 'a failed attrib leaves the database visible, never unwritten');
+    }
+    {
+      // Windows refusing to replace a hidden file: the attribute is cleared,
+      // the rename retried once, the new file hidden again.
+      const { L } = scratch();
+      const calls = [];
+      const n = winFs(calls);
+      let refused = false;
+      const rename = n.rename.bind(n);
+      n.rename = async (a, b) => {
+        if (!refused) { refused = true; const e = new Error('EPERM: operation not permitted'); e.code = 'EPERM'; throw e; }
+        return rename(a, b);
+      };
+      await writeDb(n, L, doc);
+      const db = path.join(L, '.syncto.db');
+      eq(calls, ['-h ' + db, '+h ' + db], 'a refused replacement unhides, retries, and hides again');
+      ok(!!(await readDb(new NativeFs(), L)), 'and the database is written');
+      ok(!fs.existsSync(db + '.syncto_tmp'), 'without leaving the temporary file behind');
+    }
+    {
+      const n = new NativeFs(); n._platform = 'win32';
+      const seen = [];
+      n._attrib = async a => seen.push(a[1]);
+      await n.setHidden('\\\\?\\D:\\RUSHES\\.syncto.db', true);
+      await n.setHidden('\\\\?\\UNC\\nas\\edit\\.syncto.db', true);
+      eq(seen, ['D:\\RUSHES\\.syncto.db', '\\\\nas\\edit\\.syncto.db'], 'attrib gets the path without the long-path prefix');
+    }
+    // The lock too (Noar, 05/10/2026), without ever leaving it behind.
+    {
+      const { acquireOne } = require('../src/main/core/lock');
+      const { L } = scratch();
+      const calls = [];
+      let finish = null;
+      const n = winFs(calls);
+      // A slow attrib: it only answers when the test says so.
+      n._attrib = args => new Promise(r => { calls.push(args.join(' ')); finish = r; });
+      const lock = await acquireOne(n, L, {});
+      const lp = path.join(L, '.syncto.lock');
+      eq(calls, ['+h ' + lp], 'on Windows the lock is hidden as soon as it is created');
+      let released = false;
+      const rel = lock.release().then(() => { released = true; });
+      await new Promise(r => setTimeout(r, 50));
+      ok(!released && fs.existsSync(lp), 'releasing waits for attrib before deleting the file');
+      finish();
+      await rel;
+      ok(!fs.existsSync(lp), 'then deletes it: no lock left behind');
+    }
+    {
+      const { acquireOne } = require('../src/main/core/lock');
+      const { L } = scratch();
+      const n = winFs([], { fail: true });
+      const lock = await acquireOne(n, L, {});
+      ok(!!lock, 'a failed attrib never stops a run from taking its lock');
+      await lock.release();
+    }
+    const srcOf = f => fs.readFileSync(path.join(root, f), 'utf8');
+    ok(!/setHidden/.test(srcOf('src/main/core/sync.js')), 'the checksum list stays visible');
+    ok(/windowsHide: true/.test(srcOf('src/main/fs/native.js')), 'attrib runs without flashing a console window');
+  }
+
+  // (d16) Two rings during a run (0.8.7): the inner one is the pass going on,
+  //       from 0 to 100 %, the outer one the whole run.
+  {
+    const app = fs.readFileSync(path.join(root, 'src/renderer/app.js'), 'utf8');
+    const html = fs.readFileSync(path.join(root, 'src/renderer/index.html'), 'utf8');
+    const len = r => Math.round(2 * Math.PI * r * 10) / 10;
+    ok(/r="27"[^>]*id="pb-ring"[^>]*stroke-dasharray="169\.6"/.test(html) && /const RING_LEN = 169\.6;/.test(app) && len(27) === 169.6,
+       'the inner ring and its length agree');
+    ok(/r="33\.5"[^>]*id="pb-ring-all"[^>]*stroke-dasharray="210\.5"/.test(html) && /const RING_ALL_LEN = 210\.5;/.test(app) && len(33.5) === 210.5,
+       'and so do the outer ring and its length');
+    const prog = app.slice(app.indexOf('API.onSyncProgress('), app.indexOf("$('pb-fill').style.width = pct + '%';"));
+    ok(/const passPct = p\.passBytesTotal > 0/.test(prog) && /\$\('pb-ring'\)\.setAttribute\('stroke-dashoffset', RING_LEN \* \(1 - passPct \/ 100\)\)/.test(prog),
+       'the inner ring and the big figure follow the pass');
+    ok(/\$\('pb-ring-all'\)\.setAttribute\('stroke-dashoffset', RING_ALL_LEN \* \(1 - pct \/ 100\)\)/.test(prog) &&
+       /'TOTAL ' \+ Math\.round\(pct\) \+ '%'/.test(prog), 'the outer ring and "TOTAL" follow the whole run');
+    ok(/#bottombar:not\(\.run\) \.ring-all,#bottombar:not\(\.run\) \.ring-all-track,#bottombar:not\(\.run\) \.ring-sub\{display:none;\}/.test(html),
+       'a comparison shows one ring only');
+  }
+
+  // (d13) hash.js no longer describes three copy levels (0.8.6).
+  {
+    const h = fs.readFileSync(path.join(root, 'src/main/core/hash.js'), 'utf8');
+    const head = h.slice(0, h.indexOf('let _hw'));
+    ok(!/fast\s+copy only/.test(head) && !/verified\s+compares the size/.test(head),
+       'the header comment describes the one copy mode');
   }
 }
 

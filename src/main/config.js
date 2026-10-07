@@ -63,6 +63,8 @@ function defaultJob() {
     version: 1,
     name   : 'Untitled',
     pairId : null,                      // legacy — pair ids are path-derived now
+    // A pair may also carry `was: { left, right }`, its paths before the user
+    // changed them, until a run has moved its history (0.8.6).
     // Every pair shares the job's settings, exactly like FreeFileSync.
     pairs  : [{ left: '', right: '' }],
     compare: {
@@ -572,6 +574,11 @@ function scrubSecrets(data) {
       if (!pair || typeof pair !== 'object') continue;
       if (typeof pair.left === 'string')  pair.left  = captureUrlPassword(data, pair.left);
       if (typeof pair.right === 'string') pair.right = captureUrlPassword(data, pair.right);
+      // The former paths of a re-pointed pair are addresses too.
+      if (pair.was && typeof pair.was === 'object') {
+        if (typeof pair.was.left === 'string')  pair.was.left  = redactLocation(pair.was.left);
+        if (typeof pair.was.right === 'string') pair.was.right = redactLocation(pair.was.right);
+      }
     }
   }
   // The ntfy token is no longer a setting (0.8.3): whatever an older version
@@ -596,6 +603,17 @@ function scrubSecrets(data) {
   delete data.sftp;
 }
 
+// (0.8.6) The paths a pair had before the user changed them, kept until a run
+// has written its history under the new ones (see previousPairId in
+// core/session.js). Anything else in that field is dropped.
+function pairWas(p) {
+  const w = p && p.was;
+  if (!w || typeof w !== 'object' || Array.isArray(w)) return null;
+  if (typeof w.left !== 'string' || typeof w.right !== 'string') return null;
+  if (!w.left.trim() || !w.right.trim()) return null;
+  return { left: w.left, right: w.right };
+}
+
 // A job saved before multi-pair support carried a single left/right at the
 // top level; it becomes the only entry of `pairs`.
 function migrateJob(raw) {
@@ -605,7 +623,12 @@ function migrateJob(raw) {
   if (raw && Array.isArray(raw.pairs)) {
     raw.pairs = raw.pairs
       .filter(p => p && (typeof p.left === 'string' || typeof p.right === 'string'))
-      .map(p => ({ left: p.left || '', right: p.right || '' }));
+      .map(p => {
+        const out = { left: p.left || '', right: p.right || '' };
+        const was = pairWas(p);
+        if (was) out.was = was;
+        return out;
+      });
     if (!raw.pairs.length) raw.pairs = [{ left: '', right: '' }];
   }
   // Before 0.3.1 this flag was stored but never read, so a `false` in an old
@@ -672,6 +695,11 @@ function saveJob(file, job) {
       if (!p || typeof p !== 'object') continue;
       if (typeof p.left === 'string')  p.left  = redactLocation(p.left);
       if (typeof p.right === 'string') p.right = redactLocation(p.right);
+      if (p.was && typeof p.was === 'object') {
+        p.was = Object.assign({}, p.was);
+        if (typeof p.was.left === 'string')  p.was.left  = redactLocation(p.was.left);
+        if (typeof p.was.right === 'string') p.was.right = redactLocation(p.was.right);
+      }
     }
   }
   writeFileAtomic(file, JSON.stringify(out, null, 2));

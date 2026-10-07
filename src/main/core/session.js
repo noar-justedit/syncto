@@ -33,6 +33,30 @@ const { formatChecksumList, parseChecksumList, createHasher, hashStream } = requ
 const { isSafeRel } = require('./relpath');
 const { offlineVolume } = require('./volume');
 const { acquireAll, clearStaleLock, isLockFileName, DETECT_ABANDONED_MS } = require('./lock');
+const { SftpFs } = require('../fs/sftp');
+
+// (0.8.6) The id the pair had under the paths it held before the user changed
+// them, or null when that history must not be read.
+//
+// The paths are resolved exactly the way the sides were opened, so the id is
+// the one that run computed. Returns null when nothing changed, and when either
+// old path now sits on the OTHER side: a swap reads left as right, and every
+// date, size and file id of the session would describe the wrong folder.
+function previousPairId(was, left, right) {
+  if (!was || typeof was !== 'object') return null;
+  const resolve = (phrase, side) => {
+    const loc = parseLocation(phrase);
+    if (!String(phrase || '').trim() || !loc.path) return '';
+    if (loc.kind !== side.kind) return '';      // a disk became a server, or the reverse
+    return loc.kind === 'sftp' ? SftpFs.prototype.resolve(loc.path) : side.fs.resolve(loc.path);
+  };
+  const wl = resolve(was.left, left), wr = resolve(was.right, right);
+  if (!wl || !wr) return null;
+  const norm = p => String(p || '').replace(/[\\/]+$/, '').toLowerCase();
+  if (norm(wl) === norm(right.path) || norm(wr) === norm(left.path)) return null;
+  const prevId = pairIdFor(null, wl, wr);
+  return prevId === pairIdFor(null, left.path, right.path) ? null : prevId;
+}
 
 // How the overview panel is ordered, at every level of its tree. Size,
 // descending, is the default and the one the panel was born with: the point of
@@ -105,11 +129,30 @@ class Session {
     // knowable total — you find out how big it is by finishing — so without
     // that number the interface cannot honestly show progress at all. With it,
     // a backup that runs every day can say "about 60%" and mean it.
-    this.db = null; this.dbNote = null;
+    this.db = null; this.dbNote = null; this.dbCarriedFrom = null;
     this.pairId = pairIdFor(job.pairId, this.left.path, this.right.path);
     this.wantMoves = cmp.detectMoves !== false;
     if (usesDatabase(job.sync.variant) || this.wantMoves) {
-      const { db, reason } = await loadPairDb(this.left, this.right, this.pairId);
+      let { db, reason } = await loadPairDb(this.left, this.right, this.pairId);
+      // (0.8.6) A pair the user re-pointed — a renamed drive, a volume that
+      // came back as "NAS 1", a folder picked again in the relink window — has
+      // a new path-derived id, and so no history under it. The window keeps
+      // the paths the pair had before the edit (pair.was); the session stored
+      // under THOSE is read instead, and only if both folders hold it with the
+      // same stamp. Pointing at a different folder therefore finds nothing on
+      // that side and starts fresh, exactly as before. The run then writes
+      // under the new id, and the old session is left where it is: another job
+      // may still use those paths.
+      if (!db.available && job.pairWas) {
+        const prevId = previousPairId(job.pairWas, this.left, this.right);
+        if (prevId) {
+          const prev = await loadPairDb(this.left, this.right, prevId);
+          if (prev.db.available) {
+            db = prev.db; reason = null;
+            this.dbCarriedFrom = prevId;
+          }
+        }
+      }
       this.db = db;
       // "no database yet" is only worth mentioning when directions depend on it.
       this.dbNote = usesDatabase(job.sync.variant) ? reason : null;
@@ -154,6 +197,7 @@ class Session {
       cancelled: this.cancelled,
       byChange: this.byChange,
       dbNote: this.dbNote,
+      historyCarried: !!this.dbCarriedFrom,
       movesFound: this.movesFound,
       pairId: this.pairId,
       left  : this.left.path,
@@ -821,6 +865,9 @@ class MultiSession {
         // would make them overwrite each other's session in a shared base
         // folder. Path-derived ids are unambiguous — use them.
         pairId: multi ? null : job.pairId,
+        // (0.8.6) The paths this pair had before the user changed them: its
+        // history is looked up there when the new paths have none.
+        pairWas: this.pairs[i].was || null,
       });
       // Every pair scans from zero, so a per-pair counter falls back to 0 at
       // each one and the ring empties and refills — which reads as a run
@@ -1130,6 +1177,7 @@ class MultiSession {
     const counters = { files: 0, bytes: 0, deleted: 0, folders: 0, moved: 0, errors: 0, failed: 0, dated: 0 };
     let verified = 0;
     const allErrors = [], allNotes = [], checksumFiles = [];
+    const dbSaved = [];
 
     for (let p = 0; p < this.sessions.length; p++) {
       if (token && token.cancelled) { cancelled = true; break; }
@@ -1137,6 +1185,7 @@ class MultiSession {
       const pairJob = Object.assign({}, job, {
         left: pr.left, right: pr.right,
         pairId: multi ? null : job.pairId,   // same rule as compare()
+        pairWas: pr.was || null,
       });
       let res;
       try {
@@ -1161,6 +1210,9 @@ class MultiSession {
         continue;
       }
       perPair.push(res);
+      // (0.8.6) The window drops a pair's former paths once its history lives
+      // under the new ones — that is, once this run wrote the database.
+      if (res.dbStamp) dbSaved.push({ left: pr.left, right: pr.right });
       // The progress offset counts WORK bytes (a secure copy reads everything
       // back: 2× the data), same unit as bytesTotal above — mixing in plain
       // copied bytes made the ring jump backwards between pairs.
@@ -1211,6 +1263,7 @@ class MultiSession {
       checksumFiles,
       locked: locks ? locks.count : 0,
       pairsDone: perPair.length, pairsTotal: this.pairs.length,
+      dbSaved,
     };
     } finally {
       // The last thing a run does, and it talks to the server. Announced, so a

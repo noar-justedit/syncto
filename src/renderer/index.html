@@ -1408,6 +1408,13 @@ html,body{background:var(--page);}
   background:rgba(77,144,240,.12);box-shadow:inset 0 0 0 1px rgba(77,144,240,.6);}
 body.lassoing,body.lassoing *{user-select:none !important;cursor:default !important;}
 body.lassoing .tooltip-float{display:none !important;}
+/* (0.8.7) The run's two rings: outer = the whole run, inner = the pass. */
+.ring-all{stroke:var(--text2);stroke-linecap:round;transition:stroke-dashoffset .2s ease;}
+#bottombar:not(.run) .ring-all,#bottombar:not(.run) .ring-all-track,#bottombar:not(.run) .ring-sub{display:none;}
+.ring-txt{flex-direction:column;line-height:1;}
+.ring-sub{font-size:9.5px;font-weight:700;letter-spacing:.08em;color:var(--text2);margin-top:5px;}
+#bottombar.live.run .ring-txt{font-size:26px;}
+#bottombar.live.paused .ring-all{stroke:var(--text3);}
 </style>
 </head>
 <body>
@@ -1655,12 +1662,18 @@ body.lassoing .tooltip-float{display:none !important;}
   <div class="pb-inner">
     <div class="pb-hd">
       <div class="pb-pct-ring">
+        <!-- (0.8.7) Two rings during a run: the outer one is the whole run,
+             copy and read-back together; the inner one is the pass going on,
+             each from 0 to 100 %. A comparison shows the inner one only. -->
         <svg viewBox="0 0 72 72">
-          <circle cx="36" cy="36" r="29" fill="none" stroke-width="6" class="ring-track"/>
-          <circle cx="36" cy="36" r="29" fill="none" stroke-width="6" class="ring-fill" id="pb-ring"
-                  stroke-dasharray="182.2" stroke-dashoffset="182.2" transform="rotate(-90 36 36)"/>
+          <circle cx="36" cy="36" r="33.5" fill="none" stroke-width="3" class="ring-track ring-all-track"/>
+          <circle cx="36" cy="36" r="33.5" fill="none" stroke-width="3" class="ring-all" id="pb-ring-all"
+                  stroke-dasharray="210.5" stroke-dashoffset="210.5" transform="rotate(-90 36 36)"/>
+          <circle cx="36" cy="36" r="27" fill="none" stroke-width="6" class="ring-track"/>
+          <circle cx="36" cy="36" r="27" fill="none" stroke-width="6" class="ring-fill" id="pb-ring"
+                  stroke-dasharray="169.6" stroke-dashoffset="169.6" transform="rotate(-90 36 36)"/>
         </svg>
-        <div class="ring-txt" id="pb-pct">0%</div>
+        <div class="ring-txt"><span id="pb-pct">0%</span><span class="ring-sub" id="pb-pct-all"></span></div>
       </div>
       <div class="pb-hd-text">
         <div class="pb-title" id="pb-title">Working…</div>
