@@ -34,6 +34,8 @@
 // The timestamp is computed once per run, so a single synchronization produces
 // exactly one revision folder however long it takes.
 
+const { fits, shorten, limits, scratchPath } = require('../fs/longname');
+
 function pad(n, w = 2) { return String(n).padStart(w, '0'); }
 
 // "2026-08-08 143012" — 17 characters, sorts chronologically as plain text.
@@ -60,7 +62,13 @@ function versionedRelPath(rel, style, stamp) {
   }
   if (style === 'timestampFile') {
     const { base, ext } = splitExt(name);
-    const newName = `${base} ${stamp}${ext}`;
+    let newName = `${base} ${stamp}${ext}`;
+    // (0.8.8) The date must not push a long name past what the revision
+    // folder accepts: the name is shortened first, the date kept whole.
+    if (!fits(newName)) {
+      const s = splitExt(shorten(name, limits.name - stamp.length - 1));
+      newName = `${s.base} ${stamp}${s.ext}`;
+    }
     return dir ? `${dir}/${newName}` : newName;
   }
   return rel;   // replace
@@ -110,7 +118,7 @@ class Versioner {
     // check the size, then rename. A revision the user cannot trust is worse
     // than no revision — and the source is only unlinked once it is safe.
     const st = await srcFs.stat(srcPath);
-    const tmp = target + '.syncto_tmp';
+    const tmp = scratchPath(this.fs, target, '.syncto_tmp');
     try {
       await streamCopy(srcFs, srcPath, this.fs, tmp);
       const out = await this.fs.stat(tmp);

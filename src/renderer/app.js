@@ -178,6 +178,15 @@ function markMissingPaths(list) {
 }
 
 // ── Formatting ─────────────────────────────────────────────────────────────
+// (0.8.8) Counts: thousands separated as everywhere else, and shortened
+// ("123k", "1.2M") where a column is narrow (the Overview cut 123456 to 12345).
+function fmtCount(n, full) {
+  const v = Number(n) || 0;
+  if (full || v < 100000) return v.toLocaleString('en-US');
+  if (v < 1e6) return Math.round(v / 1000) + 'k';
+  return (v / 1e6).toFixed(v < 1e7 ? 1 : 0).replace(/\.0$/, '') + 'M';
+}
+
 function fmtBytes(b) {
   const n = Number(b) || 0;
   if (n === 0) return '0 B';
@@ -801,6 +810,7 @@ document.addEventListener('scroll', closeCtx, true);
 // overview wins, because it is the one you can see highlighted.
 document.addEventListener('keydown', async e => {
   if (e.key !== ' ') return;
+  if (state.busy) return;   // (0.8.8) the run follows the plan it started with
   const picked = state.ovSel.size ? [...state.ovSel].map(k => state.ovByKey.get(k))
                                       .filter(g => g && g.idx >= 0).map(g => g.idx) : [];
   if (!picked.length && state.selIdx == null) return;
@@ -847,7 +857,9 @@ function renderStats() {
   if (s.deleteLeft)  parts.push(chip('r', '← delete', s.deleteLeft,  'deleteLeft',  'op'));
   if (s.moveRight)   parts.push(chip('b', 'move →',   s.moveRight,   'moveRightTo', 'op'));
   if (s.moveLeft)    parts.push(chip('b', '← move',   s.moveLeft,    'moveLeftTo',  'op'));
-  if (s.conflicts)   parts.push(chip('r', 'conflicts', s.conflicts,  'conflict',    'op'));
+  // (0.8.8) Orange: a conflict is a decision to make, and red is kept for
+  // what will be deleted.
+  if (s.conflicts)   parts.push(chip('o', 'conflicts', s.conflicts,  'conflict',    'op'));
   parts.push(chip('', 'identical', s.equal, 'none', 'op'));
   // It looked like every other chip — pointer, hover — and did nothing at
   // all. Clicking it now shows the excluded rows, which is what a person is
@@ -857,9 +869,9 @@ function renderStats() {
 
   const data = fmtBytes(s.bytesTotal);
   const bits = [
-    `${s.filesToProcess} item${s.filesToProcess === 1 ? '' : 's'} to process`,
+    `${fmtCount(s.filesToProcess, true)} item${s.filesToProcess === 1 ? '' : 's'} to process`,
     `${data} to copy`,
-    `${s.rows} compared`,
+    `${fmtCount(s.rows, true)} compared`,
   ];
   // Said in words rather than as empty rows in the grid.
   const pi = state.pairInfo;
@@ -948,9 +960,7 @@ async function doCompare() {
   renderScopeBar();
   state.busy = 'compare';
   state.speeds = [];
-  setBusyUi(true, 'COMPARING');
-  $('btn-pause').style.display = 'none';
-  resetCompareProgress();
+  startCompareUi('COMPARING');
 
   const res = await API.compare(state.job);
 
@@ -1229,6 +1239,13 @@ async function checkBeforeSync() {
   // for good, and this is where the person learns it — before, not after.
   const notices = res.warnings.filter(w => w.notice);
   if (notices.length) {
+    // (0.8.8) The line above said "moved to the trash" for every removal; on
+    // the folders below there is none. Said once, without contradiction.
+    if (state.cfTrashLine >= 0 && notices.some(w => w.noTrash)) {
+      const line = $('cf-warn-body').children[state.cfTrashLine];
+      if (line) line.textContent = line.textContent.replace(/will be moved to the trash\.$/,
+        'will be moved to the trash, except in the folders below, which have none.');
+    }
     $('cf-warn').style.display = '';
     $('cf-warn-body').insertAdjacentHTML('beforeend', notices
       .map(w => `<div class="err-item">${tag(w)}${esc(w.message)}</div>`).join(''));
@@ -1248,7 +1265,8 @@ async function checkBeforeSync() {
 // The names the buttons show. At module scope because two windows say them:
 // the confirmation, and the auto-sync card — which used to print the internal
 // key ("twoWay") because the map was local to the other one.
-const VARIANT_LABEL = { twoWay: 'Two way', mirror: 'Mirror →', update: 'Update →', custom: 'Custom' };
+// (0.8.8) Spelt as on the buttons.
+const VARIANT_LABEL = { twoWay: '2 WAYS', mirror: 'MIRROR', update: 'UPDATE', custom: 'CUSTOM' };
 
 // What the run will really do about proof, for THESE folders. The read-back
 // can be turned off for servers, so promising "verified copy" whatever the
@@ -1291,6 +1309,7 @@ function askConfirm() {
               : j.sync.deletion === 'versioning' ? 'moved to the revision folder'
               : 'moved to the trash';
     warns.push(`${removals} item${removals > 1 ? 's' : ''} will be ${how}.`);
+    state.cfTrashLine = j.sync.deletion === 'recycler' ? warns.length - 1 : -1;
   }
   if (s.conflicts) warns.push(`${s.conflicts} conflict${s.conflicts > 1 ? 's' : ''} will be skipped — resolve them by clicking their action cell.`);
   const changed = s.createLeft + s.createRight + s.updateLeft + s.updateRight + removals;
@@ -1298,6 +1317,7 @@ function askConfirm() {
     warns.push('More than half of the compared items are about to change. Check that both folders are the ones you meant.');
   }
   $('cf-warn').style.display = warns.length ? '' : 'none';
+  if (!removals) state.cfTrashLine = -1;
   $('cf-warn-body').innerHTML = warns.map(w => `<div class="err-item">${esc(w)}</div>`).join('');
 
   // Reset from a previous pass before the check runs again.
@@ -1317,14 +1337,7 @@ async function doSync() {
   if (state.busy) return;
   uiToJob();
   state.busy = 'sync';
-  state.paused = false;
-  state.speeds = [];
-  setBusyUi(true, 'Synchronizing…', true);
-  state.runPass = 'copy';
-  $('pb-title').textContent = runTitle('copy', false);
-  $('pb-ring').classList.remove('spin');
-  setStatLabels('Files', 'Left to copy', 'Speed', 'ETA');
-  { const del = $('s-del-box'); if (del) del.style.display = ''; }
+  startRunUi('Synchronizing…');
 
   const res = await API.sync(state.job);
 
@@ -1375,11 +1388,9 @@ async function doCompareQuiet() {
   // It used to run with nothing on screen at all: a few seconds — minutes on a
   // big tree — of a window that answers to nothing, right after a run, which
   // reads as a crash. It is a comparison, so it says so, in the strip.
-  setBusyUi(true, 'CHECKING');
+  startCompareUi('CHECKING');
   $('pb-ring').classList.add('spin');
   $('pb-pct').textContent = '';
-  setStatLabels('Items scanned', 'Data read', 'Scan rate', 'Elapsed');
-  { const del = $('s-del-box'); if (del) del.style.display = 'none'; }
   let res;
   try {
     res = await API.compare(state.job);
@@ -1413,7 +1424,34 @@ const RING_ALL_LEN = 210.5;   // outer ring, r = 33.5: the whole run (0.8.7)
 // (0.8.7) The title names the pass going on: copying, then reading back.
 function runTitle(pass, paused) {
   if (paused) return 'PAUSED';
+  // (0.8.8) Waiting for another machine's lock: one word, in capitals like
+  // every other title; who and how long go on the line below.
+  if (pass === 'lock') return 'WAITING';
   return pass === 'verify' ? 'VERIFYING' : pass === 'cleanup' ? 'FINISHING' : 'SYNCHRONIZING';
+}
+
+// (0.8.8) Everything a run's strip starts with, for a manual run AND for
+// auto-sync: the auto-sync path forgot the labels (its tiles read "Items
+// scanned", "Scan rate"), the Removed tile and the spinning ring of the
+// comparison before it.
+function startRunUi(title) {
+  state.paused = false;
+  state.speeds = [];
+  state.runPass = 'copy';
+  state.lastWillVerify = undefined;
+  setBusyUi(true, title, true);
+  $('pb-title').textContent = runTitle('copy', false);
+  $('pb-ring').classList.remove('spin');
+  setStatLabels('Files', 'Left to copy', 'Speed', 'Total ETA');
+  { const del = $('s-del-box'); if (del) del.style.display = ''; }
+}
+
+// (0.8.8) Same for a comparison: CHECKING after a run and auto-sync's
+// comparison started at the previous comparison's 99 %.
+function startCompareUi(title) {
+  setBusyUi(true, title);
+  $('btn-pause').style.display = 'none';
+  resetCompareProgress();
 }
 
 function setBusyUi(on, title, steps) {
@@ -1442,7 +1480,7 @@ function setBusyUi(on, title, steps) {
     $('pb-fill').style.width = '0%';
     $('s-files').textContent = '—'; $('s-size').textContent = '—';
     $('s-spd').textContent = '—'; $('s-eta').textContent = '—';
-    $('s-del').textContent = '0'; $('s-err').textContent = '0';
+    $('s-del').textContent = '0'; $('s-err').textContent = '0'; $('s-err').classList.add('zero');
     $('pb-file').textContent = '—';
     flowPair = -1;
     { const fl = $('pb-flow'); if (fl) { fl.className = 'pb-flow'; } }
@@ -1452,7 +1490,7 @@ function setBusyUi(on, title, steps) {
     bar.classList.remove('paused');
     const cmp = !steps;
     bar.style.setProperty('--pb-color',  cmp ? 'var(--blue)' : 'var(--green)');
-    bar.style.setProperty('--pb-color2', cmp ? '#7bc8ff' : '#00ffaa');
+    bar.style.setProperty('--pb-color2', cmp ? 'var(--blue)' : 'var(--green)');
     bar.style.setProperty('--pb-glow',   cmp ? 'rgba(77,144,240,.45)' : 'var(--green-g)');
     $('pb-title').style.color = '';
     const lbl = $('btn-pause-lbl'), ico = $('btn-pause-ico');
@@ -1610,17 +1648,37 @@ API.onSyncProgress(p => {
   // Waiting on another machine's lock: no throughput to show, just who and how long.
   if (p.phase === 'lock') {
     renderFlow(Object.assign({}, p, { way: '' }));
-    $('pb-title').textContent = 'Waiting for another machine…';
+    state.runPass = 'lock';
+    $('pb-title').textContent = runTitle('lock', state.paused);
     $('pb-file').textContent  = p.current || '';
     $('pb-pct').textContent   = '…';
+    renderSteps(null, state.lastWillVerify);   // no step is running yet
     return;
   }
+  // (0.8.8) A status line with no figures (the end of a run, while the locks
+  // are released): it updates the line and the title, nothing else. Read as a
+  // full event it dropped the strip to 0 %, "undefined / undefined", errors 0,
+  // and brought back a ticked "Verify" step on a run with no read-back.
+  if (p.bytesTotal == null && p.itemsTotal == null && p.filesTotal == null) {
+    if (p.current) $('pb-file').textContent = p.current;
+    if (p.pass) {
+      state.runPass = p.pass;
+      $('pb-title').textContent = runTitle(p.pass, state.paused);
+      renderSteps(p.pass, state.lastWillVerify);
+    }
+    return;
+  }
+  if (p.willVerify != null) state.lastWillVerify = p.willVerify;
   // The whole run (copy and read-back together): outer ring and top bar.
+  // (0.8.8) No bytes to move (deletions, folders, moves only): every operation
+  // counts, so a run that only deletes no longer sits at 0 %.
   const pct = p.bytesTotal > 0 ? Math.min(100, (p.bytesDone / p.bytesTotal) * 100)
+            : p.itemsTotal > 0 ? (p.itemsDone / p.itemsTotal) * 100
             : p.filesTotal > 0 ? (p.filesDone / p.filesTotal) * 100 : 0;
   // (0.8.7) The pass going on, from 0 to 100 %: inner ring and big figure.
   // A pass with no bytes to move (deletions only) follows the whole run.
-  const passPct = p.passBytesTotal > 0
+  const passPct = p.pass === 'cleanup' ? 100          // (0.8.8) nothing left to move
+    : p.passBytesTotal > 0
     ? Math.min(100, Math.max(0, (p.passBytesDone || 0) / p.passBytesTotal) * 100) : pct;
   $('pb-pct').textContent = Math.round(passPct) + '%';
   $('pb-ring').setAttribute('stroke-dashoffset', RING_LEN * (1 - passPct / 100));
@@ -1639,9 +1697,9 @@ API.onSyncProgress(p => {
   const verifying = p.pass === 'verify';
   const bar = $('bottombar');
   bar.style.setProperty('--pb-color',  verifying ? 'var(--blue)' : 'var(--green)');
-  bar.style.setProperty('--pb-color2', verifying ? '#7bc8ff' : '#00ffaa');
+  bar.style.setProperty('--pb-color2', verifying ? 'var(--blue)' : 'var(--green)');
   bar.style.setProperty('--pb-glow',   verifying ? 'rgba(77,144,240,.45)' : 'var(--green-g)');
-  renderSteps(p.pass, p.willVerify);
+  renderSteps(p.pass, state.lastWillVerify);   // remembered: not every event carries it (0.8.8)
   renderFlow(p);
   $('s-files').innerHTML   = `${p.filesDone}<span class="stot"> / ${p.filesTotal}</span>`;
   // The bytes of the pass that is running, not of the whole run: the ring
@@ -1653,6 +1711,7 @@ API.onSyncProgress(p => {
   $('s-eta').textContent   = fmtEta(p.etaSec);
   $('s-del').textContent   = String(p.deleted || 0);
   $('s-err').textContent   = String(p.errors || 0);
+  $('s-err').classList.toggle('zero', !p.errors);   // red only when there is one (0.8.8)
   const title = $('pb-title');
   // After the verification pass only folder deletions and pruning remain —
   // nothing is being copied, so the title must not claim it is.
@@ -1660,8 +1719,12 @@ API.onSyncProgress(p => {
   // while reading back (in blue), FINISHING for the tail. Noar's choice; until
   // 0.8.6 it said SYNCHRONIZING for the whole run.
   state.runPass = p.pass;
-  title.textContent = runTitle(p.pass, p.paused);
-  bar.classList.toggle('paused', !!p.paused);
+  // (0.8.8) The button is the authority on PAUSED: an event sent just before
+  // the engine saw the click arrives with paused:false and used to switch the
+  // strip back to running while the button said RESUME.
+  const paused = !!(p.paused || state.paused);
+  title.textContent = runTitle(p.pass, paused);
+  bar.classList.toggle('paused', paused);
   // The colour comes from --pb-color on the strip (green, blue while reading
   // back, grey when paused) — not from an inline style that would outlast it.
   title.style.color = '';
@@ -1894,10 +1957,20 @@ document.addEventListener('click', async e => {
   }, 1600);
 });
 
+// (0.8.8) Leaves the Filter window without applying: the patterns go back to
+// what the job holds, and nothing is compared.
+function cancelFilter() {
+  $('st-include').value = state.job.compare.includeFilter || '*';
+  $('st-exclude').value = state.job.compare.excludeFilter || '';
+  $('ov-filter').classList.remove('open');
+}
+
 function showError(title, msg) {
   // Not left over from the last successful run: a green "150 files verified"
   // shield under a red error card certifies something unrelated.
   { const v = $('sum-verify'); if (v) v.style.display = 'none'; }
+  // (0.8.8) Nor the previous run's "Compared again: both folders now match."
+  setRecheck(null);
   $('sum-ico').className = 'sum-ico err';
   $('sum-ico').innerHTML = ICO_ERR;
   $('sum-h1').textContent = title;
@@ -1926,6 +1999,7 @@ async function doVerify() {
   $('vf-title').textContent = 'Verifying…';
   $('vf-pct').textContent = '0%';
   $('vf-ring').setAttribute('stroke-dashoffset', VF_LEN);
+  $('vf-ring').style.stroke = '';   // (0.8.8) not the previous result's colour
   $('vf-line').textContent = folder;
   $('vf-grid').innerHTML = '';
   $('vf-bad').style.display = 'none';
@@ -1986,6 +2060,13 @@ function bind() {
 
   // Per-job filter modal: closing applies and re-compares if a result is shown.
   $('btn-filter').addEventListener('click', () => { jobToUi(); $('ov-filter').classList.add('open'); });
+  // (0.8.8) Escape leaves without applying: it used to press Apply, so there
+  // was no way out of an edit, and a comparison started on the way.
+  $('ov-filter').addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    e.stopPropagation();
+    cancelFilter();
+  }, true);
   $('filter-close').addEventListener('click', async () => {
     const before = state.job.compare.includeFilter + '\u0000' + state.job.compare.excludeFilter;
     uiToJob();
@@ -2128,9 +2209,13 @@ function bind() {
   installDropZones();
 
   API.onMenu(async m => {
+    // (0.8.8) During a run the menu and its shortcuts are inert, except Save:
+    // ⌘T swapped the pair on screen while the copy went the other way, ⌘N and
+    // ⌘O replaced the job under the running run, F9 opened the confirmation.
+    if (state.busy && m.action !== 'job-save' && m.action !== 'job-save-as') return;
     switch (m.action) {
-      case 'compare': doCompare(); break;
-      case 'sync': if (state.stats) askConfirm(); break;
+      case 'compare': if (!$('btn-compare').disabled) doCompare(); break;
+      case 'sync': if (state.stats && !$('btn-sync').disabled) askConfirm(); break;
       case 'swap': swapAllPairs(); break;
       case 'invert': state.stats = await API.invertAll(); afterEdit(); break;
       case 'verify': doVerify(); break;
@@ -2201,7 +2286,9 @@ function bind() {
       // real work on close (settings persist, the filter modal re-compares,
       // the verify modal cancels the run) — just hiding them would skip that.
       const ESC_CLOSE = {
-        'ov-settings': 'set-close',   'ov-filter' : 'filter-close',
+        'ov-settings': 'set-close',
+        // (0.8.8) Filter: Escape leaves WITHOUT applying, wherever the focus is.
+        'ov-filter'  : cancelFilter,
         'ov-confirm' : 'cf-cancel',   'ov-summary': 'sum-close',
         'ov-relink'  : 'rl-ignore',
         'ov-verify'  : 'vf-close',    'ov-auto'   : 'auto-cf-cancel',
@@ -2213,6 +2300,7 @@ function bind() {
         'ov-after'   : 'after-cancel',
       };
       for (const ov of document.querySelectorAll('.ov.open')) {
+        if (typeof ESC_CLOSE[ov.id] === 'function') { ESC_CLOSE[ov.id](); continue; }
         const btn = ESC_CLOSE[ov.id] && document.getElementById(ESC_CLOSE[ov.id]);
         if (btn) btn.click(); else ov.classList.remove('open');
       }
@@ -2239,6 +2327,7 @@ async function onPathChanged() {
 // ⌘T — swaps every pair at once. Each row also has its own swap button, which
 // swaps that row only.
 function swapAllPairs() {
+  if (state.busy) return;   // (0.8.8)
   uiToJob();
   for (const p of state.job.pairs) swapPair(p);
   jobToUi();
@@ -2246,6 +2335,7 @@ function swapAllPairs() {
 }
 
 async function newJob() {
+  if (state.busy) return;   // (0.8.8) not under a running run
   autoStop();
   relinkEntries = []; state.missingPaths = []; renderMissingBadge(0);
   noteStaleLocks([]);
@@ -2260,6 +2350,7 @@ async function newJob() {
 }
 
 async function openJob() {
+  if (state.busy) return;   // (0.8.8)
   const res = await API.jobOpen();
   if (!res) return;
   state.job = res.job;
@@ -2301,6 +2392,7 @@ function persist() {
 // status strip says so afterwards, with the path, because a job disappearing
 // from a list is exactly the moment someone wonders whether they just lost it.
 async function closeJob(p) {
+  if (state.busy && (!p || p === state.jobPath)) return;   // (0.8.8) not the running job
   const target = p || state.jobPath;
   if (!target) return;
   const name = (state.recent.find(r => r.path === target) || {}).name ||
@@ -2391,6 +2483,7 @@ function renderRecent() {
 }
 
 async function openRecent(p) {
+  if (state.busy) return;   // (0.8.8)
   const res = await API.jobOpenPath(p);
   if (!res) return;
   if (res.recent) state.recent = res.recent;
@@ -2467,7 +2560,7 @@ async function refreshOverview() {
       <div class="ov-chk"><input type="checkbox" ${g.active ? 'checked' : ''} data-act="toggle"></div>
       <div class="ov-pct"><div class="bar" style="width:${g.pct}%"></div><div class="lbl">${g.pct}%</div></div>
       <div class="ov-name" style="padding-left:${g.depth * 11}px">${twist}${g.type === 'folder' ? ICON_FOLDER : ICON_FILE}<span>${esc(g.name)}</span></div>
-      <div class="ov-items">${g.items}</div>
+      <div class="ov-items" data-tip="${g.items.toLocaleString('en-US')} items">${fmtCount(g.items)}</div>
       <div class="ov-bytes">${esc(fmtBytes(g.bytes))}</div>
     </div>`;
   // The hint sits at the END of the list, next to the empty space it is
@@ -2796,8 +2889,7 @@ async function autoRun() {
   };
 
   state.busy = 'compare';
-  setBusyUi(true, 'Auto-sync — comparing…');
-  $('btn-pause').style.display = 'none';
+  startCompareUi('AUTO-SYNC · COMPARING');
   const cmp = await API.compare(state.job);
   $('btn-pause').style.display = '';
   if (!cmp.ok) {
@@ -2825,7 +2917,7 @@ async function autoRun() {
   }
 
   state.busy = 'sync';
-  setBusyUi(true, 'Auto-sync — synchronizing…', true);
+  startRunUi('Auto-sync — synchronizing…');
   const res = await API.sync(state.job);
   state.busy = null;
   setBusyUi(false);
@@ -3118,20 +3210,20 @@ async function afterRun(res) {
 
   const action = (state.job.sync && state.job.sync.afterSync) || 'none';
   if (action === 'none') return;
+  // (0.8.8) Never while auto-sync is armed, whoever started this run: the
+  // machine has to stay up for the next cycle, and auto-sync stays on.
+  // (Until 0.8.7 the first clean cycle disarmed auto-sync and shut down.)
+  if (isAutoOn()) {
+    $('status-note').textContent =
+      `“${action === 'quit' ? 'Quit syncto' : action === 'sleep' ? 'Sleep' : 'Shut down'}” was skipped: ` +
+      `auto-sync is on.`;
+    return;
+  }
   if (!runWasClean(res)) {
     $('status-note').textContent =
       `“${action === 'quit' ? 'Quit syncto' : action === 'sleep' ? 'Sleep' : 'Shut down'}” was skipped: ` +
       `the run did not finish cleanly.`;
     return;
-  }
-  // Auto-sync and shutting down cannot both be true. The machine wins — and
-  // the switch has to follow, or the window keeps its red frame and its
-  // "AUTO-SYNC ON" button over a scheduler that will never fire again.
-  if (isAutoOn()) {
-    state.job.autoSync.enabled = false;
-    autoStop();
-    renderAutoUi();
-    persist();
   }
   startAfterCountdown(action);
 }

@@ -145,7 +145,27 @@ class NativeFs {
         const e = entries[i];
         const full = path.join(p, e.name);
         let st = null;
-        try { st = await fs.promises.lstat(full); } catch (_) { /* vanished mid-scan */ }
+        try { st = await fs.promises.lstat(full); }
+        catch (err) {
+          // (0.8.8) Only a name that is really gone may drop out of the
+          // listing. Any other failure (EIO on a share that hiccups, EACCES,
+          // EPERM) used to drop it too, and an item missing from one side is
+          // what a MIRROR deletes on the other: one bad lstat cost the backup
+          // copy, with no error anywhere. Asked once more, then the folder is
+          // reported unreadable, which blocks the synchronization.
+          if (err.code === 'ENOENT' || err.code === 'ENOTDIR') continue;
+          await new Promise(r => setTimeout(r, 200));
+          try { st = await fs.promises.lstat(full); }
+          catch (err2) {
+            if (err2.code === 'ENOENT' || err2.code === 'ENOTDIR') continue;
+            // Handed back marked, not thrown: the comparison knows whether
+            // this name matters (a filtered file, .DS_Store, pagefile.sys
+            // does not) and refuses the folder only when it does.
+            out[i] = { name: e.name, type: typeOf(e), size: 0, mtime: 0, id: null,
+                       unreadable: err2.code || err2.message || 'error' };
+            continue;
+          }
+        }
         if (!st) continue;
         out[i] = {
           name : e.name,

@@ -1,6 +1,6 @@
 {
   "name": "syncto",
-  "version": "0.8.7",
+  "version": "0.8.8",
   "desktopName": "syncto.desktop",
   "description": "Folder comparison and synchronization for video professionals",
   "main": "src/main/main.js",
@@ -26,7 +26,7 @@
     "shots": "bash scripts/shots-linux.sh"
   },
   "devDependencies": {
-    "electron": "^43.4.1",
+    "electron": "^44.7.0",
     "electron-builder": "^26.15.3",
     "ws": "^8.18.0"
   },

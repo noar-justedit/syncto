@@ -68,10 +68,15 @@ function expandMacros(phrase, now) {
     week       : pad(isoWeek(d)),
     weekday    : String(d.getDay() === 0 ? 7 : d.getDay()),
   };
+  // (0.8.8) Environment variables are expanded in local paths only. In a
+  // server address they leaked: a shared job with
+  // sftp://u@%COMPUTERNAME%.example.org/%USERNAME% sent both names to that
+  // host through its DNS lookup, while the field still showed "%…%".
+  const remote = /^\s*sftp:\/\//i.test(String(phrase || ''));
   return String(phrase || '').replace(/%([A-Za-z_][A-Za-z0-9_]*)%/g, (full, name) => {
     const k = name.toLowerCase();
     if (Object.prototype.hasOwnProperty.call(map, k)) return map[k];
-    if (process.env[name] != null) return process.env[name];
+    if (!remote && process.env[name] != null) return process.env[name];
     return full;
   });
 }
@@ -88,8 +93,11 @@ function parseLocation(phrase, credentials) {
     // Look for the entry that names this port first: two servers on the same
     // host and login but different ports have different passwords, and the
     // port-less key can only hold one of them.
+    // (0.8.8) The port-less entry is the one saved for port 22, and only
+    // port 22 may use it: falling back for any port sent the admin password of
+    // nas:22 to whatever listened on nas:2222 when a shared job asked for it.
     const cred = (credentials && (credentials[`${m[1] || ''}@${host}:${port}`] ||
-                                  credentials[`${m[1] || ''}@${host}`])) || {};
+                                  (port === 22 ? credentials[`${m[1] || ''}@${host}`] : null))) || {};
     return {
       kind      : 'sftp',
       username  : m[1] || cred.username || '',

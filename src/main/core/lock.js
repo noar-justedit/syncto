@@ -525,6 +525,14 @@ async function acquireOne(fsx, folderPath, opts) {
     ghostTries = 0;
     const status = info ? processStatus(info, local) : 'unknown';
 
+    // (0.8.8) Held by THIS run already: the same folder, reached under
+    // another spelling (a symlink, an accent composed differently, other
+    // letter case on a Mac). Taking it over evicted our own first lock, whose
+    // heartbeat then stopped the run with "the folder was taken over".
+    if (status === 'itsUs' && info && isHeldHere(info.lockId)) {
+      return { path: lockPath, lost: null, hiccups: 0, worstGapMs: 0, shared: true, async release() {} };
+    }
+
     if (status === 'notRunning' || status === 'itsUs') {
       await takeOver(fsx, lockPath, onStatus, info, ++takeoverTries);
       continue;                                   // and try to create it again

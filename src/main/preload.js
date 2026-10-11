@@ -30,7 +30,6 @@ const api = {
   clearLocks   : (job, items) => ipcRenderer.invoke('clear-locks', job, items),
   revealPath   : (p)    => ipcRenderer.invoke('reveal-path', p),
   openExternal : (u)    => ipcRenderer.invoke('open-external', u),
-  openPath     : (p)    => ipcRenderer.invoke('open-path', p),
   copyText     : (t)    => ipcRenderer.invoke('copy-text', t),
   diskFree     : (p)    => ipcRenderer.invoke('disk-free', p),
   folderExists : (p)    => ipcRenderer.invoke('folder-exists', p),

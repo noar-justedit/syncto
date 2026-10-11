@@ -72,4 +72,16 @@ function offlineVolume(p, opts) {
   return null;
 }
 
-module.exports = { volumeRoot, offlineVolume };
+// (0.8.8) A Windows network path (\\\\host\\share or //host/share), not the
+// \\\\?\\ long-path prefix of a local drive. Touching one makes Windows
+// connect to that host and present the user's login: nothing does that on its
+// own any more (opening a job, the red light on a path field).
+function isUncPath(p, platform) {
+  if ((platform || process.platform) !== 'win32') return false;
+  const s = String(p || '').trim();
+  if (/^\\\\\?\\UNC\\/i.test(s)) return true;
+  if (/^\\\\\?\\/.test(s)) return false;
+  return /^(\\\\|\/\/)[^\\/]/.test(s);
+}
+
+module.exports = { volumeRoot, offlineVolume, isUncPath };

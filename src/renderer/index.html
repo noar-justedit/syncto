@@ -1415,6 +1415,76 @@ body.lassoing .tooltip-float{display:none !important;}
 .ring-sub{font-size:9.5px;font-weight:700;letter-spacing:.08em;color:var(--text2);margin-top:5px;}
 #bottombar.live.run .ring-txt{font-size:26px;}
 #bottombar.live.paused .ring-all{stroke:var(--text3);}
+/* (0.8.8) Review of 09/10/2026. */
+/* ERRORS is red only when there is one. */
+.sval.serr.zero{color:var(--text);}
+/* A disabled button looks disabled. */
+.m-btn:disabled,.m-btn:disabled:hover{opacity:.42;cursor:default;filter:saturate(.3);}
+/* Conflicts are to decide: orange. Red stays for what will be deleted. */
+.grow.rowcfl{background:rgba(242,160,61,.10);}
+.arr-cfl{color:var(--orange);}
+#cf-warn .err-title{color:var(--orange);}
+#cf-warn.err-block{background:rgba(242,160,61,.08);}
+/* Sentences in the text font; monospace stays for paths and numbers. */
+.status-note,.set-row select,.srv-status,#cf-warn-body .err-item,#cf-block-body .err-item{font-family:var(--font);}
+/* Server window: the port field keeps its width; a long login@host no
+   longer squeezes the server name down to one letter. */
+.set-row .srv-row2 input.portx{flex:0 0 82px;width:82px;}
+.srow .s-name{flex:1 1 auto;min-width:40px;}
+.srow .host{flex-shrink:1;min-width:0;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+/* Run strip: the steps wrap instead of pushing the file line under PAUSE and
+   CANCEL; the file line is cut with an ellipsis. */
+#bottombar.run .pb-hd-text{min-width:0;}
+#bottombar.run .pb-steps{flex-wrap:wrap;row-gap:4px;min-width:0;}
+#bottombar.run .pb-file{min-width:0;overflow:hidden;text-overflow:ellipsis;}
+/* Top bar in the colours of the charter. */
+.pb-fill{background:linear-gradient(90deg,var(--pb-color,var(--green)),var(--pb-color2,var(--green)));}
+/* "Reduce motion": the spinning ring and CANCEL's glow stop too. */
+@media (prefers-reduced-motion:reduce){
+  .ring-fill.spin{animation:none;}
+  .tbtn.stop{animation:none;}
+}
+/* Short windows (the minimum is 1040 x 640): a lighter run strip, so the
+   list above keeps some rows. */
+@media (max-height:760px){
+  #bottombar.live .pb-inner{padding:10px 16px 10px;}
+  #bottombar.live .pb-pct-ring{width:88px;height:88px;}
+  #bottombar.live.run .ring-txt{font-size:20px;}
+  #bottombar.live .pb-title{font-size:22px;}
+  #bottombar.live .pb-hd{gap:16px;}
+  #bottombar.live .pb-stats{margin-top:4px;}
+  #bottombar.live .sbox{padding-top:5px;padding-bottom:5px;}
+  #bottombar.live .pb-spark{display:none;}
+}
+/* Narrow windows: the toolbar stays on one line (wrapping took the rows of
+   the list away). */
+@media (max-width:1200px){
+  #toolbar{gap:10px;padding-left:12px;padding-right:12px;}
+  #search{width:120px;}
+  #toolbar .viewopt{font-size:11.5px;gap:6px;}
+}
+/* Short windows: the strip loses its decoration before the list loses rows. */
+@media (max-height:760px){
+  #bottombar.live .pb-pct-ring{width:76px;height:76px;}
+  #bottombar.live.run .ring-txt{font-size:17px;}
+  #bottombar.live .ring-sub{font-size:8px;margin-top:3px;}
+  #bottombar.live .pb-title{font-size:20px;}
+  #bottombar.run .pb-flow{display:none;}
+  #bottombar.live .sval{font-size:14px;}
+}
+/* Narrow windows: the steps go under the title, on one line, instead of
+   stacking one per line beside it. */
+@media (max-width:1200px){
+  #bottombar.run .pb-hd-text{grid-template-columns:minmax(0,1fr);}
+  #bottombar.run .pb-steps{grid-column:1;grid-row:2;flex-wrap:nowrap;}
+  #bottombar.run .pb-file{grid-column:1;grid-row:3;}
+  #bottombar.run .pb-flow{grid-column:1;grid-row:4;}
+}
+/* Short windows, during a run: the toolbar (whose controls are locked while a
+   run goes on) gives its height to the strip and the list. */
+@media (max-height:760px){
+  #app.running #toolbar{display:none;}
+}
 </style>
 </head>
 <body>

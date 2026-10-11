@@ -90,6 +90,7 @@ function checkForUpdate() {
 }
 
 const { MultiSession, verifyFolder, checkJobPaths, clearStaleLocks } = require('./core/session');
+const { isUncPath } = require('./core/volume');
 const { FsPool } = require('./fs/afs');
 const { Prefs, defaultJob, loadJob, saveJob, jobNameFromPath, JOB_EXT, credentialMap,
         pushRecent: addRecent, removeRecent } = require('./config');
@@ -486,37 +487,33 @@ ipcMain.handle('ntfy-run', async (_, res, jobName) => {
 });
 
 ipcMain.handle('reveal-path',  (_, p) => { try { shell.showItemInFolder(p); } catch (_) {} });
-// What syncto itself produces, and folders. `shell.openPath` hands the file
-// to whatever the system opens it with, so an unrestricted channel is "run
-// this" for anything the renderer can name. The window only ever asks for a
-// checksum list or a folder.
-const OPENABLE = new Set(['.html', '.htm', '.txt', '.csv', '.log', '.json', '.md', '.xml']);
-ipcMain.handle('open-path', async (_, p) => {
-  const file = String(p || '');
-  let st = null;
-  try { st = fs.statSync(file); } catch (_) { return 'That item is no longer there.'; }
-  if (st.isDirectory()) return shell.openPath(file);
-  if (!OPENABLE.has(path.extname(file).toLowerCase())) {
-    return 'syncto only opens the documents it writes.';
-  }
-  return shell.openPath(file);
-});
+// (0.8.8) The 'open-path' channel is gone: nothing in the window used it any
+// more, and "open this" over IPC is "run this" for anything the window names
+// (a folder called Something.app is an application).
 ipcMain.handle('open-external',(_, u) => openExternalSafely(u));
 
 // Electron's own clipboard, deliberately, and not navigator.clipboard: the
 // renderer is loaded from file:// under a strict CSP, which is not a secure
 // context, so the web API is either missing or silently refuses. A cap so a
 // runaway list cannot hand the system clipboard a hundred megabytes.
-ipcMain.handle('copy-text', (_, text) => {
+// (0.8.8) Awaited: since Electron 44 writeText returns a promise, and a
+// refusal would otherwise escape the try and still answer "copied".
+ipcMain.handle('copy-text', async (_, text) => {
   const s = String(text == null ? '' : text).slice(0, 2 * 1024 * 1024);
-  try { clipboard.writeText(s); return true; } catch (_) { return false; }
+  try { await clipboard.writeText(s); return true; } catch (_) { return false; }
 });
 
+// (0.8.8) Asked while a job opens and while a path is typed: a Windows network
+// path is not touched for that (Windows would connect and present the user's
+// login to whatever host the path names). Answered "unknown, not missing";
+// Compare, which the user asks for, still finds out.
 ipcMain.handle('folder-exists', async (_, p) => {
+  if (isUncPath(p)) return true;
   try { return fs.statSync(p).isDirectory(); } catch (_) { return false; }
 });
 
 ipcMain.handle('disk-free', async (_, p) => {
+  if (isUncPath(p)) return null;
   try { const s = fs.statfsSync(p); return { free: s.bavail * s.bsize, total: s.blocks * s.bsize }; }
   catch (_) { return null; }
 });
@@ -689,7 +686,9 @@ ipcMain.handle('reveal-node', (_, idx, side) => {
   try {
     const r = session.locate(idx, side === 'left' ? 'left' : 'right');
     if (r.ok) { shell.showItemInFolder(r.path); return { ok: true }; }
-    if (r.fallback) { shell.openPath(r.fallback); return { ok: true, note: r.error }; }
+    // (0.8.8) Shown, never opened: a pair root named Something.app would
+    // launch the application.
+    if (r.fallback) { shell.showItemInFolder(r.fallback); return { ok: true, note: r.error }; }
     return { ok: false, error: r.error };
   } catch (err) {
     return { ok: false, error: err.message || String(err) };

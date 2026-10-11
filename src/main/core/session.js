@@ -31,7 +31,7 @@ const { FsPool, parseLocation, redactLocation } = require('../fs/afs');
 const { NativeFs } = require('../fs/native');
 const { formatChecksumList, parseChecksumList, createHasher, hashStream } = require('./hash');
 const { isSafeRel } = require('./relpath');
-const { offlineVolume } = require('./volume');
+const { offlineVolume, isUncPath } = require('./volume');
 const { acquireAll, clearStaleLock, isLockFileName, DETECT_ABANDONED_MS } = require('./lock');
 const { SftpFs } = require('../fs/sftp');
 
@@ -145,7 +145,15 @@ class Session {
       // may still use those paths.
       if (!db.available && job.pairWas) {
         const prevId = previousPairId(job.pairWas, this.left, this.right);
-        if (prevId) {
+        // (0.8.8) Only when NEITHER folder has a session under the new paths.
+        // One side having it means a run already happened there (and its
+        // database write failed on the other side): the old session is then
+        // older than what the folders went through, and reading it planned
+        // the deletion of a file restored since.
+        const newOnEither = prevId && (
+          !!(await readSideSession(this.left.fs, this.left.path, this.pairId)) ||
+          !!(await readSideSession(this.right.fs, this.right.path, this.pairId)));
+        if (prevId && !newOnEither) {
           const prev = await loadPairDb(this.left, this.right, prevId);
           if (prev.db.available) {
             db = prev.db; reason = null;
@@ -659,22 +667,37 @@ class Session {
         // A run that only DELETED files still has to rewrite the list: the
         // lines of the files it removed must go with them, or the sidecar goes
         // on vouching for files that are not there any more.
-        const anyDeleted = [...run.applied.values()].some(r => r && r.deleted);
+        // (0.8.8) Deletions on THIS side only: a run that deleted on the
+        // other side used to rewrite this side's list too.
+        const delOp = side === 'left' ? OP.DELETE_LEFT : OP.DELETE_RIGHT;
+        const anyDeleted = (this.nodes || []).some(nd => nd.op === delOp &&
+          (run.applied.get(nd.rel) || {}).deleted);
         if (!list.length && !anyDeleted) continue;
         const algo = 'xxh64';
         const target = this[side];
         const p = target.fs.join(target.path, CHECKSUM_FILE);
         try {
           const byRel = new Map();
+          let foreign = null;
           try {
             const prevText = await readText(target.fs, p);
             if (prevText != null) {
               const prev = parseChecksumList(prevText);
               if (!prev.algo || prev.algo === algo) {
                 for (const e of prev.entries) byRel.set(e.rel, e);
+              } else if (prev.entries.length) {
+                foreign = prev.algo;
               }
             }
           } catch (_) { /* unreadable previous list: start fresh */ }
+          // (0.8.8) A list written with another algorithm (an older syncto
+          // offered xxHash128, MD5, SHA-256) cannot be merged with this one,
+          // and rewriting it threw away every line it vouched for. Left as is.
+          if (foreign) {
+            run.notes.push(`The checksum list on the ${side} side uses ${foreign}; it was left untouched ` +
+              `and does not list the files of this run.`);
+            continue;
+          }
           // Entries deleted or re-copied this run must not survive from the
           // old list with a stale hash. The list is keyed by the side's OWN
           // spelling of a name (a Mac stores "é" decomposed, a server stores
@@ -1164,16 +1187,21 @@ class MultiSession {
     try {
 
     // Grand totals first, so the progress ring covers the whole job.
-    const verifyFactor = 2;          // every byte is written, then read back
-    let bytesTotal = 0, filesTotal = 0;
-    for (const s of this.sessions) {
-      const st = s.stats || {};
-      bytesTotal += (st.bytesTotal || 0) * verifyFactor;   // written + read back
-      filesTotal += st.filesToProcess || 0;
-    }
+    // (0.8.8) An ESTIMATE per pair (every byte written then read back), each
+    // replaced by the pair's own plan as soon as it starts, then by what it
+    // really did once it ends. A fixed "× 2" left the TOTAL ring at 50 % on a
+    // server with the read-back off; the estimate is the most a pair can do,
+    // so replacing it can only make the ring go forward, never back.
+    const verifyFactor = 2;
+    const estBytes = this.sessions.map(s => ((s.stats || {}).bytesTotal || 0) * verifyFactor);
+    const estFiles = this.sessions.map(() => null);
+    const estItems = this.sessions.map(s => (s.stats || {}).filesToProcess || 0);
+    const sum = a => a.reduce((t, v) => t + (v || 0), 0);
+    let bytesTotal = sum(estBytes);
+    let filesTotal = sum(this.sessions.map(s => (s.stats || {}).filesToProcess || 0));
 
     const perPair = [];
-    let doneBytes = 0, doneFiles = 0, cancelled = false;
+    let doneBytes = 0, doneFiles = 0, doneItems = 0, cancelled = false;
     const counters = { files: 0, bytes: 0, deleted: 0, folders: 0, moved: 0, errors: 0, failed: 0, dated: 0 };
     let verified = 0;
     const allErrors = [], allNotes = [], checksumFiles = [];
@@ -1188,17 +1216,33 @@ class MultiSession {
         pairWas: pr.was || null,
       });
       let res;
+      let lastFiles = 0, lastItems = 0, lastBytes = 0;
       try {
         res = await this.sessions[p].sync(pairJob, {
           token, trashItem,
           lockLost: () => !!lockLost,
-          onProgress: prog => onProgress && onProgress(Object.assign({}, prog, {
-            pair: p + 1, pairs: this.pairs.length, pairLabel: pairLabel(pr),
-            bytesDone: doneBytes + (prog.bytesDone || 0),
-            bytesTotal,
-            filesDone: doneFiles + (prog.filesDone || 0),
-            filesTotal,
-          })),
+          onProgress: prog => {
+            if (prog.phase === 'sync' && prog.bytesTotal != null) {
+              estBytes[p] = prog.bytesTotal; bytesTotal = sum(estBytes);
+            }
+            if (prog.phase === 'sync' && prog.filesTotal != null) {
+              estFiles[p] = prog.filesTotal;
+              filesTotal = sum(estFiles.map((f, i) => f != null ? f : estItems[i]));
+            }
+            if (prog.phase === 'sync' && prog.itemsTotal != null) estItems[p] = prog.itemsTotal;
+            if (prog.phase === 'sync') {
+              lastFiles = prog.filesDone || 0; lastItems = prog.itemsDone || 0; lastBytes = prog.bytesDone || 0;
+            }
+            if (onProgress) onProgress(Object.assign({}, prog, {
+              pair: p + 1, pairs: this.pairs.length, pairLabel: pairLabel(pr),
+              bytesDone: doneBytes + (prog.bytesDone || 0),
+              bytesTotal,
+              filesDone: doneFiles + (prog.filesDone || 0),
+              filesTotal,
+              itemsDone: doneItems + (prog.itemsDone || 0),
+              itemsTotal: sum(estItems),
+            }));
+          },
         });
       } catch (err) {
         // One pair failing must not throw away what the pairs BEFORE it just
@@ -1207,6 +1251,12 @@ class MultiSession {
         if (/cancelled/i.test(err.message || '')) { cancelled = true; break; }
         counters.errors++;
         allErrors.push({ rel: multi ? `[${pairLabel(pr)}]` : '', message: err.message || String(err) });
+        // (0.8.8) A pair that failed as a whole counts for what it did, so the
+        // ring still ends at 100 % (it stopped at 63 %).
+        doneBytes += lastBytes; doneFiles += lastFiles; doneItems += lastItems;
+        estBytes[p] = lastBytes; estFiles[p] = lastFiles; estItems[p] = lastItems;
+        bytesTotal = sum(estBytes);
+        filesTotal = sum(estFiles.map((f, i) => f != null ? f : estItems[i]));
         continue;
       }
       perPair.push(res);
@@ -1216,8 +1266,17 @@ class MultiSession {
       // The progress offset counts WORK bytes (a secure copy reads everything
       // back: 2× the data), same unit as bytesTotal above — mixing in plain
       // copied bytes made the ring jump backwards between pairs.
-      doneBytes += res.counters.workBytes != null ? res.counters.workBytes : (res.counters.bytes || 0);
-      doneFiles += (res.counters.files || 0) + (res.counters.moved || 0) + (res.counters.deleted || 0);
+      const pairWork = res.counters.workBytes != null ? res.counters.workBytes : (res.counters.bytes || 0);
+      doneBytes += pairWork;
+      // (0.8.8) What the pair really did becomes its share of the total, so
+      // the ring ends at 100 % even when files failed or were not read back.
+      estBytes[p] = pairWork; bytesTotal = sum(estBytes);
+      // Counted the way the pair counted them while it ran: the file counter
+      // used to change units at each new pair and go backwards.
+      doneFiles += lastFiles;
+      doneItems += lastItems;
+      estFiles[p] = lastFiles; estItems[p] = lastItems;
+      filesTotal = sum(estFiles.map((f, i) => f != null ? f : estItems[i]));
       // res.counters.errors already counts this pair's errors — adding
       // res.errors.length again would double every one of them.
       for (const k of Object.keys(counters)) counters[k] += res.counters[k] || 0;
@@ -1230,6 +1289,19 @@ class MultiSession {
       cancelled = cancelled || res.cancelled;
     }
     const endedAt = Date.now();
+    // (0.8.8) One last event with the final figures: after a pair that failed
+    // as a whole there was none, and the strip kept the earlier total (63 %).
+    if (onProgress && this.sessions.length) {
+      onProgress({
+        phase: 'sync', pass: 'cleanup', way: '', current: '',
+        pair: this.sessions.length, pairs: this.pairs.length,
+        bytesDone: doneBytes, bytesTotal: Math.max(bytesTotal, doneBytes),
+        filesDone: doneFiles, filesTotal: Math.max(filesTotal, doneFiles),
+        itemsDone: doneItems, itemsTotal: Math.max(sum(estItems), doneItems),
+        deleted: counters.deleted, errors: counters.errors,
+        bytesPerSec: 0, etaSec: 0, paused: false,
+      });
+    }
 
 
     if (lockLost) {
@@ -1341,13 +1413,24 @@ function writeText(fsx, p, content) {
   });
 }
 
+// (0.8.8) A checksum list sits in a synchronized folder, so it comes from
+// whoever writes there: read up to a size no real list reaches (400 000 files
+// make about 40 MB), not to whatever the file says.
+const MAX_TEXT_BYTES = 128 * 1024 * 1024;
+
 async function readText(fsx, p) {
   const st = await fsx.stat(p);
   if (!st || st.type !== 'file') return null;
+  if (st.size > MAX_TEXT_BYTES) throw new Error(`${p} is larger than ${MAX_TEXT_BYTES / 1048576} MB — not a checksum list.`);
   return new Promise((resolve, reject) => {
     const chunks = [];
+    let total = 0;
     const rs = fsx.createReadStream(p);
-    rs.on('data', c => chunks.push(c));
+    rs.on('data', c => {
+      total += c.length;
+      if (total > MAX_TEXT_BYTES) { rs.destroy(); reject(new Error(`${p} grew past ${MAX_TEXT_BYTES / 1048576} MB while being read.`)); return; }
+      chunks.push(c);
+    });
     rs.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     rs.on('error', reject);
   });
@@ -1480,7 +1563,12 @@ async function checkJobPaths(job, opts) {
     const left = String(pair.left || '').trim();
     const right = String(pair.right || '').trim();
     if (!left || !right) continue;                       // an unfinished row is not a problem yet
-    const remote = p => /^sftp:\/\//i.test(p);
+    // (0.8.8) A Windows network path (\\host\share) is skipped like a server:
+    // looking at it makes Windows connect and present the user's login, and a
+    // job file received from someone else must not be able to trigger that
+    // just by being opened.
+    const platform = (opts && opts.platform) || process.platform;
+    const remote = p => /^sftp:\/\//i.test(p) || isUncPath(p, platform);
 
     for (const side of ['left', 'right']) {
       const here  = side === 'left' ? left : right;

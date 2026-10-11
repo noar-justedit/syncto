@@ -321,6 +321,9 @@ It only fires on a clean run — an error, a cancellation or a lost folder lock
 leaves the machine on, so you can read what happened. And a 30-second countdown
 with a **Cancel** button always comes first.
 
+It never fires while auto-sync is on, whether the run was started by auto-sync
+or by hand: the machine stays up for the next cycle.
+
 There is no hibernate entry on purpose: macOS has no such command, and on
 Windows it only works when hibernation is enabled, which it usually is not.
 

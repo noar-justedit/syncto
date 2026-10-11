@@ -29,6 +29,7 @@
 // Optional whole-hour shifts cover DST and timezone-naive filesystems.
 
 const { PathFilter, SoftFilter } = require('./filter');
+const { fits, shorten, diskName } = require('../fs/longname');
 // Required lazily: lock.js takes LOCK_NAME from this file, so importing it at
 // the top would be a cycle and LOCK_NAME would be undefined on one of the two
 // load orders. One call per comparison, so the lookup costs nothing.
@@ -105,6 +106,10 @@ const OS_LITTER_FOLDERS = new Set([
   'System Volume Information', '.Spotlight-V100', '.fseventsd',
   '.TemporaryItems', '.DocumentRevisions-V100',
 ]);
+
+// Files Windows holds open at the root of a system drive; reading their
+// attributes can fail with EBUSY while they are in use.
+const SYSTEM_LOCKED = new Set(['pagefile.sys', 'hiberfil.sys', 'swapfile.sys', 'dumpstack.log', 'dumpstack.log.tmp']);
 
 function isSyncToInternal(name) {
   if (name === DB_NAME || name === LOCK_NAME || name.startsWith('.syncto.')) return true;
@@ -279,7 +284,13 @@ class Comparer {
           .map(x => Object.assign(x, { side })));
       }
       const map = new Map();
+      // (0.8.8) Keys that two names share on this side (see below).
+      map.collided = new Set();
       for (const e of list) {
+        // syncto-checksums.txt stays out at every depth: below the root it is
+        // the proof list of a nested or overlapping job, which that job
+        // rewrites — treated as a user file, an outer MIRROR deleted it at
+        // every other run (tried and reverted during the 0.8.8 review).
         if (ALWAYS_SKIP.has(e.name) || isSyncToInternal(e.name)) continue;
         if (e.name.endsWith(TEMP_EXT) || e.name.endsWith(OLD_EXT)) {
           // Leftover from a run that was killed or lost power. It is invisible
@@ -291,16 +302,35 @@ class Comparer {
         }
         if (e.type === 'symlink' && this.symlinks === 'exclude') continue;
         if (e.type === 'other') continue;
+        // (0.8.8) An item the filesystem refused to describe. Ignored when
+        // nothing would have been done with it anyway (filtered out, or one of
+        // the system files Windows keeps locked at a drive's root); otherwise
+        // the whole folder is unreadable, which blocks the run — dropping it
+        // made it look absent, and MIRROR deleted the other side's copy.
+        if (e.unreadable) {
+          const relC = (relDir ? relDir.normalize('NFC') + '/' : '') + e.name.normalize('NFC');
+          const filtered = e.type === 'folder' ? !this.filter.passFolder(relC) : !this.filter.passFile(relC);
+          if (filtered || SYSTEM_LOCKED.has(e.name.toLowerCase())) continue;
+          throw Object.assign(new Error(`"${e.name}" could not be read (${e.unreadable})`), { code: e.unreadable });
+        }
         // Case-insensitive key so a Mac and a Windows share agree on identity,
         // while the original spelling is preserved for display and for I/O.
         const key = e.name.normalize('NFC').toLowerCase();
-        if (map.has(key)) {
+        if (map.has(key) || map.collided.has(key)) {
           // Two items differing only by case cannot both exist on the other
-          // side of a case-insensitive filesystem; keep the first, flag it.
+          // side of a case-insensitive filesystem. (0.8.8) Neither of them is
+          // synchronized any more: keeping "the first" paired whichever one
+          // readdir listed first with the other side's file, and a MIRROR
+          // then overwrote the backup of a.txt with the content of A.txt.
+          const other = map.has(key) ? map.get(key).name : '';
           this.errors.push({
             path: base.fs.join(dir, e.name),
-            message: `"${e.name}" and "${map.get(key).name}" differ only by upper/lower case — only the first is synchronized.`,
+            message: other
+              ? `"${e.name}" and "${other}" differ only by upper/lower case — neither is synchronized. Rename one of them.`
+              : `"${e.name}" differs only by upper/lower case from another name here — not synchronized.`,
           });
+          map.delete(key);
+          map.collided.add(key);
           continue;
         }
         map.set(key, e);
@@ -309,6 +339,23 @@ class Comparer {
     } catch (err) {
       this.errors.push({ path: dir, message: err.message || String(err), fatal: true });
       return null;
+    }
+  }
+
+  // (0.8.8) `from` holds a name too long for a destination and `to` has no
+  // item by that name, but has its shortened form: they are the same item.
+  // `to` is re-keyed under the long name, `short` remembers which side has
+  // the short one.
+  _pairShortened(from, to, toSide, short) {
+    for (const [key, e] of from) {
+      if (to.has(key) || fits(e.name)) continue;
+      const sk = shorten(e.name).normalize('NFC').toLowerCase();
+      if (sk === key || from.has(sk) || (to.collided && to.collided.has(sk))) continue;
+      const hit = to.get(sk);
+      if (!hit) continue;
+      to.delete(sk);
+      to.set(key, hit);
+      short.set(key, toSide);
     }
   }
 
@@ -326,17 +373,27 @@ class Comparer {
     // the fatal error recorded by _list blocks the synchronization.
     if (!L || !R) return;
 
-    const keys = new Set([...L.keys(), ...R.keys()]);
+    // (0.8.8) A name that clashes by case on either side is left out on both:
+    // nothing is copied over it, and nothing on the other side is deleted.
+    const clash = new Set([...(L.collided || []), ...(R.collided || [])]);
+    // (0.8.8) A name too long for a destination was written there under a
+    // shortened name; pair the two again so neither looks orphaned.
+    const short = new Map();
+    this._pairShortened(L, R, 'right', short);
+    this._pairShortened(R, L, 'left', short);
+    const keys = new Set([...L.keys(), ...R.keys()].filter(k => !clash.has(k)));
     const sorted = [...keys].sort();
 
     for (const key of sorted) {
       if (this.token.cancelled) return;
       const l = L.get(key) || null;
       const r = R.get(key) || null;
-      const name  = (l || r).name.normalize('NFC');
+      // The long name is the item's identity, whichever side holds the short one.
+      const shortOn = short.get(key) || ((!l || !r) && !fits((l || r).name) ? (l ? 'right' : 'left') : null);
+      const name  = (shortOn === 'left' ? r : (l || r)).name.normalize('NFC');
       const rel   = rels.c ? rels.c + '/' + name : name;
-      const lName = l ? l.name : this._spell('left',  name);
-      const rName = r ? r.name : this._spell('right', name);
+      const lName = l ? l.name : this._spell('left',  diskName(name));
+      const rName = r ? r.name : this._spell('right', diskName(name));
       const child = {
         c: rel,
         l: rels.l ? rels.l + '/' + lName : lName,
@@ -344,6 +401,7 @@ class Comparer {
       };
 
       const kind = (l || r).type;
+      this._shortOn = shortOn;
       // A folder on one side and a file on the other: not comparable.
       const typeClash = l && r && l.type !== r.type;
 
@@ -379,6 +437,8 @@ class Comparer {
       relL: rels.l === rel ? null : rels.l,
       relR: rels.r === rel ? null : rels.r,
       name, type, parent: parentIdx, depth,
+      // (0.8.8) The side where this item has (or will get) a shortened name.
+      short: this._shortOn || null,
       left : l ? { exists: true, size: l.size, mtime: l.mtime, id: l.id } : { exists: false },
       right: r ? { exists: true, size: r.size, mtime: r.mtime, id: r.id } : { exists: false },
       cat  : CAT.EQUAL,

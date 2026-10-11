@@ -873,7 +873,9 @@ async function testReviewRegressions() {
     }
   }
 
-  // (k) Two names differing only by case: flagged, first one wins, no crash.
+  // (k) Two names differing only by case: flagged, no crash. (0.8.8) Neither
+  //     is synchronized any more: "the first one wins" paired whichever one
+  //     readdir listed first with the other side's file.
   // Only meaningful on a case-SENSITIVE filesystem — on APFS or NTFS the two
   // writes land in the same file and there is nothing to collide.
   {
@@ -888,7 +890,7 @@ async function testReviewRegressions() {
       const s = new Session();
       const cmp = await s.compare(makeJob(L, R, {}), { token: {} });
       ok(cmp.errors.some(e => /upper\/lower case/i.test(e.message)), 'case collision is reported');
-      eq(s.nodes.filter(n => n.rel.toLowerCase() === 'file.txt').length, 1, 'and only one row is kept');
+      eq(s.nodes.filter(n => n.rel.toLowerCase() === 'file.txt').length, 0, 'and neither name is synchronized');
       await s.close();
     }
   }
@@ -3818,13 +3820,15 @@ function testNarrowedViewAndRunUi() {
      'the run strip is as tall as what it holds, after the rule that fixes the strip height');
   ok(/if \(state\.busy === 'sync'\) refreshRunGrid\(\);/.test(appjs), 'the list is asked for again while the run goes');
   // A comparison keeps the strip: the grid behind it is filling up.
-  ok(/setBusyUi\(true, 'COMPARING'\)/.test(appjs), 'a comparison is still announced in the strip');
+  // (0.8.8) Through startCompareUi, which every comparison now shares.
+  ok(/startCompareUi\('COMPARING'\)/.test(appjs) && /function startCompareUi\(title\) \{\s*setBusyUi\(true, title\);/.test(appjs),
+     'a comparison is still announced in the strip');
 
   // (e) 🔴 The wait after a run had no name. syncto compares both folders again
   //     to confirm the result — seconds of a window answering to nothing, right
   //     after a run, which reads as a crash.
   const quiet = appjs.slice(appjs.indexOf('async function doCompareQuiet'));
-  ok(/setBusyUi\(true, 'CHECKING'\)/.test(quiet.slice(0, 1200)), 'the re-comparison shows itself');
+  ok(/startCompareUi\('CHECKING'\)/.test(quiet.slice(0, 1200)), 'the re-comparison shows itself');
   ok(/setRecheck\('busy'/.test(appjs), 'and the summary card says what is still happening');
   ok(/Compared again: both folders now match/.test(appjs), 'then what it found');
   ok(/still need attention/.test(appjs), 'including when something is left');
@@ -4143,7 +4147,9 @@ async function testSftpSpeed() {
     ok(/j\.sync\.verifyRemote\s*=\s*\$\('st-verify-remote'\)\.checked/.test(appjs), 'the switch reaches the job');
     ok(/j\.sync\.transferLanes\s*=\s*Number\(\$\('st-lanes'\)\.value\)/.test(appjs), 'and so does the count');
     ok(/copied — not read back/.test(appjs), 'a run with no read-back says so on the summary card');
-    ok(/renderSteps\(p\.pass, p\.willVerify\)/.test(appjs), 'and the steps drop the pass that will not happen');
+    // (0.8.8) Through the remembered flag: not every event carries it.
+    ok(/if \(p\.willVerify != null\) state\.lastWillVerify = p\.willVerify;/.test(appjs) &&
+       /renderSteps\(p\.pass, state\.lastWillVerify\)/.test(appjs), 'and the steps drop the pass that will not happen');
   }
 }
 
@@ -4309,7 +4315,8 @@ function testCharte() {
   {
     const grid = {};
     for (const m of app.matchAll(/^\s*(\w+)\s*:\s*\{[^}]*cls: '(arr-\w+)/gm)) grid[m[1]] = m[2];
-    const colour = { 'arr-add': 'g', 'arr-upd': 'o', 'arr-del': 'r', 'arr-mov': 'b', 'arr-cfl': 'r' };
+    // (0.8.8) Conflicts are orange in the grid now (red is for deletions).
+    const colour = { 'arr-add': 'g', 'arr-upd': 'o', 'arr-del': 'r', 'arr-mov': 'b', 'arr-cfl': 'o' };
     const wrong = [];
     for (const m of app.matchAll(/chip\('(\w?)', '[^']*', s\.\w+,\s*'(\w+)'/g)) {
       const want = colour[grid[m[2]]];
@@ -4523,8 +4530,9 @@ async function testSecurity() {
   {
     const main = fs.readFileSync(path.join(root, 'src/main/main.js'), 'utf8');
     ok(/sandbox: true/.test(main), 'the renderer runs inside the OS sandbox');
-    ok(/OPENABLE\s*=\s*new Set/.test(main) && /open-path[\s\S]{0,700}OPENABLE\.has/.test(main),
-       'open-path opens a document or a folder, not whatever it is handed');
+    // (0.8.8) Narrower still: the channel is gone (nothing used it).
+    ok(!/ipcMain\.handle\('open-path'/.test(main),
+       'no channel opens whatever it is handed');
     // The ntfy token went in 0.8.3: there is nothing stored left to leak.
     ok(!/token\s*:\s*cfg\.token/.test(main) && !/Authorization/.test(main),
        'and no stored ntfy token travels anywhere, since none is kept');
@@ -4720,7 +4728,9 @@ async function testAuditFixes080() {
       const c = Object.create(SyncRunner.prototype);
       c.token = { cancelled: true }; c.notes = []; c.applied = new Map([['c1.mov', { ok: true }]]);
       c.toVerify = [{ rel: 'c1.mov', ok: false }];
-      eq(c.dropUnproven(), 0, 'cancelling is not a failure of proof');
+      // (0.8.8) Cancelled before the read-back: still unproven, still out.
+      eq(c.dropUnproven(), 1, 'a cancelled run does not record unverified copies either');
+      ok(!c.applied.has('c1.mov'), 'the copy is left out of the database');
     }
   }
 
@@ -4919,7 +4929,8 @@ function testWindowTruth() {
 
   // (c) The auto-sync card said "twoWay", a word the interface never shows.
   {
-    ok(/const VARIANT_LABEL = \{ twoWay: 'Two way'/.test(app), 'the mode names live in one place');
+    // (0.8.8) Spelt as on the buttons.
+    ok(/const VARIANT_LABEL = \{ twoWay: '2 WAYS'/.test(app), 'the mode names live in one place');
     const card = app.slice(app.indexOf("$('auto-cf-sub').textContent"), app.indexOf("$('ov-auto').classList.add('open')"));
     ok(/VARIANT_LABEL\[state\.job\.sync\.variant\]/.test(card), 'and the auto-sync card uses them');
     ok(/verificationPhrase\(\)/.test(card), 'with the same honest phrase about the read-back');
@@ -5160,7 +5171,7 @@ async function testRequest083() {
     eq([runTitle('copy', false), runTitle('verify', false), runTitle('cleanup', false), runTitle('verify', true)],
        ['SYNCHRONIZING', 'VERIFYING', 'FINISHING', 'PAUSED'],
        'the title names the pass: SYNCHRONIZING, VERIFYING, FINISHING, or PAUSED');
-    ok(/title\.textContent = runTitle\(p\.pass, p\.paused\);/.test(appjs) &&
+    ok(/const paused = !!\(p\.paused \|\| state\.paused\);\s*title\.textContent = runTitle\(p\.pass, paused\);/.test(appjs) &&
        /\$\('pb-title'\)\.textContent = runTitle\(state\.runPass, state\.paused\);/.test(appjs),
        'during the run and when resuming from a pause');
   }
@@ -5178,7 +5189,7 @@ async function testRequest083() {
   // (d3) A comparison wears the same strip, in the blue of its button.
   ok(/classList\.toggle\('live', !!on\)/.test(appjs) && /classList\.toggle\('cmp', !!\(on && !steps\)\)/.test(appjs),
      'the strip is live for a comparison as for a run');
-  ok(/setBusyUi\(true, 'COMPARING'\)/.test(appjs) && /setBusyUi\(true, 'CHECKING'\)/.test(appjs),
+  ok(/startCompareUi\('COMPARING'\)/.test(appjs) && /startCompareUi\('CHECKING'\)/.test(appjs),
      'COMPARING, and CHECKING for the look after a run');
   ok(/'--pb-color',  cmp \? 'var\(--blue\)' : 'var\(--green\)'/.test(appjs), 'blue for a comparison, green for a run');
   ok(/#bottombar\.live\{box-shadow:inset 0 0 0 2px var\(--pb-color/.test(html) && /#bottombar\.open\.live\{height:auto;\}/.test(html),
@@ -5689,7 +5700,7 @@ async function testRequest083() {
     ok(/r="33\.5"[^>]*id="pb-ring-all"[^>]*stroke-dasharray="210\.5"/.test(html) && /const RING_ALL_LEN = 210\.5;/.test(app) && len(33.5) === 210.5,
        'and so do the outer ring and its length');
     const prog = app.slice(app.indexOf('API.onSyncProgress('), app.indexOf("$('pb-fill').style.width = pct + '%';"));
-    ok(/const passPct = p\.passBytesTotal > 0/.test(prog) && /\$\('pb-ring'\)\.setAttribute\('stroke-dashoffset', RING_LEN \* \(1 - passPct \/ 100\)\)/.test(prog),
+    ok(/const passPct = p\.pass === 'cleanup' \? 100[\s\S]{0,120}p\.passBytesTotal > 0/.test(prog) && /\$\('pb-ring'\)\.setAttribute\('stroke-dashoffset', RING_LEN \* \(1 - passPct \/ 100\)\)/.test(prog),
        'the inner ring and the big figure follow the pass');
     ok(/\$\('pb-ring-all'\)\.setAttribute\('stroke-dashoffset', RING_ALL_LEN \* \(1 - pct \/ 100\)\)/.test(prog) &&
        /'TOTAL ' \+ Math\.round\(pct\) \+ '%'/.test(prog), 'the outer ring and "TOTAL" follow the whole run');
@@ -5703,6 +5714,808 @@ async function testRequest083() {
     const head = h.slice(0, h.indexOf('let _hw'));
     ok(!/fast\s+copy only/.test(head) && !/verified\s+compares the size/.test(head),
        'the header comment describes the one copy mode');
+  }
+}
+
+
+// ══ 50. Names too long for a destination (0.8.8) ═══════════════════════════
+// Reported on Windows: a 246-character file name failed with "ENOENT: no such
+// file or directory": ".syncto_tmp" took it to 257, past the 255 every
+// filesystem allows for one name. Run alone:
+//   SYNCTO_ONLY=testLongNames088 node test/run-tests.js
+async function testLongNames088() {
+  console.log('\n\n50. Names too long for a destination (0.8.8)');
+  const ln = require('../src/main/fs/longname');
+  const { NativeFs } = require('../src/main/fs/native');
+  const nfs = new NativeFs();
+  const runAs = async (L, R, variant, over) => {
+    const j = makeJob(L, R, Object.assign({ sync: { variant } }, over || {}));
+    return runPair(j);
+  };
+  const files = base => listAll(base).filter(f => !f.endsWith('/') && !f.includes('.syncto.') && !f.endsWith('syncto-checksums.txt'));
+
+  // (n1) The reported case, with the real limit: a 246-character name (with
+  //      the U+F022 a Mac puts on a share for ":") in a 110-character folder.
+  {
+    const seg = 'TP4_BLOCK4_D1_1400_Forum 18 - Smart Infrastructure for the Future Energy Industry Digitalisation & Innovation';
+    const name = seg + seg + '_ABDULLAH AL MALKI_V1.pptx';
+    eq(name.length, 246, 'the name of the report: 246 characters');
+    ok(!ln.fits(name + '.syncto_tmp'), 'and with ".syncto_tmp" it no longer fits');
+    const { L, R } = scratch();
+    write(L, `D1/${seg}/${name}`, 'deck');
+    const { run } = await runAs(L, R, 'mirror');
+    eq(run.errors.length, 0, 'the copy no longer fails');
+    eq(read(R, `D1/${seg}/${name}`), 'deck', 'and the file keeps its full name: it fits');
+    ok(!run.notes.some(m => /Name too long/.test(m)), 'nothing renamed, nothing to say');
+    ok(!files(R).some(f => f.endsWith('.syncto_tmp')), 'no temporary file left behind');
+  }
+
+  // (n2) Scratch names: unchanged when short, shortened when near a limit.
+  {
+    eq(ln.scratchPath(nfs, '/a/b/clip.mov', '.syncto_tmp'), '/a/b/clip.mov.syncto_tmp', 'a short name keeps "<name>.syncto_tmp"');
+    const t = nfs.basename(ln.scratchPath(nfs, '/a/b/' + 'x'.repeat(240) + '.mov', '.syncto_tmp'));
+    ok(t.endsWith('.mov.syncto_tmp') && ln.fits(t, ln.SCRATCH_MAX), 'a long one gets a short scratch name (fits 143)');
+    const { L, R } = scratch();
+    write(R, 'y'.repeat(120) + '~0123abcd.mov.syncto_tmp', 'half');
+    write(L, 'a.txt', 'a');
+    const { s: ses } = await runAs(L, R, 'mirror');
+    eq((ses.leftovers || []).map(x => path.basename(x.path)), ['y'.repeat(120) + '~0123abcd.mov.syncto_tmp'],
+       'a short scratch name left by a power cut is still found as a leftover');
+    ok(!files(R).some(f => f.endsWith('.syncto_tmp')), 'and swept by the run');
+  }
+
+  // (n3) Shortening: same result every time, extension kept, cut on whole
+  //      characters, within 255 bytes AND 255 UTF-16 units, no trailing space.
+  {
+    const arabic = 'تقرير الحفل النهائي '.repeat(14) + 'v2.mp4';
+    ok(!ln.fits(arabic), 'an Arabic name of ' + arabic.length + ' characters is over 255 bytes');
+    const s1 = ln.shorten(arabic), s2 = ln.shorten(arabic);
+    eq(s1, s2, 'the same name always gives the same short name');
+    ok(ln.fits(s1) && s1.endsWith('.mp4') && /~[0-9a-f]{8}\.mp4$/.test(s1), 'it fits, keeps ".mp4", ends with ~tag');
+    ok(arabic.startsWith(s1.replace(/~[0-9a-f]{8}\.mp4$/, '')), 'and starts like the original');
+    const emoji = '🎬'.repeat(140) + '.mov';
+    const s3 = ln.shorten(emoji);
+    ok(!/[\ud800-\udbff](?![\udc00-\udfff])/.test(s3) && ln.fits(s3), 'no emoji cut in half');
+    ok(!/[ .]~/.test(ln.shorten('a b '.repeat(80) + '.txt')), 'no space or dot left just before the tag');
+    ok(ln.shorten('x'.repeat(300) + '.mov') !== ln.shorten('x'.repeat(301) + '.mov'), 'two different names, two short names');
+  }
+
+  // (n4) A timestamped revision of a long name stays within the limit, with
+  //      its date whole.
+  {
+    const rel = 'sub/' + 'r'.repeat(250) + '.mov';
+    const out = versionedRelPath(rel, 'timestampFile', '2026-10-11 101500').split('/').pop();
+    ok(ln.fits(out) && / 2026-10-11 101500\.mov$/.test(out), 'the revision name fits and ends with its date');
+    eq(versionedRelPath('sub/clip.mov', 'timestampFile', '2026-10-11 101500'), 'sub/clip 2026-10-11 101500.mov', 'a short name is unchanged');
+  }
+
+  // (n5) A name that fits nowhere: saved under a short name, said once, and
+  //      paired with its original at every run after. The limit is lowered for
+  //      the test: an ext4 disk cannot hold a name over 255 bytes at the source.
+  const saved = ln.limits.name;
+  ln.limits.name = 60;
+  try {
+    const dirName = 'Folder with a name far too long for the destination ' + 'd'.repeat(20);
+    const fileName = 'Interview of the speaker, full length, colour graded ' + 'f'.repeat(20) + '.mov';
+    const rel = dirName + '/' + fileName;
+    const sDir = ln.shorten(dirName), sFile = ln.shorten(fileName);
+    const { L, R } = scratch();
+    write(L, rel, 'v1', Date.now() - 3600e3);
+
+    let r = await runAs(L, R, 'mirror');
+    eq(r.run.errors.length, 0, 'the copy goes through');
+    eq(read(R, sDir + '/' + sFile), 'v1', 'under the short folder and file names');
+    eq(files(R).length, 1, 'and nothing else');
+    eq(r.run.notes.filter(m => /^Name too long for the right folder/.test(m)).length, 2,
+       'the folder and the file are each reported once');
+    ok(r.run.notes.some(m => m.includes(`"${fileName}" was saved there as "${sFile}"`)), 'naming both names');
+
+    r = await runAs(L, R, 'mirror');
+    ok(r.cmp.nodes ? r.cmp.nodes.every(n => n.op === OP.NONE) : r.s.nodes.every(n => n.op === OP.NONE),
+       'next comparison: paired, nothing to do (no copy, no deletion)');
+    ok(!r.run.notes.some(m => /Name too long/.test(m)), 'and nothing said again');
+
+    write(L, rel, 'v2 longer', Date.now());
+    r = await runAs(L, R, 'mirror');
+    eq(read(R, sDir + '/' + sFile), 'v2 longer', 'an edit at the source updates the short-named copy');
+    eq(files(R).length, 1, 'no second file');
+
+    write(R, sDir + '/' + sFile, 'edited on the backup', Date.now() + 5000);
+    r = await runAs(L, R, 'twoWay');
+    eq(read(L, rel), 'edited on the backup', '2 WAYS: an edit of the short-named copy goes back to the original');
+    eq(files(L).length, 1, 'under its long name, not as a new file');
+
+    fs.unlinkSync(path.join(L, rel));
+    r = await runAs(L, R, 'mirror');
+    ok(!exists(R, sDir + '/' + sFile), 'MIRROR: deleting the original deletes its short-named copy');
+  } finally {
+    ln.limits.name = saved;
+  }
+}
+
+// ══ 49. The 0.8.8 review: data loss, wrong decisions, security, interface ═══
+// Each block reproduces a defect found by the code review of 09/10/2026 and
+// checks the fix. Run alone: SYNCTO_ONLY=testReview088 node test/run-tests.js
+async function testReview088() {
+  console.log('\n\n49. Review fixes: engine, security, interface (0.8.8)');
+  const root = path.join(__dirname, '..');
+  const { NativeFs } = require('../src/main/fs/native');
+  const dbMod = require('../src/main/core/db');
+  const DAY = 86400000;
+  const twoPairJob = (pairs, variant) => {
+    const j = defaultJob(); j.name = 't'; j.pairs = pairs;
+    j.sync.variant = variant; j.sync.deletion = 'permanent'; j.sync.retryCount = 0;
+    return j;
+  };
+  async function runWith(job, syncOpts) {
+    const s = new Session(); const token = { cancelled: false, paused: false };
+    const cmp = await s.compare(job, { token });
+    const run = await s.sync(job, Object.assign({ token, appVersion: 'test' }, syncOpts || {}));
+    await s.close();
+    return { s, cmp, run };
+  }
+  async function multiRun(job) {
+    const m = new MultiSession(); const token = { cancelled: false, paused: false };
+    const cmp = await m.compare(job, { token });
+    const plans = m.sessions.map(s => s.nodes.map(n => n.rel + ':' + n.op));
+    const res = await m.sync(job, { token });
+    await m.close();
+    return { cmp, plans, res };
+  }
+
+  // (e1) One lstat that fails with anything but "not found" during the scan
+  //      used to drop the file from the listing — and MIRROR deleted the
+  //      backup copy, 2 WAYS propagated a "deletion". Now: asked again, then
+  //      the folder is reported unreadable and the run is blocked.
+  for (const variant of ['mirror', 'twoWay']) {
+    const { L, R } = scratch();
+    write(L, 'clip.mov', 'precious', Date.now() - DAY);
+    const job = makeJob(L, R, { sync: { variant } });
+    await runPair(job);
+    const orig = fs.promises.lstat;
+    fs.promises.lstat = async p => {
+      if (String(p) === path.join(L, 'clip.mov')) { const e = new Error('EIO: i/o error, lstat'); e.code = 'EIO'; throw e; }
+      return orig(p);
+    };
+    let blocked = false;
+    try {
+      const s = new Session();
+      const cmp = await s.compare(job, { token: {} });
+      blocked = cmp.errors.some(e => e.fatal && /could not be read/.test(e.message));
+      try { await s.sync(job, { token: {}, appVersion: 'test' }); } catch (_) { /* refused */ }
+      await s.close();
+    } finally { fs.promises.lstat = orig; }
+    ok(blocked, `${variant}: a file that cannot be read makes its folder unreadable, which blocks the run`);
+    eq(read(R, 'clip.mov'), 'precious', `${variant}: and the copy on the other side is not deleted`);
+  }
+  {
+    // A single hiccup is ridden out: asked once more, it answers.
+    const { L, R } = scratch();
+    write(L, 'clip.mov', 'precious', Date.now() - DAY);
+    const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+    await runPair(job);
+    const orig = fs.promises.lstat; let hit = 0;
+    fs.promises.lstat = async p => {
+      if (String(p) === path.join(L, 'clip.mov') && !hit++) { const e = new Error('EIO'); e.code = 'EIO'; throw e; }
+      return orig(p);
+    };
+    let r;
+    try { r = await runPair(job); } finally { fs.promises.lstat = orig; }
+    eq(r.cmp.errors.length, 0, 'a single failed lstat is asked again and the run goes on');
+    eq(read(R, 'clip.mov'), 'precious', 'with nothing deleted');
+  }
+
+  // (e2) Two pairs sharing a base folder (L↔R1, L↔R2): an edit on R1 and a
+  //      deletion on R2 ended with the edit lost on all three sides. Nothing
+  //      is replaced or deleted any more if it is not the file the comparison
+  //      saw.
+  {
+    const { dir, L } = scratch();
+    const R1 = path.join(dir, 'R1'), R2 = path.join(dir, 'R2');
+    fs.mkdirSync(R1); fs.mkdirSync(R2);
+    write(L, 'x.txt', 'original', Date.now() - DAY);
+    const job = twoPairJob([{ left: L, right: R1 }, { left: L, right: R2 }], 'twoWay');
+    await multiRun(job); await multiRun(job);
+    write(R1, 'x.txt', 'EDITED ON R1');
+    fs.unlinkSync(path.join(R2, 'x.txt'));
+    const a = await multiRun(job);
+    eq(read(L, 'x.txt'), 'EDITED ON R1', 'pair 2 does not delete what pair 1 has just written');
+    ok(a.res.errors.some(e => /changed since the comparison/.test(e.message)), 'it says the file changed since the comparison');
+    await multiRun(job);
+    eq(read(R1, 'x.txt'), 'EDITED ON R1', 'and the edit survives the next run');
+  }
+  {
+    // Same rule on one pair: a file edited after Compare is not overwritten.
+    const { L, R } = scratch();
+    write(L, 'a.txt', 'new from L');
+    write(R, 'a.txt', 'old', Date.now() - DAY);
+    const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+    const s = new Session();
+    await s.compare(job, { token: {} });
+    write(R, 'a.txt', 'edited on R after the comparison');
+    const run = await s.sync(job, { token: {}, appVersion: 'test' });
+    await s.close();
+    eq(read(R, 'a.txt'), 'edited on R after the comparison', 'a target edited after Compare is not overwritten');
+    ok(run.errors.some(e => /changed since the comparison/.test(e.message)), 'and the row is reported');
+  }
+
+  // (e3) "Move to the trash": a file the trash refuses (a long Windows path)
+  //      was deleted, or replaced, for good with nothing said.
+  {
+    const { L, R } = scratch();
+    write(R, 'b.txt', 'b'); write(L, 'o.txt', 'NEW'); write(R, 'o.txt', 'OLD', Date.now() - DAY);
+    const job = makeJob(L, R, { sync: { variant: 'mirror', deletion: 'recycler', retryCount: 1, retryDelayMs: 1 } });
+    const trashItem = async (fsx, p) => {
+      if (/trash-probe/.test(p)) { await fsx.unlink(p); return true; }
+      return false;
+    };
+    const s = new Session();
+    await s.compare(job, { token: {} });
+    const run = await s.sync(job, { token: {}, trashItem, appVersion: 'test' });
+    await s.close();
+    eq(read(R, 'b.txt'), 'b', 'a file the trash refuses is left in place');
+    eq(read(R, 'o.txt'), 'OLD', 'and a version the trash refuses is not replaced, even on the retry');
+    ok(run.errors.some(e => /refused this item/.test(e.message)) &&
+       run.errors.some(e => /refused the version about to be replaced/.test(e.message)), 'both are reported as errors');
+  }
+
+  // (e4) A file id reused by a new file (ext4 inodes, FAT/exFAT slots) was
+  //      taken for a move: the destination kept the OLD content under the
+  //      new name, and the run said it succeeded.
+  {
+    const { L, R } = scratch();
+    write(L, 'a.bin', 'AAAAAAAAAA', Date.now() - DAY);
+    const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+    await runPair(job);
+    const s0 = new Session(); await s0.compare(job, { token: {} });
+    const idA = s0.nodes.find(n => n.rel === 'a.bin').left.id; await s0.close();
+    fs.unlinkSync(path.join(L, 'a.bin'));
+    write(L, 'b.bin', 'BBBBBBBBBB');
+    // The reuse itself is up to the filesystem: forced here through the id.
+    const s = new Session();
+    const orig = NativeFs.prototype.readdir;
+    NativeFs.prototype.readdir = async function (p) {
+      const list = await orig.call(this, p);
+      for (const e of list) if (e && e.name === 'b.bin' && p === L) e.id = idA;
+      return list;
+    };
+    let cmp;
+    try { cmp = await s.compare(job, { token: {} }); } finally { NativeFs.prototype.readdir = orig; }
+    eq(cmp.movesFound || 0, 0, 'a reused id with a new date is not a move');
+    await s.sync(job, { token: {}, appVersion: 'test' }); await s.close();
+    eq(read(R, 'b.bin'), 'BBBBBBBBBB', 'the destination gets the new content');
+  }
+  {
+    // A real rename is still recognised (the date travels with the file).
+    const { L, R } = scratch();
+    write(L, 'a.bin', 'AAAAAAAAAA', Date.now() - DAY);
+    const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+    await runPair(job);
+    fs.renameSync(path.join(L, 'a.bin'), path.join(L, 'renamed.bin'));
+    const r = await runPair(job);
+    eq(r.cmp.movesFound, 1, 'a real rename is still a move');
+    eq(read(R, 'renamed.bin'), 'AAAAAAAAAA', 'and is renamed on the other side');
+  }
+
+  // (e5) Comparison by content, 2 WAYS: a copy gone bad (same size, same
+  //      date) was found different and then ignored at every run.
+  {
+    const { L, R } = scratch();
+    write(L, 'clip.mov', 'GOOD DATA 0123456789', Date.now() - DAY);
+    const job = makeJob(L, R, { sync: { variant: 'twoWay' }, compare: { compareVariant: 'content' } });
+    await runPair(job);
+    const p = path.join(R, 'clip.mov'); const st = fs.statSync(p);
+    fs.writeFileSync(p, 'GOOD DATA 01234X6789'); fs.utimesSync(p, st.atime, st.mtime);
+    const s = new Session(); const cmp = await s.compare(job, { token: {} }); await s.close();
+    eq(cmp.stats.conflicts, 1, 'a content difference nobody made is a conflict');
+    ok(/damaged/.test(s.nodes.find(n => n.rel === 'clip.mov').dirMsg || s.nodes.find(n => n.rel === 'clip.mov').catMsg || JSON.stringify(s.nodes.find(n => n.rel === 'clip.mov'))),
+       'saying one of the copies may be damaged');
+  }
+
+  // (e6) Two names differing only by case (Linux, SFTP): MIRROR overwrote the
+  //      backup of a.txt with the content of A.txt.
+  {
+    const { L, R } = scratch();
+    write(L, 'a.txt', 'lowercase original');
+    const ci = fs.existsSync(path.join(L, 'A.TXT'));
+    if (ci) { ok(true, 'case collision skipped (case-insensitive filesystem)'); ok(true, 'skipped'); }
+    else {
+      const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+      await runPair(job);
+      write(L, 'A.txt', 'UPPERCASE different file');
+      const r = await runPair(job);
+      eq(read(R, 'a.txt'), 'lowercase original', 'the backup of a.txt is not overwritten by A.txt');
+      ok(r.cmp.errors.some(e => /neither is synchronized/.test(e.message)), 'the clash is reported, neither name synchronized');
+    }
+  }
+
+  // (e7) A checksum list written with another algorithm was emptied by a run
+  //      that only deleted something on the OTHER side.
+  {
+    const { L, R } = scratch();
+    write(L, 'clip.mov', 'data', Date.now() - DAY);
+    const list = '# syncto checksum list\n# algorithm: xxh128\n0123456789abcdef0123456789abcdef  clip.mov\n';
+    write(L, 'syncto-checksums.txt', list);
+    write(R, 'clip.mov', 'data', Date.now() - DAY);
+    write(R, 'stray.txt', 'x');
+    const job = makeJob(L, R, { sync: { variant: 'mirror', writeChecksumList: true } });
+    await runPair(job);
+    eq(read(L, 'syncto-checksums.txt'), list, 'the source list is left untouched');
+  }
+
+  // (e8) The same folder named two ways in one job (symlink, other spelling):
+  //      the second lock took over the first, and the run stopped itself.
+  {
+    const { acquireAll } = require('../src/main/core/lock');
+    const { dir, L } = scratch();
+    fs.symlinkSync(L, path.join(dir, 'Lalias'));
+    const nfs = new NativeFs(); let lost = null;
+    const locks = await acquireAll([{ fs: nfs, path: L }, { fs: nfs, path: path.join(dir, 'Lalias') }],
+      { onLost: r => { lost = r; }, timing: { beatMs: 100, detectMs: 60000 } });
+    await new Promise(r => setTimeout(r, 400));
+    eq(lost, null, 'a folder this run already holds is shared, not taken over');
+    eq(locks.lost(), null, 'and no lock is lost');
+    await locks.release();
+    ok(!fs.existsSync(path.join(L, '.syncto.lock')), 'and the lock is released at the end');
+  }
+
+  // (e9) History carry-over (0.8.6): only when neither folder has a session
+  //      under the new paths.
+  {
+    const { dir, L: A, R: B } = scratch();
+    const C = path.join(dir, 'C');
+    const T = Date.now() - DAY;
+    write(A, 'K.txt', 'keep me', T); write(A, 'other.txt', 'o', T);
+    const job = twoPairJob([{ left: A, right: B }], 'twoWay');
+    await multiRun(job);
+    fs.renameSync(B, C);
+    fs.unlinkSync(path.join(A, 'K.txt'));
+    job.pairs = [{ left: A, right: C, was: { left: A, right: B } }];
+    await multiRun(job);
+    const nfs = new NativeFs();
+    const doc = await dbMod.readDb(nfs, C);
+    delete doc.sessions[dbMod.pairIdFor(null, A, C)];
+    await dbMod.writeDb(nfs, C, doc);
+    write(C, 'K.txt', 'keep me', T);
+    await multiRun(job);
+    eq(read(C, 'K.txt'), 'keep me', 'a restored file is not deleted on the strength of an old session');
+  }
+
+  // (e10) Cancelled before the read-back: the copies are not recorded as
+  //       synchronized.
+  {
+    const { L, R } = scratch();
+    write(L, 'a.mov', Buffer.alloc(1 << 20, 3)); write(L, 'b.mov', Buffer.alloc(1 << 20, 4));
+    const job = makeJob(L, R, { sync: { variant: 'twoWay' } });
+    const s = new Session(); const token = { cancelled: false, paused: false };
+    await s.compare(job, { token });
+    const r = await s.sync(job, { token, appVersion: 'test', onProgress: p => { if (p.pass === 'verify') token.cancelled = true; } });
+    await s.close();
+    const d = await dbMod.readDb(new NativeFs(), L);
+    const sess = d && Object.values(d.sessions)[0];
+    ok(r.cancelled, 'the run was cancelled during the read-back');
+    ok(!sess || !Object.values(sess.items).some(e => e.sy), 'no unverified copy is recorded as synchronized');
+  }
+
+  // (e11) Progress: never past 100 %, ends at 100 %, never backwards.
+  {
+    // Correct dates only, contents different: compared then copied.
+    const { L, R } = scratch();
+    write(L, 'a.bin', Buffer.alloc(2 << 20, 1), Date.now());
+    write(R, 'a.bin', Buffer.alloc(2 << 20, 2), Date.now() - DAY);
+    const job = makeJob(L, R, { sync: { variant: 'mirror', fixDatesOnly: true } });
+    let max = 0, maxPass = 0;
+    await runWith(job, { onProgress: p => {
+      if (p.phase !== 'sync' || !p.bytesTotal) return;
+      max = Math.max(max, p.bytesDone / p.bytesTotal);
+      if (p.passBytesTotal) maxPass = Math.max(maxPass, p.passBytesDone / p.passBytesTotal);
+    } });
+    ok(max <= 1.0001 && maxPass <= 1.0001, 'Correct dates only does not count a file twice');
+  }
+  {
+    // A retried copy takes its first attempt back.
+    const { L, R } = scratch();
+    write(L, 'a.mov', Buffer.alloc(4 << 20, 3));
+    const job = makeJob(L, R, { sync: { variant: 'mirror', retryCount: 2, retryDelayMs: 1 } });
+    const orig = NativeFs.prototype.rename; let n = 0;
+    NativeFs.prototype.rename = async function (a, b) {
+      if (a.endsWith('.syncto_tmp') && n++ < 2) { const e = new Error('EBUSY'); e.code = 'EBUSY'; throw e; }
+      return orig.call(this, a, b);
+    };
+    let max = 0, last = null;
+    try {
+      const s = new Session(); const token = { cancelled: false };
+      await s.compare(job, { token });
+      await s.sync(job, { token, appVersion: 'test', onProgress: p => {
+        if (p.phase !== 'sync' || !p.bytesTotal) return;
+        max = Math.max(max, p.bytesDone / p.bytesTotal); last = p;
+      } });
+      await s.close();
+    } finally { NativeFs.prototype.rename = orig; }
+    ok(max <= 1.0001, 'retries do not push the ring past 100 %');
+    ok(last && Math.abs(last.bytesDone - last.bytesTotal) < 1, 'and it ends at 100 %');
+  }
+  {
+    // Read-back off (a server): the TOTAL ring used to stop at 50 %.
+    const { L, R } = scratch();
+    write(L, 'a.bin', Buffer.alloc(1 << 20, 7));
+    const job = twoPairJob([{ left: L, right: R }], 'mirror'); job.sync.verifyRemote = false;
+    const m = new MultiSession(); const token = { cancelled: false };
+    await m.compare(job, { token });
+    m.sessions[0].right.kind = 'sftp';
+    let last = null, prev = 0, backwards = false;
+    await m.sync(job, { token, onProgress: p => {
+      if (p.phase !== 'sync' || !p.bytesTotal) return;
+      const f = p.bytesDone / p.bytesTotal; if (f + 1e-9 < prev) backwards = true; prev = f; last = p;
+    } });
+    await m.close();
+    ok(last && Math.abs(last.bytesDone - last.bytesTotal) < 1, 'without read-back the whole-run ring still ends at 100 %');
+    ok(!backwards, 'and never goes backwards');
+  }
+  {
+    // A run that only deletes moves too.
+    const { L, R } = scratch();
+    write(R, 'x.txt', 'x'); write(R, 'y.txt', 'y');
+    const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+    let last = null;
+    await runWith(job, { onProgress: p => { if (p.phase === 'sync' && p.itemsTotal) last = p; } });
+    ok(last && last.itemsTotal === 2 && last.itemsDone === 2, 'a run that only deletes counts its items');
+    const app = fs.readFileSync(path.join(root, 'src/renderer/app.js'), 'utf8');
+    ok(/p\.itemsTotal > 0 \? \(p\.itemsDone \/ p\.itemsTotal\) \* 100/.test(app), 'and the ring follows them when there are no bytes');
+  }
+
+  // (e12) A checksum list below the root belongs to a nested or overlapping
+  //       job: tried as a user file during this review, an outer MIRROR then
+  //       deleted it at every other run. It stays out of the comparison.
+  {
+    const { L, R } = scratch();
+    write(R, 'sub/syncto-checksums.txt', 'abc  a.mov\n'); write(R, 'sub/a.mov', 'v'); write(L, 'sub/a.mov', 'v');
+    fs.utimesSync(path.join(R, 'sub/a.mov'), fs.statSync(path.join(L, 'sub/a.mov')).atime, fs.statSync(path.join(L, 'sub/a.mov')).mtime);
+    await runPair(makeJob(L, R, { sync: { variant: 'mirror' } }));
+    ok(exists(R, 'sub/syncto-checksums.txt'), 'an outer MIRROR leaves the nested job\'s checksum list alone');
+  }
+
+  // ── Security ───────────────────────────────────────────────────────────────
+  // (s1) A Windows network path in a job is not touched when the job opens:
+  //      Windows would connect and present the user's login to that host.
+  {
+    const { isUncPath } = require('../src/main/core/volume');
+    ok(isUncPath('\\\\attacker\\x', 'win32') && isUncPath('//host/share', 'win32') &&
+       isUncPath('\\\\?\\UNC\\h\\s', 'win32'), 'network paths are recognised on Windows');
+    ok(!isUncPath('\\\\?\\C:\\x', 'win32') && !isUncPath('C:\\x', 'win32') && !isUncPath('\\\\attacker\\x', 'darwin'),
+       'a long local path is not one, nor anything on a Mac');
+    const { checkJobPaths } = require('../src/main/core/session');
+    const orig = fs.promises.lstat; let touched = 0;
+    fs.promises.lstat = async p => { if (/attacker/.test(String(p))) touched++; return orig(p); };
+    let res;
+    try { res = await checkJobPaths({ pairs: [{ left: '\\\\attacker\\share\\x', right: '/tmp' }] }, { platform: 'win32' }); }
+    finally { fs.promises.lstat = orig; }
+    eq(touched, 0, 'opening a job does not look at a network path');
+    eq(res, [], 'and reports nothing about it');
+    const main = fs.readFileSync(path.join(root, 'src/main/main.js'), 'utf8');
+    ok(/'folder-exists', async \(_, p\) => \{\s*if \(isUncPath\(p\)\) return true;/.test(main) &&
+       /'disk-free', async \(_, p\) => \{\s*if \(isUncPath\(p\)\) return null;/.test(main),
+       'nor does the red light of a path field, nor the free-space readout');
+  }
+
+  // (s2) A password saved for nas:22 is not sent to nas:2222.
+  {
+    const { parseLocation } = require('../src/main/fs/afs');
+    const creds = { 'admin@nas.local': { password: 'pw22' } };
+    eq(parseLocation('sftp://admin@nas.local:2222/x', creds).password, '', 'not to another port of the same host');
+    eq(parseLocation('sftp://admin@nas.local/x', creds).password, 'pw22', 'still to port 22');
+    eq(parseLocation('sftp://admin@nas.local:2222/x', { 'admin@nas.local:2222': { password: 'pw2222' } }).password, 'pw2222',
+       'and to the port it was saved for');
+  }
+
+  // (s3) A crafted .syncto.db no longer exhausts memory.
+  {
+    const zlib = require('zlib');
+    const { dir } = scratch();
+    const body = '{"format":"syncto-db","sessions":{"x":{"items":[' + '{},'.repeat(20e6) + '{}]}}}';
+    fs.writeFileSync(path.join(dir, '.syncto.db'), zlib.gzipSync(body, { level: 9 }));
+    let damaged = '';
+    const r = await dbMod.readDb(new NativeFs(), dir, m => { damaged = m; });
+    eq(r, null, 'a file that expands far more than a database is refused');
+    ok(/damaged/.test(damaged), 'and reported as damaged');
+    let noise = '';
+    for (let i = 0; i < 160000; i++) noise += '{"a":"' + Math.random().toString(36).slice(2, 8) + '"},';
+    fs.writeFileSync(path.join(dir, '.syncto.db'), zlib.gzipSync('{"format":"syncto-db","sessions":{"x":{"items":[' + noise + '{}]}}}'));
+    damaged = '';
+    const r2 = await dbMod.readDb(new NativeFs(), dir, m => { damaged = m; });
+    ok(r2 === null && /structure/.test(damaged), 'so is one made of far more objects than a database holds');
+    const big = {}; for (let i = 0; i < 20000; i++) big['A001/C' + i + '.MXF'] = { t: 'f', v: 'timeSize', lm: 1e12 + i, ls: 1e6 + i, rm: 1e12 + i, rs: 1e6 + i, sy: 1 };
+    await dbMod.writeDb(new NativeFs(), dir, { format: 'syncto-db', version: 1, sessions: { x: { items: big } } });
+    const r3 = await dbMod.readDb(new NativeFs(), dir);
+    eq(r3 && Object.keys(r3.sessions.x.items).length, 20000, 'a real database still reads');
+  }
+
+  // (s4) A symbolic link planted in the destination: nothing is written
+  //      through it, outside the chosen folder.
+  {
+    const { dir, L, R } = scratch();
+    const OUT = path.join(dir, 'OUTSIDE'); fs.mkdirSync(OUT);
+    write(L, 'sub/pwned.txt', 'x');
+    fs.symlinkSync(OUT, path.join(R, 'sub'));
+    const r = await runPair(makeJob(L, R, { sync: { variant: 'mirror' } }));
+    eq(fs.readdirSync(OUT), [], 'nothing lands outside the destination');
+    ok(r.run.errors.some(e => /is a link on this side/.test(e.message)), 'and the link is reported');
+  }
+
+  // (s5) Environment variables are not expanded in a server address.
+  {
+    const { parseLocation } = require('../src/main/fs/afs');
+    process.env.SYNCTO_TEST_SECRET = 'leaked';
+    eq(parseLocation('sftp://u@%SYNCTO_TEST_SECRET%.example.org/%SYNCTO_TEST_SECRET%').host,
+       '%SYNCTO_TEST_SECRET%.example.org', 'not in the host');
+    ok(!/leaked/.test(parseLocation('sftp://u@h/%SYNCTO_TEST_SECRET%').path), 'nor in the remote path');
+    eq(parseLocation('/tmp/%SYNCTO_TEST_SECRET%').path, '/tmp/leaked', 'local paths keep them');
+    delete process.env.SYNCTO_TEST_SECRET;
+  }
+
+  // (s6) "Reveal" shows, never opens; the open-path channel is gone.
+  {
+    const main = fs.readFileSync(path.join(root, 'src/main/main.js'), 'utf8');
+    const pre  = fs.readFileSync(path.join(root, 'src/main/preload.js'), 'utf8');
+    ok(!/'open-path'/.test(pre) && !/ipcMain\.handle\('open-path'/.test(main), 'no channel opens a path any more');
+    ok(/if \(r\.fallback\) \{ shell\.showItemInFolder\(r\.fallback\);/.test(main), 'reveal falls back to showing the folder');
+  }
+
+  // (s8) Files named like built-in properties synchronize in 2 WAYS.
+  {
+    const { L, R } = scratch();
+    const names = ['__proto__', 'constructor', 'toString', 'valueOf', 'hasOwnProperty'];
+    write(L, 'seed.txt', 'a database exists before these names appear');
+    const job = makeJob(L, R, { sync: { variant: 'twoWay' } });
+    await runPair(job);
+    for (const n of names) write(L, n, n);
+    const s = new Session(); const cmp = await s.compare(job, { token: {} }); await s.close();
+    eq(cmp.stats.conflicts, 0, 'no conflict for constructor, __proto__ and friends');
+    await runPair(job);
+    ok(names.every(n => exists(R, n)), 'and they are all copied');
+    const s2 = new Session(); const cmp2 = await s2.compare(job, { token: {} }); await s2.close();
+    eq(cmp2.stats.filesToProcess + cmp2.stats.conflicts, 0, 'and stay in sync at the next run');
+  }
+
+  // (s9) A checksum list is read up to a sane size.
+  {
+    const { readText } = require('../src/main/core/session');
+    const fake = { stat: async () => ({ type: 'file', size: 4 * 1024 * 1024 * 1024 }), createReadStream: () => { throw new Error('read'); } };
+    let err = null;
+    try { await readText(fake, '/x/syncto-checksums.txt'); } catch (e) { err = e; }
+    ok(err && /larger than/.test(err.message), 'a 4 GB "checksum list" is not read');
+  }
+
+  // ── Second pass (verification of the fixes above) ──────────────────────────
+  // (v1) A move does not go through a link planted in the destination either.
+  for (const variant of ['mirror', 'twoWay']) {
+    const { dir, L, R } = scratch();
+    const OUT = path.join(dir, 'outside'); fs.mkdirSync(OUT);
+    write(L, 'old/clip.mov', Buffer.alloc(8192, 7), Date.now() - DAY);
+    const job = makeJob(L, R, { sync: { variant } });
+    await runPair(job);
+    fs.symlinkSync(OUT, path.join(R, 'newdir'));
+    fs.mkdirSync(path.join(L, 'newdir'));
+    fs.renameSync(path.join(L, 'old/clip.mov'), path.join(L, 'newdir/clip.mov'));
+    await runPair(job);
+    eq(fs.readdirSync(OUT), [], `${variant}: a moved file is not renamed into a link's target`);
+    ok(exists(R, 'old/clip.mov'), `${variant}: the backup copy stays where it was`);
+  }
+
+  // (v2) Nested or overlapping pairs: a target another pair has just written,
+  //      identical to the source, is done — not "a file appeared".
+  {
+    const { L, R } = scratch();
+    const T = Date.now() - DAY;
+    write(L, 'top.txt', 'top', T); write(L, 'sub/a.mov', 'aaaa', T); write(L, 'sub/b.mov', 'bbbb', T);
+    const job = twoPairJob([{ left: path.join(L, 'sub'), right: path.join(R, 'sub') }, { left: L, right: R }], 'mirror');
+    const a = await multiRun(job);
+    eq(a.res.errors.map(e => e.message), [], 'no error when the overlap has already written the file');
+    ok(a.res.notes.some(n => /already at the destination/.test(n)), 'it is said in a note');
+    eq(read(R, 'sub/a.mov'), 'aaaa', 'and the file is there');
+  }
+
+  // (v3) A FAT drive read across a daylight-saving change: the same file, one
+  //      hour apart, is not "changed since the comparison".
+  {
+    const { L, R } = scratch();
+    write(L, 'a.txt', 'new from L');
+    write(R, 'a.txt', 'old', Date.now() - DAY);
+    const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+    const s = new Session();
+    await s.compare(job, { token: {} });
+    const p = path.join(R, 'a.txt'); const st = fs.statSync(p);
+    fs.utimesSync(p, st.atime, new Date(st.mtimeMs + 3600000));
+    const run = await s.sync(job, { token: {}, appVersion: 'test' });
+    await s.close();
+    eq(read(R, 'a.txt'), 'new from L', 'a one-hour shift is the same file: it is replaced as planned');
+    eq(run.errors.length, 0, 'without error');
+  }
+
+  // (v4) Two lanes asking at once share one trash probe.
+  {
+    const { SyncRunner } = require('../src/main/core/sync');
+    const { dir } = scratch();
+    const nfs = new NativeFs(); let probes = 0;
+    const fake = Object.create(SyncRunner.prototype);
+    fake.side = () => ({ fs: nfs, path: dir });
+    fake.trashItem = async (f, p) => { probes++; await new Promise(r => setTimeout(r, 5)); try { fs.unlinkSync(p); return true; } catch (_) { return false; } };
+    const r = await Promise.all([fake.trashWorks('left'), fake.trashWorks('left')]);
+    eq(r, [true, true], 'both get the same answer');
+    eq(probes, 1, 'from a single probe');
+  }
+
+  // (v5) An unreadable item blocks only when it matters.
+  {
+    const { L, R } = scratch();
+    write(L, 'clip.mov', 'precious', Date.now() - DAY); write(L, '.DS_Store', 'x'); write(L, 'scratch.tmp', 't');
+    const job = makeJob(L, R, { sync: { variant: 'mirror' }, compare: { excludeFilter: '*.tmp' } });
+    await runPair(job);
+    const orig = fs.promises.lstat;
+    fs.promises.lstat = async p => {
+      if (/(\.DS_Store|scratch\.tmp)$/.test(String(p))) { const e = new Error('EBUSY'); e.code = 'EBUSY'; throw e; }
+      return orig(p);
+    };
+    let cmp;
+    try { const s = new Session(); cmp = await s.compare(job, { token: {} }); await s.close(); }
+    finally { fs.promises.lstat = orig; }
+    eq(cmp.errors.filter(e => e.fatal).length, 0, 'an unreadable .DS_Store or filtered file does not block the run');
+  }
+
+  // (v6) A pair that fails as a whole still lets the TOTAL ring end at 100 %.
+  {
+    const { dir, L, R } = scratch();
+    write(L, 'a.bin', Buffer.alloc(1 << 20, 1));
+    const L2 = path.join(dir, 'L2'), R2 = path.join(dir, 'R2'); fs.mkdirSync(L2); fs.mkdirSync(R2);
+    write(L2, 'b.bin', Buffer.alloc(1 << 20, 2));
+    const job = twoPairJob([{ left: L, right: R }, { left: L2, right: R2 }], 'mirror');
+    const m = new MultiSession(); const token = { cancelled: false };
+    await m.compare(job, { token });
+    const s2 = m.sessions[1]; const orig = s2.sync.bind(s2);
+    s2.sync = async () => { throw new Error('the server went away'); };
+    let last = null;
+    await m.sync(job, { token, onProgress: p => { if (p.phase === 'sync' && p.bytesTotal) last = p; } });
+    s2.sync = orig; await m.close();
+    ok(last && Math.abs(last.bytesDone - last.bytesTotal) < 1, 'the total ends at 100 % even when a pair failed');
+  }
+
+  // (v7) A real database that compresses very well (an image sequence on a
+  //      server: no file ids, identical dates) still loads.
+  {
+    const { dir } = scratch();
+    const items = {};
+    for (let i = 0; i < 60000; i++) items['SEQ/frame_' + String(i).padStart(7, '0') + '.exr'] = { t: 'f', v: 'timeSize', lm: 1.7e12, ls: 52428800, rm: 1.7e12, rs: 52428800, sy: 1 };
+    await dbMod.writeDb(new NativeFs(), dir, { format: 'syncto-db', version: 1, sessions: { x: { items } } });
+    const r = await dbMod.readDb(new NativeFs(), dir);
+    eq(r && Object.keys(r.sessions.x.items).length, 60000, 'an image-sequence database is not mistaken for a crafted one');
+  }
+
+  // ── Interface ──────────────────────────────────────────────────────────────
+  {
+    const app  = fs.readFileSync(path.join(root, 'src/renderer/app.js'), 'utf8');
+    const html = fs.readFileSync(path.join(root, 'src/renderer/index.html'), 'utf8');
+    const fnBody = name => { const i = app.indexOf(name); return i < 0 ? '' : app.slice(i, app.indexOf('\n}\n', i)); };
+    const prog = app.slice(app.indexOf('API.onSyncProgress('), app.indexOf('// ── The passes of a run'));
+
+    // (u1) The last event of a run (locks being released) carries no figures:
+    //      it no longer resets the strip to 0 %, "undefined / undefined".
+    ok(/if \(p\.bytesTotal == null && p\.itemsTotal == null && p\.filesTotal == null\) \{[\s\S]{0,400}return;\s*\}/.test(prog),
+       'a status-only event updates the line and the title, nothing else');
+    ok(/renderSteps\(p\.pass, state\.lastWillVerify\)/.test(prog) && /if \(p\.willVerify != null\) state\.lastWillVerify = p\.willVerify;/.test(prog),
+       'and does not bring back a "Verify" step on a run without read-back');
+    ok(/p\.pass === 'cleanup' \? 100/.test(prog), 'the pass ring is full during the final tidy-up');
+
+    // (u2) Auto-sync shares the start of a run with the manual path.
+    const runUi = fnBody('function startRunUi(');
+    ok(/setStatLabels\('Files', 'Left to copy', 'Speed', 'Total ETA'\)/.test(runUi) &&
+       /s-del-box/.test(runUi) && /classList\.remove\('spin'\)/.test(runUi), 'one start for every run: labels, Removed tile, no spinning ring');
+    const auto = fnBody('async function autoRun(');
+    ok(/startRunUi\(/.test(auto) && /startCompareUi\(/.test(auto), 'auto-sync uses it, and the shared comparison start too');
+    ok(/startRunUi\(/.test(fnBody('async function doSync(')), 'and so does the manual run');
+
+    // (u3) Nothing changes the job or starts something during a run.
+    ok(/if \(state\.busy && m\.action !== 'job-save' && m\.action !== 'job-save-as'\) return;/.test(app),
+       'the menu and its shortcuts are inert during a run, Save excepted');
+    ok(/case 'sync': if \(state\.stats && !\$\('btn-sync'\)\.disabled\) askConfirm\(\)/.test(app), 'F9 does what the button can do, no more');
+    for (const f of ['function swapAllPairs(', 'async function newJob(', 'async function openJob(', 'async function openRecent('])
+      ok(/if \(state\.busy\) return;/.test(fnBody(f).slice(0, 200)), `${f.replace(/^(async )?function /, '').replace('(', '')} refuses during a run`);
+    ok(/if \(e\.key !== ' '\) return;\s*if \(state\.busy\) return;/.test(app), 'Space too');
+
+    // (u4) A comparison always starts from 0 %.
+    const cmpUi = fnBody('function startCompareUi(');
+    ok(/resetCompareProgress\(\)/.test(cmpUi), 'every comparison resets its progress (CHECKING started at 99 %)');
+    ok(/startCompareUi\('CHECKING'\)/.test(fnBody('async function doCompareQuiet(')), 'the check after a run included');
+
+    // (u5) PAUSED is not undone by a late event.
+    ok(/const paused = !!\(p\.paused \|\| state\.paused\);/.test(prog), 'the pause button is the authority on PAUSED');
+
+    // (u6) An error card does not keep the previous "Compared again" line.
+    ok(/setRecheck\(null\)/.test(fnBody('function showError(')), 'showError clears it');
+
+    // (u7) The confirmation does not say "trash" and "no trash" for the same items.
+    ok(/except in the folders below, which have none/.test(app), 'the trash line is corrected when a folder has none');
+
+    // (u8) Charter: disabled buttons look disabled, conflicts are orange,
+    //      ERRORS is red only when there is one, the top bar uses charter colours.
+    ok(/\.m-btn:disabled,\.m-btn:disabled:hover\{opacity:\.42;/.test(html), 'a disabled button is dimmed');
+    ok(/\.arr-cfl\{color:var\(--orange\);\}/.test(html) && /chip\('o', 'conflicts'/.test(app), 'conflicts are orange, in the grid and in their chip');
+    ok(/\.sval\.serr\.zero\{color:var\(--text\);\}/.test(html) && /classList\.toggle\('zero', !p\.errors\)/.test(prog), 'ERRORS is red only above zero');
+    ok(!/#00ffaa|#7bc8ff/.test(app), 'no off-charter colour in the run strip');
+    ok(/prefers-reduced-motion:reduce\)\{\s*\.ring-fill\.spin\{animation:none;\}\s*\.tbtn\.stop\{animation:none;\}/.test(html),
+       '"reduce motion" stops the spinning ring and CANCEL\'s glow');
+
+    // (u9) Counts: separators, and short forms in the narrow Overview column.
+    const fc = new Function(fnBody('function fmtCount(') + '\n}\nreturn fmtCount;')();
+    eq([fc(12345), fc(123456), fc(1234567), fc(123456, true)], ['12,345', '123k', '1.2M', '123,456'], 'counts read 12,345 / 123k / 1.2M');
+    ok(/<div class="ov-items" data-tip="\$\{g\.items\.toLocaleString\('en-US'\)\} items">\$\{fmtCount\(g\.items\)\}<\/div>/.test(app),
+       'the Overview shows the short form, the exact count on hover');
+
+    // (u10) Escape leaves the Filter window without applying.
+    ok(/'ov-filter'  : cancelFilter,/.test(app) && /if \(typeof ESC_CLOSE\[ov\.id\] === 'function'\) \{ ESC_CLOSE\[ov\.id\]\(\); continue; \}/.test(app) &&
+       !/'ov-filter' : 'filter-close'/.test(app) && /\$\('ov-filter'\)\.classList\.remove\('open'\);/.test(fnBody('function cancelFilter(')),
+       'Escape in Filter restores the patterns and closes, no comparison, wherever the focus is');
+
+    // (u11) The verify ring starts in its own colour.
+    ok(/\$\('vf-ring'\)\.style\.stroke = '';/.test(fnBody('async function doVerify(')), 'not the previous result\'s');
+
+    // (u12) Waiting for a lock: one word, in capitals.
+    const rt = new Function('return ' + fnBody('function runTitle(') + '\n}')();
+    eq(rt('lock', false), 'WAITING', 'the lock wait says WAITING');
+    ok(/state\.runPass = 'lock';/.test(prog), 'and pausing then resuming keeps saying it');
+
+    // (u13) Mode names as on the buttons; the server port keeps its width;
+    //       short windows keep the strip whole.
+    ok(/twoWay: '2 WAYS', mirror: 'MIRROR', update: 'UPDATE', custom: 'CUSTOM'/.test(app), 'mode names as on the buttons');
+    ok(/\.set-row \.srv-row2 input\.portx\{flex:0 0 82px;width:82px;\}/.test(html), 'the port field is narrow again');
+    ok(/@media \(max-height:760px\)\{\s*#app\.running #toolbar\{display:none;\}/.test(html), 'a short window gives the locked toolbar\'s room to the run');
+  }
+
+  // (a1) While auto-sync is armed, the end-of-run action never fires (asked
+  //      by Noar on 11/10/2026): skipped, said, auto-sync left on. Checked
+  //      by running afterRun itself with the DOM and the API stubbed.
+  {
+    const appSrc = fs.readFileSync(path.join(root, 'src/renderer/app.js'), 'utf8').replace(/\u0000/g, '');
+    const at = appSrc.indexOf('async function afterRun(');
+    const src = appSrc.slice(at, appSrc.indexOf('\n}\n', at));
+    const make = (auto, afterSync) => {
+      const calls = [], els = {};
+      const $ = id => (els[id] = els[id] || { textContent: '' });
+      const state = { job: { name: 'j', sync: { afterSync }, autoSync: { enabled: auto } } };
+      const f = new Function('state', '$', 'API', 'isAutoOn', 'runWasClean', 'startAfterCountdown', 'autoStop', 'renderAutoUi', 'persist',
+        src.replace(/^async function afterRun\(/, 'return async function(') + '\n}');
+      const run = f(state, $, { ntfyRun: () => Promise.resolve({ ok: true }) },
+        () => state.job.autoSync.enabled, () => true,
+        a => calls.push('countdown:' + a), () => calls.push('autoStop'), () => {}, () => calls.push('persist'));
+      return { run, calls, els, state };
+    };
+    let t = make(true, 'shutdown');
+    await t.run({ errors: [], counters: {} });
+    eq(t.calls, [], 'auto-sync on: no countdown, auto-sync not stopped');
+    ok(t.state.job.autoSync.enabled === true, 'auto-sync stays armed');
+    ok(/Shut down.*was skipped: auto-sync is on\./.test(t.els['status-note'].textContent), 'the status line says why');
+    t = make(false, 'shutdown');
+    await t.run({ errors: [], counters: {} });
+    eq(t.calls, ['countdown:shutdown'], 'auto-sync off: the countdown starts as before');
+  }
+
+  // ── Electron 44 (0.8.8) ──────────────────────────────────────────────────
+  {
+    const root = path.join(__dirname, '..');
+    const main = fs.readFileSync(path.join(root, 'src/main/main.js'), 'utf8');
+    const yml  = fs.readFileSync(path.join(root, 'electron-builder.yml'), 'utf8');
+    const pkg  = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+    const major = parseInt(String(pkg.devDependencies.electron).replace(/^[^0-9]*/, ''), 10);
+
+    // (x1) Since Electron 44, clipboard.writeText returns a promise: not
+    //      awaited, a refusal escapes the try and the window says "copied".
+    ok(/ipcMain\.handle\('copy-text', async \(/.test(main) && /await clipboard\.writeText\(s\)/.test(main),
+       'the copy waits for the clipboard and reports a refusal');
+
+    // (x2) The Mac floor follows Electron: 44 needs macOS 13. A lower
+    //      minimumSystemVersion lets an older Mac install an app that cannot start.
+    const minMac = (yml.match(/minimumSystemVersion:\s*"(\d+)/) || [])[1];
+    ok(major >= 44, 'Electron 44 or later');
+    eq(minMac, major >= 44 ? '13' : minMac, 'the .dmg asks for macOS 13, as Electron 44 does');
   }
 }
 
@@ -5763,6 +6576,8 @@ async function testRequest083() {
   testWindowTruth,
   testLinux,
       testRequest083,
+      testReview088,
+      testLongNames088,
     ];
     const only = (process.env.SYNCTO_ONLY || '').split(',').map(x => x.trim()).filter(Boolean);
     // Each section on its own: an exception used to end the whole suite, so

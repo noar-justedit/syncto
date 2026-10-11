@@ -46,6 +46,21 @@ const VERSION = 1;
 // compresses to about 6), and a file bigger than that is not a database.
 const MAX_DB_BYTES  = 16 * 1024 * 1024;
 const MAX_DB_INFLATED = 256 * 1024 * 1024;
+// A real one expands 5 to 15 times; an image sequence on a server (no file
+// ids, identical dates) nearly 50. The structure check below is what stops a
+// crafted file; this only bounds the work before it.
+const MAX_DB_RATIO = 100;
+
+// More than one object or array every 20 characters: no database looks like
+// that (one per ~150), a crafted file meant to exhaust memory does.
+function tooDense(text) {
+  let n = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c === 123 || c === 91) n++;
+  }
+  return n * 20 > text.length;
+}
 
 function streamToBuffer(stream, limit) {
   return new Promise((resolve, reject) => {
@@ -98,7 +113,14 @@ async function readDb(fsx, basePath, onDamaged) {
   try {
     // Compressed data expands: a megabyte of zeros is gigabytes of nothing,
     // and this runs in the process that is holding the folder locks.
-    const json = JSON.parse((await gunzip(buf, { maxOutputLength: MAX_DB_INFLATED })).toString('utf8'));
+    // (0.8.8) Two more limits. The sizes alone were not enough: 250 KB of
+    // gzip expanding into "{},{},{}…" made 85 million objects and killed the
+    // app at every comparison. A real database expands about 8 times and holds
+    // one object per ~150 characters; anything far from that is not one.
+    const limit = Math.min(MAX_DB_INFLATED, Math.max(buf.length * MAX_DB_RATIO, 1024 * 1024));
+    const text = (await gunzip(buf, { maxOutputLength: limit })).toString('utf8');
+    if (text.length > 1024 * 1024 && tooDense(text)) throw new Error('its structure is not that of a syncto database');
+    const json = JSON.parse(text);
     if (json.format !== FORMAT) {
       if (onDamaged) onDamaged(`${p} was written by another version of syncto.`);
       return null;
@@ -145,7 +167,10 @@ class SyncDb {
   constructor(session) {
     this.session = session || null;
     this.available = !!session;
-    this.items = (session && session.items) || {};
+    // (0.8.8) Without a prototype: files named "constructor", "toString" or
+    // "__proto__" matched the built-in properties of a plain object, were never
+    // found as themselves and stayed conflicts for ever.
+    this.items = Object.assign(Object.create(null), (session && session.items) || {});
   }
 
   // entry: { type, cmpVar, left:{mtime,size,id}, right:{mtime,size,id} }
@@ -217,7 +242,7 @@ async function savePairDb(left, right, pairId, session) {
 //            for one run would erase the history of everything it hid, and
 //            loosening it again would turn every hidden file into a conflict.
 function buildSession(nodes, applied, prevDb, cmpVariant, leftPath, rightPath, keepRel) {
-  const items = {};
+  const items = Object.create(null);   // see SyncDb (0.8.8)
   const OPN = require('./compare').OP;
   const seen = keepRel && prevDb && prevDb.items ? new Set() : null;
 

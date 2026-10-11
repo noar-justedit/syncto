@@ -4,6 +4,111 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.8.8] — 2026-10-11
+
+A complete review of the code, and everything it found that could lose data,
+take a wrong decision, leak something, or mislead on screen. Also: long file
+names, the end-of-run action and auto-sync, and Electron 44 (macOS 13 or
+later).
+
+### Fixed — data and decisions
+
+- 🔴 **A file that could not be read for an instant during the comparison was
+  taken as absent**: MIRROR then deleted the backup copy, 2 WAYS propagated a
+  "deletion". It is asked again; if it still cannot be read the folder is
+  reported and the run blocked (unless the item is filtered out or system
+  litter).
+- 🔴 **Pairs sharing a folder could lose an edit everywhere.** Before replacing
+  or deleting a file, syncto now checks it is still the one the comparison
+  saw; a file changed since is left alone and reported. A file already
+  identical (written meanwhile by an overlapping pair or job) counts as done.
+- 🔴 **A file the recycle bin refused was deleted for good**, with nothing said
+  (and a version about to be replaced was lost on the retry). It is kept and
+  reported.
+- **A new file that got a deleted file's id back was taken for a move**: the
+  destination kept the old content under the new name. A move now also needs
+  the same date and an unchanged copy on the other side.
+- **Comparison by content, 2 WAYS / UPDATE**: a difference neither side made
+  (one copy damaged) is a conflict instead of being ignored at every run.
+- **Two names differing only by case** (Linux, servers): neither is
+  synchronized any more (MIRROR overwrote the backup of one with the other).
+- A checksum list written with another algorithm is no longer emptied; lists
+  are rewritten only on the side that changed.
+- The same folder reached under two spellings in one job no longer stops the
+  run ("lock lost").
+- The history of a re-pointed pair is carried over only when neither folder
+  has one under the new paths.
+- A run cancelled before its read-back no longer records the copies as
+  synchronized.
+- Files named `constructor`, `__proto__`, `toString`… synchronize in 2 WAYS.
+- 🔴 **Long file names failed with "ENOENT: no such file or directory"** (on
+  Windows; "name too long" elsewhere). Every filesystem caps one name at 255
+  characters, and the `.syncto_tmp` suffix used while a file is written pushed
+  a 246-character name past it. The temporary name is now shortened when it
+  has to be, so any name that fits at the destination is copied under that
+  very name. Same fix for timestamped revisions and the SFTP parking name.
+- **A name that fits nowhere is no longer refused.** A name over 255 bytes or
+  255 characters (an Arabic title of 130 letters, say: two bytes each) is
+  written at the destination under a shortened name,
+  `<beginning of the name>~<8 characters>.<ext>`, and the run says so in its
+  notes, once. The 8 characters come from the full name, so every later run
+  pairs the two: updates go to the short copy, 2 WAYS brings its edits back
+  to the original, MIRROR deletes it with the original. Renaming the original
+  ends it. Folders are handled the same way.
+
+### Fixed — security
+
+- Opening a job received from someone else no longer makes Windows connect to
+  a network path it names (which presents your login to that machine).
+- A password saved for a server on port 22 is no longer sent to another port
+  of the same server.
+- A crafted `.syncto.db` placed in a synchronized folder can no longer exhaust
+  memory; checksum lists are read up to a sane size.
+- Nothing is written through a symbolic link sitting in the destination
+  (files, folders, moves) — it could put files outside the chosen folder.
+- Environment variables are no longer expanded in server addresses.
+- *Reveal* shows a folder instead of opening it (a folder named Something.app
+  would launch); an unused "open this path" channel was removed.
+
+### Changed — auto-sync
+
+- **The end-of-run action (quit, sleep, shut down) never fires while auto-sync
+  is on**, whether the run was started by auto-sync or by hand. Auto-sync stays
+  on and the status line says the action was skipped. Until now the first
+  clean cycle turned auto-sync off and shut the machine down.
+
+### Fixed — window
+
+- The end of a run no longer drops the strip to 0 % / "undefined".
+- Auto-sync runs show the right labels; every comparison starts from 0 %
+  (CHECKING began at 99 %); PAUSED is not undone by a late update; waiting
+  for another machine reads WAITING.
+- Menu shortcuts (⌘T, ⌘N, ⌘O, F9) and Space do nothing during a run.
+- Progress never goes past 100 %, ends at 100 % (also with the read-back off
+  on a server, or a failed pair), counts runs that only delete.
+- Escape in the Filter window leaves without applying; an error card no
+  longer keeps "Compared again" from the previous run; the confirmation no
+  longer says both "trash" and "no trash"; the verify ring starts uncoloured.
+- Charter: disabled buttons look disabled, conflicts are orange (red is for
+  deletions), ERRORS is red only above zero, "reduce motion" also stops the
+  spinning ring and CANCEL's glow.
+- Small windows keep the whole run strip; long file names no longer run under
+  PAUSE / CANCEL; the server port field is narrow again.
+- Counts have thousands separators; the Overview shows 123k with the exact
+  count on hover; mode names are spelt as on their buttons; "Total ETA".
+
+### Changed — platform
+
+- **Electron 43 → 44** (44.7.0, Chromium 152, Node 24.21). One change reached
+  syncto: copying a list (errors, notes, damaged files) now waits for the
+  clipboard, which Electron 44 answers asynchronously, so a refusal is no
+  longer reported as "copied".
+- **macOS 13 (Ventura) or later is required.** Electron 44 does not start on
+  older systems. The disk image used to declare macOS 11, already below what
+  Electron 38 and later need; it now declares 13, so an older Mac refuses it
+  at once instead of installing an application that cannot open.
+  Windows 10 and Linux x64 are unchanged.
+
 ## [0.8.7] — 2026-10-07
 
 Each pass of a run has its own name and its own ring, and a second ring shows
@@ -20,7 +125,7 @@ the whole run.
   each of them; the outer ring runs from start to end. A comparison still shows
   one ring.
 
-## [0.8.6] — 2026-10-05
+## [0.8.6] — 2026-10-05 (never published)
 
 A folder picked again keeps its two-way history, and syncto's own files no
 longer show up in Windows Explorer.

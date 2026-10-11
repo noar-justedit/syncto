@@ -42,6 +42,7 @@ const READ_BLOCK = 512 * 1024;   // SFTP throughput is bounded by the window, no
 const OP_TIMEOUT_MS = 45000;
 
 const { PipelinedReader, PipelinedWriter } = require('./sftp-pipe');
+const { scratchPath } = require('./longname');
 const crypto = require('crypto');
 
 // ── Who is answering on that address ──────────────────────────────────────
@@ -443,7 +444,7 @@ class SftpFs {
     // that window left NOTHING at the destination — the previous version gone,
     // the new one still under its .syncto_tmp name. Move the old file aside
     // instead, and put it back if the rename does not go through.
-    const parked = dst + '.syncto_old';
+    const parked = scratchPath(this, dst, '.syncto_old');   // (0.8.8) short when it must be
     try { await this.unlink(parked); } catch (_) {}
     await this._rawRename(dst, parked);
     try {

@@ -34,7 +34,8 @@
 // SECOND PASS, once every file has been copied — same order as ingesto: copy
 // everything, then read everything back.
 
-const { OP, TEMP_EXT, OLD_EXT, ALWAYS_SKIP, OS_LITTER_FOLDERS, isSyncToInternal, equalContent } = require('./compare');
+const { OP, TEMP_EXT, OLD_EXT, ALWAYS_SKIP, OS_LITTER_FOLDERS, isSyncToInternal, equalContent, CHECKSUM_FILE } = require('./compare');
+const { scratchPath } = require('../fs/longname');
 const { createHasher, hashStream, algoFor } = require('./hash');
 const { assertSafeRel } = require('./relpath');
 const { Versioner, runTimestamp, streamCopy } = require('./versioning');
@@ -265,10 +266,11 @@ class SyncRunner {
   }
   // Anything copied but NOT read back must not be recorded as synchronized:
   // the database is what makes the next run skip a file, so a file whose
-  // proof was never taken has to be looked at again. Cancelling is not a
-  // failure of proof — the run simply ended — so it is left out.
+  // proof was never taken has to be looked at again. (0.8.8) Cancelling
+  // included: a run cancelled before its read-back used to record every copy
+  // as "synchronized", unproven. Left out, those files are simply identical on
+  // both sides at the next comparison, which records them then.
   dropUnproven() {
-    if (this.token && this.token.cancelled) return 0;
     const unproven = (this.toVerify || []).filter(i => !i.ok);
     for (const i of unproven) this.applied.delete(i.rel);
     if (unproven.length) {
@@ -300,6 +302,30 @@ class SyncRunner {
   }
 
   absNode(node, side) { return this.abs(side, this.relOn(node, side)); }
+
+  // (0.8.8) Nothing is written THROUGH a symbolic link. With links excluded
+  // (the default) the comparison never looks inside one, so a link planted in
+  // the destination (sub -> /somewhere/else) made "sub" look absent there:
+  // mkdir went through it and every file landed outside the chosen folder.
+  // Checks the folders between the root and the item (and the item itself
+  // when `inclusive`); folders already checked in this run are not asked again.
+  async assertNoLinkOnTheWay(side, node, inclusive) {
+    const parts = this.relOn(node, side).split('/');
+    const upto = inclusive ? parts.length : parts.length - 1;
+    if (!this._checkedDirs) this._checkedDirs = new Set();
+    const fsx = this.side(side).fs;
+    for (let i = 1; i <= upto; i++) {
+      const rel = parts.slice(0, i).join('/');
+      const key = side + '\u0000' + rel;
+      if (this._checkedDirs.has(key)) continue;
+      const st = await fsx.stat(this.abs(side, rel));
+      if (!st) return;                     // absent: everything below will be created by us
+      if (st.type === 'symlink') {
+        throw new Error(`"${rel}" is a link on this side — nothing is written through it.`);
+      }
+      this._checkedDirs.add(key);
+    }
+  }
 
 
   // Are two files byte-for-byte the same? For "Correct dates only".
@@ -412,7 +438,12 @@ class SyncRunner {
       // Attempted, not succeeded: the ring has to reach the end of the plan
       // even when some files failed, while `done.files` stays the honest
       // count of files that really landed.
-      filesDone: this.done.files + (this.done.failed || 0) + (this.done.dated || 0), filesTotal: this.plan.files,
+      filesDone: this.done.files + (this.done.failed || 0) + (this.done.dated || 0) + (this.done.already || 0), filesTotal: this.plan.files,
+      // (0.8.8) Every operation, copies or not: what the ring falls back on
+      // when there are no bytes to move (a run that only deletes stayed at 0 %).
+      itemsDone: this.done.files + (this.done.failed || 0) + (this.done.dated || 0) + (this.done.already || 0) +
+        (this.done.deleted || 0) + (this.done.folders || 0) + (this.done.moved || 0),
+      itemsTotal: this.plan.files + (this.plan.deletions || 0) + (this.plan.folders || 0) + (this.plan.moves || 0),
       bytesDone: this.done.workBytes, bytesTotal: this.plan.workBytes,
       // What the CURRENT pass has left to move, separately from the ring.
       // The ring counts the copy AND the read-back, so "remaining" over the
@@ -444,6 +475,13 @@ class SyncRunner {
   record(node, ok, extra) {
     const r = Object.assign({ rel: node.rel, op: node.op, type: node.type, ok }, extra || {});
     this.results.push(r);
+    // (0.8.8) Said once, when the item is created there under its short name.
+    const side = extra && extra.side;
+    if (ok && side && node.short === side && !extra.deleted && !(node[side] && node[side].exists)) {
+      const shortName = this.relOn(node, side).split('/').pop();
+      this.notes.push(`Name too long for the ${side} folder: "${node.name}" was saved there as "${shortName}". ` +
+        'syncto keeps the two paired; rename the original to end this.');
+    }
     // A row that is done leaves the list while the run goes on: the window
     // shows what is LEFT to do, emptying as the work lands. A failed row stays.
     if (ok) {
@@ -549,7 +587,8 @@ class SyncRunner {
       const v = this.versionerFor(side);
       if (v) {
         if (isFolder) { await this.rmdirClean(fsx, path); return 'removed'; }
-        await v.archive(fsx, path, rel);
+        // (0.8.8) The name as it is on this side (it may be a shortened one).
+        await v.archive(fsx, path, this.relOn(node, side));
         return 'versioned';
       }
       // No revision folder configured: refuse rather than delete silently.
@@ -568,6 +607,13 @@ class SyncRunner {
       if (fsx.supportsTrash() && this.trashItem) {
         const ok = await this.trashItem(fsx, path);
         if (ok) return 'trashed';
+        // (0.8.8) The trash works on this folder (the probe said so) but
+        // refused THIS file (a very long Windows path, say). The permanent
+        // fallback is for folders announced as having no trash — using it here
+        // deleted the file for good with nothing said, before or after.
+        if (await this.trashWorks(side)) {
+          throw new Error('The recycle bin refused this item, so it was left in place (nothing deleted).');
+        }
       }
       // SFTP and most network shares have no trash.
       if (!this.cfg.permanentFallback) {
@@ -656,7 +702,51 @@ class SyncRunner {
   }
 
   // ── Copy one file ────────────────────────────────────────────────────────
+  // (0.8.8) Throws when the file at `p` on `side` is not what the comparison
+  // recorded for this row. Files this run already wrote are ours and skip it.
+  // Returns 'same' when the target is not what the comparison saw but is
+  // already identical (size and date) to the source about to be copied: an
+  // overlapping pair or job wrote it in the meantime. That is done, not an
+  // error.
+  assertTargetAsCompared(side, n, st, p, srcStat) {
+    if (!st || st.type !== 'file') return null;
+    if (!this._wrote) this._wrote = new Set();
+    if (this._wrote.has(side + '\u0000' + n.rel)) return null;
+    // Same instant, read twice: a FAT drive across a daylight-saving change
+    // reports it one hour apart (it stores local time), 2 s apart at most
+    // otherwise.
+    const sameTime = (a, b) => {
+      const d = Math.abs((a || 0) - (b || 0));
+      return d <= 2000 || Math.abs(d - 3600000) <= 2000;
+    };
+    const seen = n[side] || {};
+    const changed = !seen.exists ||
+      (seen.size != null && st.size !== seen.size) ||
+      (seen.mtime && st.mtime && !sameTime(st.mtime, seen.mtime));
+    if (!changed) return null;
+    if (srcStat && st.size === srcStat.size && srcStat.mtime && sameTime(st.mtime, srcStat.mtime)) return 'same';
+    if (!seen.exists) {
+      throw new Error('A file appeared at the destination since the comparison — not replaced. Compare again.');
+    }
+    throw new Error('This file changed since the comparison — left untouched. Compare again.');
+  }
+
+  // (0.8.8) What one attempt added to the progress figures, taken back when it
+  // fails: a retried file was counted twice, and the ring and "Left to copy"
+  // went past 100 % (0 left) while the copy was still going.
   async copyOne(item, lane) {
+    const acc = { bytes: 0, work: 0, checked: 0 };
+    try {
+      return await this._copyOne(item, lane, acc);
+    } catch (err) {
+      this.done.bytes     = Math.max(0, this.done.bytes - acc.bytes);
+      this.done.workBytes = Math.max(0, this.done.workBytes - acc.work);
+      this.done.checked   = Math.max(0, (this.done.checked || 0) - acc.checked);
+      throw err;
+    }
+  }
+
+  async _copyOne(item, lane, acc) {
     const { n, to, from } = item;
     const srcFs = this.fsFor(from, lane), dstFs = this.fsFor(to, lane);
     const src   = this.absNode(n, from);
@@ -665,7 +755,10 @@ class SyncRunner {
     // will not read back costs CPU and buys nothing.
     const algo  = this.verifies(to) ? algoFor() : null;
     const failSafe = this.cfg.failSafe !== false;
-    const tmp = failSafe ? dst + TEMP_EXT : dst;
+    // (0.8.8) Not always "<name>.syncto_tmp": on a name already close to
+    // 255 characters the suffix alone made the destination refuse the copy
+    // (ENOENT on Windows). The scratch name is shortened when it has to be.
+    const tmp = failSafe ? scratchPath(dstFs, dst, TEMP_EXT) : dst;
 
     this.current = n.rel;
     this.way = to;
@@ -728,6 +821,7 @@ class SyncRunner {
         // the old link may still be there, and symlink() refuses to replace.
         if (await dstFs.exists(dst)) await dstFs.unlink(dst);
       }
+      await this.assertNoLinkOnTheWay(to, n, false);
       await dstFs.mkdir(dstFs.dirname(dst));
       await dstFs.symlink(target, dst);
       // The recreated link carries today's date. Without lutimes the target
@@ -750,6 +844,7 @@ class SyncRunner {
       };
     }
 
+    await this.assertNoLinkOnTheWay(to, n, false);
     await dstFs.mkdir(dstFs.dirname(dst));
 
     // The mirror image of the case above: a real folder sitting where the
@@ -761,6 +856,21 @@ class SyncRunner {
     // there an old version to put aside — which used to cost two round trips
     // per file on a server.
     let existed = await dstFs.stat(dst);
+    // (0.8.8) The plan was made at the comparison. A file at the target that
+    // is not the one the comparison saw (changed since, or appeared since) is
+    // somebody's newer work: another pair of this job sharing the folder, an
+    // edit during a long run. Replacing it silently lost it.
+    if (this.assertTargetAsCompared(to, n, existed, dst, srcStat) === 'same') {
+      // Counted like a file checked by "Correct dates only": nothing written.
+      const size = srcStat.size || 0;
+      this.done.workBytes += 2 * size; acc.work += 2 * size;
+      this.done.checked = (this.done.checked || 0) + 2 * size; acc.checked += 2 * size;
+      return {
+        alreadyThere: true, bytes: 0, hash: null, algo: null,
+        mtime: srcStat.mtime, size: srcStat.size, dstMtime: existed.mtime,
+        srcId: srcStat.id || null, dstId: existed.id || null,
+      };
+    }
     if (existed && existed.type === 'folder') {
       await this.dispose(to, n, true);
       existed = null;
@@ -790,8 +900,17 @@ class SyncRunner {
         b => {
           this.done.workBytes += 2 * b;
           this.done.checked = (this.done.checked || 0) + 2 * b;
+          acc.work += 2 * b; acc.checked += 2 * b;
           this.meter.add(b); this.emit(false);
         });
+      if (!same) {
+        // (0.8.8) Different after all: it is copied as usual, and the copy
+        // counts its own bytes. The comparison just made must not stay in the
+        // figures on top of it (the ring went up to 150 %).
+        this.done.workBytes = Math.max(0, this.done.workBytes - acc.work);
+        this.done.checked   = Math.max(0, (this.done.checked || 0) - acc.checked);
+        acc.work = 0; acc.checked = 0;
+      }
       if (same) {
         await dstFs.setMTime(dst, srcStat.mtime);
         return {
@@ -805,6 +924,7 @@ class SyncRunner {
     // An existing target is put aside before being replaced, so "overwrite"
     // never means "lose the previous version" when versioning is on.
     if (!failSafe && existed) await this.archiveExisting(to, n);
+    if (!failSafe) { if (!this._wrote) this._wrote = new Set(); this._wrote.add(to + '\u0000' + n.rel); }
 
     const hasher = algo ? await createHasher(algo) : null;
     let copied;
@@ -813,6 +933,7 @@ class SyncRunner {
       copied = await copyStream(srcFs, src, dstFs, tmp, hasher,
         b => {
           this.done.bytes += b; this.done.workBytes += b;
+          acc.bytes += b; acc.work += b;
           this.meter.add(b); this.emit(false);
         }, this.token);
     } catch (err) {
@@ -866,6 +987,9 @@ class SyncRunner {
       }
       await dstFs.rename(tmp, dst);
     }
+    // From here on the file at the target is ours (see assertTargetAsCompared).
+    if (!this._wrote) this._wrote = new Set();
+    this._wrote.add(to + '\u0000' + n.rel);
 
     let mtimeKept = false;
     if (this.cfg.preserveTimes !== false) {
@@ -946,6 +1070,8 @@ class SyncRunner {
     const st = await fsx.stat(from);
     if (!st) throw new Error('The file to move vanished before it could be renamed.');
 
+    // (0.8.8) A move is a write too: not through a link planted on the way.
+    await this.assertNoLinkOnTheWay(side, n, false);
     await fsx.mkdir(fsx.dirname(to));
     try {
       await fsx.rename(from, to);
@@ -953,7 +1079,7 @@ class SyncRunner {
       // Same fail-safe rule as any copy: never write the final name directly.
       // A power cut mid-copy must leave a stray .syncto_tmp, not a truncated
       // file wearing a good file's name.
-      const tmp = to + TEMP_EXT;
+      const tmp = scratchPath(fsx, to, TEMP_EXT);
       try {
         await streamCopy(fsx, from, fsx, tmp);
         // The source is about to be deleted, so this is the last moment the
@@ -995,7 +1121,9 @@ class SyncRunner {
     const fsx = this.side(side).fs;
     const p = this.absNode(node, side);
     if (!(await fsx.exists(p))) return;
-    this._archived.add(once);
+    // (0.8.8) Marked only once the old version is really put aside: marked
+    // before, a refused first attempt made the retry skip the archiving and
+    // overwrite the file with nothing kept.
 
     if (mode === 'versioning') {
       const v = this.versionerFor(side);
@@ -1003,15 +1131,21 @@ class SyncRunner {
         throw new Error('Versioning is selected but no revision folder is set for the ' + side +
           ' side — the file about to be replaced would be lost.');
       }
-      await v.archive(fsx, p, node.rel);
+      await v.archive(fsx, p, this.relOn(node, side));
+      this._archived.add(once);
       return;
     }
 
     if (fsx.supportsTrash() && this.trashItem) {
       const ok = await this.trashItem(fsx, p);
-      if (ok) return;
+      if (ok) { this._archived.add(once); return; }
+      // (0.8.8) Same rule as dispose(): a trash that works here but refused
+      // this file must not turn into a silent loss of the old version.
+      if (await this.trashWorks(side)) {
+        throw new Error('The recycle bin refused the version about to be replaced, so the file was not replaced.');
+      }
     }
-    // No trash here (SFTP, most network shares), or the trash refused it.
+    // No trash here (SFTP, most network shares).
     if (!this.cfg.permanentFallback) {
       throw new Error('This location has no recycle bin, so the version about to be replaced ' +
         'cannot be kept. Choose permanent deletion or versioning.');
@@ -1070,6 +1204,14 @@ class SyncRunner {
   // used to surface as one error per file, mid-run, which with "stop at the
   // first error" meant a NAS job that copied nothing at all.
   async trashWorks(side) {
+    // (0.8.8) The promise is shared, not just the answer: two lanes asking at
+    // the same moment ran two probes, and the loser's "no" stuck for the run.
+    if (!this._trashAsk) this._trashAsk = {};
+    if (!this._trashAsk[side]) this._trashAsk[side] = this._trashWorks(side);
+    return this._trashAsk[side];
+  }
+
+  async _trashWorks(side) {
     if (!this._trashProbe) this._trashProbe = {};
     if (this._trashProbe[side] !== undefined) return this._trashProbe[side];
 
@@ -1170,7 +1312,16 @@ class SyncRunner {
       this.current = n.rel;
       this.way = side;
       try {
-        const how = await this.withRetry(n.rel, () => this.dispose(side, n, false));
+        const how = await this.withRetry(n.rel, async () => {
+          // (0.8.8) Same check before a deletion: a file changed since the
+          // comparison is not the one the plan decided to delete.
+          const fsx = this.side(side).fs;
+          const p = this.absNode(n, side);
+          const now = await fsx.stat(p);
+          if (!now) return 'gone';
+          this.assertTargetAsCompared(side, n, now, p);
+          return this.dispose(side, n, false);
+        });
         this.done.deleted++;
         this.record(n, true, { side, how, deleted: true });
         this.applied.set(n.rel, { ok: true, deleted: true });
@@ -1190,7 +1341,10 @@ class SyncRunner {
       this.way = side;
       const fsx = this.side(side).fs;
       try {
-        await this.withRetry(n.rel, () => fsx.mkdir(this.absNode(n, side)));
+        await this.withRetry(n.rel, async () => {
+          await this.assertNoLinkOnTheWay(side, n, true);
+          return fsx.mkdir(this.absNode(n, side));
+        });
         const src = this.other(side);
         if (this.cfg.preserveTimes !== false && n[src].exists) {
           try { await fsx.setMTime(this.absNode(n, side), n[src].mtime); } catch (_) {}
@@ -1215,6 +1369,7 @@ class SyncRunner {
       try {
         const res = await this.withRetry(item.n.rel, () => this.copyOne(item, lane));
         if (res.dateOnly) this.done.dated = (this.done.dated || 0) + 1;
+        else if (res.alreadyThere) this.done.already = (this.done.already || 0) + 1;
         else this.done.files++;
         this.record(item.n, true, {
           side: item.to, bytes: res.bytes, hash: res.hash, algo: res.algo,
@@ -1243,6 +1398,10 @@ class SyncRunner {
     if (this.done.dated) {
       this.notes.push(`${this.done.dated} file${this.done.dated > 1 ? 's were' : ' was'} identical, byte for byte — ` +
         'only the date was corrected, nothing was copied.');
+    }
+    if (this.done.already) {
+      this.notes.push(`${this.done.already} file${this.done.already > 1 ? 's were' : ' was'} already at the destination ` +
+        '(same size and date), written there since the comparison — another pair or job — and left as is.');
     }
 
     // A checksum list is a list of fingerprints that were CHECKED. With the

@@ -137,6 +137,12 @@ function directionByChange(node, dirs, dbEntry, cfg) {
     // changed. Calling that a conflict is a trap: conflicts are skipped, a
     // skip leaves the database untouched, and the same conflict comes back on
     // every run for ever.
+    // (0.8.8) Not when the CONTENTS differ: that is not a date the copy
+    // could not carry, it is one of the two files gone bad (same size, same
+    // date). Doing nothing ignored it at every run.
+    if (node.cat === CAT.DIFFERENT) {
+      return { dir: 'conflict', msg: 'The contents differ, although neither side changed since the last synchronization — one of the two copies may be damaged.' };
+    }
     if (dbEntry && dbEntry.synced) return { dir: 'none' };
     return { dir: 'conflict', msg: 'Cannot determine a direction: no change since the last synchronization.' };
   }
@@ -209,6 +215,10 @@ function applyDirections(nodes, syncCfg, cmpCfg, db) {
 //     is only ever an optimization of what was already going to happen, never
 //     a new decision. Update mode, which forbids deletions, therefore never
 //     produces one.
+// (0.8.8) How far apart two dates of the same, unmodified file may be read
+// (FAT stores dates to 2 s).
+const MOVE_DATE_TOLERANCE_MS = 2000;
+
 function detectMoves(nodes, db) {
   if (!db || !db.available) return 0;
 
@@ -269,9 +279,23 @@ function detectMoves(nodes, db) {
       if (toNode.op !== createOp || fromNode.op !== deleteOp) continue;
       // The surviving copy must match what the database remembers, otherwise
       // the file changed as well as moved and a real copy is safer.
-      const e = db.items[oldRel];
+      const e = Object.prototype.hasOwnProperty.call(db.items, oldRel) ? db.items[oldRel] : null;
       const sideKey = side === 'left' ? 'ls' : 'rs';
       if (e && e[sideKey] != null && e[sideKey] !== toNode[side].size) continue;
+      // (0.8.8) A rename keeps the date. A file id that matches but a date
+      // that does not is a NEW file that got the deleted one's id back (ext4
+      // reuses inodes, FAT/exFAT ids are directory slots): taking it for a
+      // move renamed the old content under the new name — every frame of an
+      // image sequence has the same size.
+      const mKey = side === 'left' ? 'lm' : 'rm';
+      if (!e || e[mKey] == null || Math.abs((e[mKey] || 0) - (toNode[side].mtime || 0)) > MOVE_DATE_TOLERANCE_MS) continue;
+      // And the copy that will be renamed on the other side must still be the
+      // one the database remembers.
+      const oKey = other === 'left' ? 'l' : 'r';
+      const survivor = fromNode[other];
+      if (!survivor || !survivor.exists ||
+          (e[oKey + 's'] != null && e[oKey + 's'] !== survivor.size) ||
+          (e[oKey + 'm'] != null && Math.abs(e[oKey + 'm'] - (survivor.mtime || 0)) > MOVE_DATE_TOLERANCE_MS)) continue;
 
       toNode.preMoveOp   = toNode.op;
       fromNode.preMoveOp = fromNode.op;

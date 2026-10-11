@@ -6,10 +6,11 @@
 
 ## 1. État actuel
 
-- **Version du code : 0.8.7** (07/10/2026). Dernière version publiée sur
-  GitHub connue : 0.8.5 (la 0.8.6 a été livrée en ZIP le 05/10/2026 ; vérifier
-  auprès de Noar si elle est en ligne). Releases publiées : 0.7.1 → 0.8.3 et 0.8.5. La 0.6.0 et la **0.8.4
-  n'ont jamais été publiées** (le contenu de 0.8.4 est sorti avec 0.8.5).
+- **Version du code : 0.8.8** (11/10/2026). En ligne sur GitHub : **à
+  demander à Noar** avant la note de release (0.8.5 au 07/10/2026 ; la 0.8.7
+  a pu être publiée depuis). Releases publiées connues : 0.7.1 → 0.8.3 et
+  0.8.5. La 0.6.0, la **0.8.4** et la **0.8.6 n'ont jamais été publiées** : le
+  contenu de 0.8.4 est sorti avec 0.8.5, celui de 0.8.6 avec 0.8.7.
 - **Contenu de 0.8.6** (voir `CHANGELOG.md`) :
   - une paire re-pointée garde son historique de synchronisation ;
   - commentaire d'en-tête de `hash.js` corrigé ;
@@ -21,11 +22,19 @@
 - **Contenu de 0.8.7** : bandeau de run avec un titre par phase
   (SYNCHRONIZING / VERIFYING / FINISHING), anneau intérieur = phase en cours
   (0 → 100 %), anneau extérieur fin + « TOTAL x % » = tout le run.
-- **Tests : 1169 vérifications, toutes vertes en 0.8.7** (1163 en 0.8.6, 1106
-  en 0.8.5).
+- **Contenu de 0.8.8** : corrections de la revue complète du 09/10/2026
+  (moteur, sécurité, interface, voir section 14) ; noms trop longs (signalé le
+  11/10/2026, voir « Noms longs » en section 9) ; action de fin jamais active
+  en auto-sync ; Electron 44 (macOS 13 minimum).
+- **Tests : 1314 vérifications, toutes vertes** (1169 en 0.8.7, 1106 en 0.8.5), aussi sous le Node intégré à Electron 44 (vérifié à 1279).
 - Dépôt : https://github.com/noar-justedit/syncto (GPL-3.0), branche `main`.
-- Versions des outils : Electron 43.5.0, electron-builder 26.15.3, Node 24 sur
-  le Mac de Noar (≥ 20.19 exigé).
+- Versions des outils : Electron 44.7.0 (Chromium 152, Node 24.21 intégré ;
+  passage de 43 à 44 demandé par Noar le 10/10/2026, sorti en 0.8.8),
+  electron-builder 26.15.3, Node 24 sur le Mac de Noar (≥ 20.19 exigé).
+- Systèmes minimum : **macOS 13 (Ventura)** depuis Electron 44
+  (`minimumSystemVersion` dans `electron-builder.yml`, à garder en phase avec
+  la version majeure d'Electron, vérifié par la section 49), Windows 10 x64,
+  Linux x64.
 
 ## 2. Le produit
 
@@ -89,6 +98,15 @@ identique → seule la date est corrigée.
   Windows seulement : rien de posé depuis le Mac pour l'instant.
 - **Notes privées supprimées** (03/10/2026) : tout le suivi est public, dans
   `AGENTS.md` et ce fichier (règles ARNO DEV).
+- **Action de fin jamais active en auto-sync** (11/10/2026) : tant que
+  l'auto-sync est armé, quitter / veille / extinction sont ignorés (run auto
+  ou lancé à la main), l'auto-sync reste armé, la ligne d'état le dit.
+  Jusqu'en 0.8.7, le premier cycle propre coupait l'auto-sync et éteignait.
+- **Pas de réécriture en Rust** (10/10/2026) : syncto attend les disques et le
+  réseau, pas le processeur (xxHash64 en WebAssembly mesuré à ~5,8 Go/s sur un
+  cœur, au-dessus d'un SSD Thunderbolt ou d'un NAS 10 GbE). Le gain serait
+  surtout la taille de l'app et la mémoire, pour le prix d'une réécriture du
+  moteur et de ses tests, et d'un build Windows depuis le Mac plus fragile.
 
 Principes tirés de l'historique : une fenêtre qui travaille sans rien afficher
 passe pour plantée ; ne jamais afficher une progression qu'on ne sait pas
@@ -292,7 +310,7 @@ vérifie les promesses.
 
 ## 8. Tests
 
-`npm test` = `node test/run-tests.js`, 48 sections, environ 4 minutes. Vrais
+`npm test` = `node test/run-tests.js`, 49 sections, environ 5 minutes. Vrais
 fichiers, vrais verrous, second processus, vrai serveur SFTP avec latence, vrai
 dépôt git local pour le script de publication. Une exception dans une section
 est rapportée `UNCAUGHT in <nom>`, les autres tournent quand même.
@@ -300,7 +318,9 @@ est rapportée `UNCAUGHT in <nom>`, les autres tournent quand même.
 - Sections utiles : 26 (lignes de commande Apple des scripts de build,
   vérifiées contre `notarytool(1)`), 33 (verrous, `timing` court), 41 (arité du
   pont preload), 42 (charte), 47 (paquets Linux, `basic_text`), 48 (demandes
-  0.8.x, blocs `d1`…`d14`).
+  0.8.x, blocs `d1`…`d16`), 49 (`testReview088` : revue du 09/10/2026, blocs
+  `e*` moteur, `s*` sécurité, `u*` interface, `v*` seconde passe, `x*`
+  Electron 44), 50 (`testLongNames088` : noms trop longs, blocs `n1`…`n5`).
 - Un test de la section 44 est sensible au temps : s'il échoue isolément sur une
   machine chargée, relancer avant de chercher.
 - Règles d'écriture : tester le comportement, pas le commentaire ; tester le
@@ -317,6 +337,18 @@ est rapportée `UNCAUGHT in <nom>`, les autres tournent quand même.
 
 ## 9. Pièges connus (ce qui a déjà coûté du temps)
 
+- **Noms longs** (`src/main/fs/longname.js`, 0.8.8). Limite d'UN nom : 255,
+  en caractères UTF-16 (NTFS, HFS+) ou en octets UTF-8 (APFS, ext4, btrfs,
+  donc un NAS Synology ; 143 sur un dossier partagé chiffré Synology). Windows
+  répond ENOENT, pas « nom trop long » : un ENOENT sur un nom long, c'est ça.
+  Les noms de travail (`.syncto_tmp`, `.syncto_old`) sont raccourcis dès
+  qu'ils dépassent 143. Un nom qui ne tient pas dans 255 (octets ET
+  caractères) est écrit raccourci (`début~8 hex.ext`, 8 hex = SHA-1 du nom
+  complet en NFC), signalé dans les notes, et la comparaison le réassocie à
+  l'original (`_pairShortened`). **Ne jamais changer cette règle** (limite,
+  hachage, découpe de l'extension) sans migration : les noms courts déjà
+  écrits ne seraient plus reconnus, et en 2 WAYS l'original serait pris pour
+  un fichier supprimé de l'autre côté.
 - Un pont `preload` qui perd un argument ne fait **aucun bruit** (l'extinction
   auto n'a jamais marché jusqu'en 0.7.3). Un défaut sur Mac ET Windows : la
   cause est dans le code commun.
@@ -354,6 +386,9 @@ est rapportée `UNCAUGHT in <nom>`, les autres tournent quand même.
 
 ## 10. Problèmes connus
 
+- **Dossier partagé chiffré Synology (noms limités à 143)** : un nom entre 144
+  et 255 n'y est pas raccourci, la copie échoue (ENOENT sous Windows). Non
+  traité : la limite d'une destination ne se lit pas à l'avance.
 - **Section « Regenerating the screenshots » du README périmée** : elle décrit
   le script Linux à 10 images, alors que la capture 0.8.5 est faite à la main.
   En attente d'une décision de Noar (réécrire, supprimer ou laisser).
@@ -373,6 +408,27 @@ est rapportée `UNCAUGHT in <nom>`, les autres tournent quand même.
 - Noar dit devoir **souvent effacer des `.syncto.lock` à la main**, alors que
   0.8.5 devait régler ça sans intervention : à instruire (message exact,
   machine, NAS ou disque local).
+- **Revue 09/10/2026, non corrigé volontairement** :
+  - mot de passe de notarisation passé en argument à `notarytool
+    store-credentials` (visible dans la liste des processus pendant quelques
+    secondes, première configuration seulement) : la saisie interactive de
+    notarytool n'a pas pu être vérifiée hors du Mac, et le script capture sa
+    sortie ;
+  - empreinte d'un serveur SFTP jamais montrée ni confirmée à la première
+    connexion (acceptée d'office) : proposition, pas fait ;
+  - liste `syncto-checksums.txt` d'un sous-dossier : jamais sauvegardée (c'est
+    la liste d'un job imbriqué ; la traiter comme un fichier utilisateur
+    faisait qu'un MIRROR englobant la supprimait) ;
+  - après un refus de la corbeille, le dossier parent qui ne peut pas être
+    supprimé dit que le fichier restant est « exclu par un filtre, un lien ou
+    la corbeille du volume » : message imprécis ;
+  - une paire qui ne fait que supprimer reste à 0 % dans l'anneau TOTAL tant
+    qu'une autre paire a des octets à copier (l'anneau compte en octets) ;
+  - chemin réseau Windows (`\\hôte\partage`) : plus de voyant rouge s'il est
+    absent (on ne le touche plus à l'ouverture) ; Compare le signale ;
+  - **décisions à prendre par Noar** : unités (Go du Finder = 1000³, ou Gio
+    binaires actuels étiquetés « GB ») ; rouge de la fenêtre et du bouton
+    auto-sync (exception assumée ou orange).
 
 ## 11. Prochaines étapes
 
@@ -388,6 +444,16 @@ est rapportée `UNCAUGHT in <nom>`, les autres tournent quand même.
    n'a pas pu être testé hors du Mac).
 3. Section « Regenerating the screenshots » du README (voir Problèmes connus).
 4. electron-builder 27 stable, quand elle sortira.
+5. 0.8.8 avant publication : un run réel sur le NAS (MIRROR et 2 WAYS) et un
+   sur un disque local, pour voir qu'aucune des nouvelles vérifications ne
+   bloque un cas normal ; relancer NAS_BACKUP sous Windows (le fichier
+   `TP4_BLOCK4_…_V1.pptx` de 246 caractères doit passer sans erreur) ; avec
+   l'auto-sync armé et « Shut down » choisi, vérifier qu'un cycle ne lance
+   pas le compte à rebours.
+6. Electron 44 : faire un build Mac et un build Windows de contrôle, lancer
+   les deux, vérifier le bouton de copie d'une liste d'erreurs, l'extinction
+   auto (Apple events) et le Trousseau (serveurs SFTP enregistrés). Testé
+   seulement sous Linux ici (l'app se lance, la copie répond).
 
 ## 12. Historique des versions
 
@@ -409,6 +475,7 @@ est rapportée `UNCAUGHT in <nom>`, les autres tournent quand même.
 | 0.8.5 | 30/09 | 1106 | Overview clic / double-clic / lasso ; flush avant date ; verrous NAS |
 | 0.8.6 | 05/10 | 1163 | historique des paires re-pointées, base et verrou cachés sous Windows, `push_github.command`, fichiers de suivi |
 | 0.8.7 | 07/10 | 1169 | bandeau de run : un titre par phase, anneau de phase + anneau du run |
+| 0.8.8 | 11/10 | 1314 | revue complète (moteur, sécurité, interface), noms longs, pas d'extinction en auto-sync, Electron 44 |
 
 Le détail est dans `CHANGELOG.md`.
 
@@ -427,3 +494,35 @@ Le détail est dans `CHANGELOG.md`.
 5. `ETAT_PROJET.md` : sections 1 (état actuel) et 12 (historique).
 6. Les commentaires « (X.Y.Z) » des changements de la version, dans le code et
    les tests, s'ils ont été écrits avec un autre numéro.
+
+## 14. Revue complète du 09/10/2026 (corrigée, sortie en 0.8.8)
+
+Trois revues en parallèle (sécurité, moteur, interface), chaque défaut moteur
+reproduit sur de vrais dossiers, l'interface rendue dans Chromium. Puis une
+vérification adversariale des corrections, qui a trouvé 7 trous corrigés à
+leur tour. Tests : section 49.
+
+- **Moteur** : un `lstat` en erreur ne fait plus disparaître un fichier (MIRROR
+  supprimait la sauvegarde) ; avant d'écraser ou de supprimer, la cible est
+  revérifiée contre la comparaison (paires partageant un dossier) ; un fichier
+  refusé par la corbeille n'est plus supprimé définitivement ; faux
+  déplacements sur inode réutilisé ; différence de contenu en 2 WAYS =
+  conflit ; noms ne différant que par la casse : aucun des deux synchronisé ;
+  liste de checksums d'un autre algorithme préservée ; même dossier écrit de
+  deux façons ; reprise d'historique resserrée ; Annuler n'enregistre plus de
+  copies non relues ; progression exacte (pas de 200 %, pas d'arrêt à 50 %,
+  fin à 100 %).
+- **Sécurité** : chemins réseau Windows non touchés à l'ouverture d'un job
+  partagé ; mot de passe SFTP pas envoyé sur un autre port ; `.syncto.db`
+  piégé ne sature plus la mémoire ; rien n'est écrit à travers un lien
+  symbolique de la destination (copie, dossier, déplacement) ; variables
+  d'environnement non remplacées dans une adresse SFTP ; canal `open-path`
+  retiré, Reveal montre au lieu d'ouvrir ; noms `constructor`/`__proto__` ;
+  taille des listes de checksums bornée.
+- **Interface** : fin de run (plus de 0 % / undefined) ; auto-sync = même
+  départ qu'un run manuel ; menu et raccourcis inertes pendant un run ;
+  CHECKING repart de 0 % ; PAUSED tenu ; WAITING ; carte d'erreur, confirmation
+  corbeille, Échap dans Filter ; charte (boutons désactivés, conflits orange,
+  ERRORS rouge seulement > 0, mouvement réduit) ; mise en page en petite
+  fenêtre ; nombres avec séparateurs, 123k dans l'Overview ; noms des modes ;
+  « Total ETA ».

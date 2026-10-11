@@ -39,7 +39,9 @@ mac:
   category: public.app-category.utilities
   icon: build-resources/icon.icns
   darkModeSupport: true
-  minimumSystemVersion: "11.0"
+  # Electron 44 runs on macOS 13 (Ventura) or later. Keep this in step with
+  # the Electron major version (test section 49 checks it).
+  minimumSystemVersion: "13.0"
   hardenedRuntime: true
   gatekeeperAssess: false
   entitlements: build-resources/entitlements.mac.plist
