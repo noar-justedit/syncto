@@ -1837,6 +1837,13 @@ body.lassoing .tooltip-float{display:none !important;}
       <div class="set-row"><label>Preserve file permissions</label>
         <label class="switch"><input type="checkbox" id="st-perms"><span class="slider"></span></label>
         <span class="set-desc">copy the read / write / execute rights</span></div>
+      <div class="set-row"><label>Windows-safe names</label>
+        <select id="st-safenames">
+          <option value="off">Off</option>
+          <option value="destination">Destination only</option>
+          <option value="both">Both sides</option>
+        </select>
+        <span class="set-desc">&lt; &gt; : &quot; | ? * become _</span></div>
       <div class="set-row"><label>Retry on error</label>
         <input type="number" id="st-retry" min="0" max="20"><span class="set-unit">times, every</span>
         <input type="number" id="st-retry-delay" min="1" max="600"><span class="set-unit">s</span>

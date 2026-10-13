@@ -132,8 +132,9 @@ suffit, la suite n'a pas besoin du binaire.
 - **Chaque défaut corrigé a son test**, nommé d'après le défaut, dans la section
   de la version en cours (demandes 0.8.x : section 48, `testRequest083`, blocs
   `d1`…`d16` ; revue du 09/10/2026 : section 49, `testReview088` ; noms trop
-  longs : section 50, `testLongNames088` ; une nouvelle
-  version peut continuer là ou ouvrir la section 51).
+  longs : section 50, `testLongNames088` ; noms compatibles Windows : section
+  51, `testSafeNames089` ; une nouvelle
+  version peut continuer là ou ouvrir la section 52).
 - **Vérifier un test en le cassant** : remettre l'ancien code, constater que le
   test passe au rouge, remettre en état.
 - Beaucoup de tests lisent `app.js` / `index.html` avec des expressions

@@ -131,6 +131,9 @@ function defaultJob() {
       // What to do once the run is over: none | quit | sleep | shutdown.
       // Only ever fires on a clean run — see the renderer's countdown.
       afterSync      : 'none',
+      // (0.8.9) Names Windows refuses (< > : " | ? *, trailing space or dot,
+      // CON, NUL…): off | destination (right side only) | both (source too).
+      safeNames      : 'off',
     },
     autoSync: {
       enabled: false,
@@ -677,6 +680,7 @@ function loadJob(file) {
     delete job.sync.report;
     // "No trash? delete anyway" is no longer a choice (0.8.3).
     job.sync.permanentFallback = true;
+    if (!['off', 'destination', 'both'].includes(job.sync.safeNames)) job.sync.safeNames = 'off';
     const lanes = Number(job.sync.transferLanes);
     job.sync.transferLanes = Number.isFinite(lanes) ? Math.min(10, Math.max(1, Math.round(lanes))) : 4;
   }

@@ -442,8 +442,9 @@ class SyncRunner {
       // (0.8.8) Every operation, copies or not: what the ring falls back on
       // when there are no bytes to move (a run that only deletes stayed at 0 %).
       itemsDone: this.done.files + (this.done.failed || 0) + (this.done.dated || 0) + (this.done.already || 0) +
-        (this.done.deleted || 0) + (this.done.folders || 0) + (this.done.moved || 0),
-      itemsTotal: this.plan.files + (this.plan.deletions || 0) + (this.plan.folders || 0) + (this.plan.moves || 0),
+        (this.done.deleted || 0) + (this.done.folders || 0) + (this.done.moved || 0) + (this.done.renamed || 0),
+      itemsTotal: this.plan.files + (this.plan.deletions || 0) + (this.plan.folders || 0) + (this.plan.moves || 0) +
+        (this.plan.renames || 0),
       bytesDone: this.done.workBytes, bytesTotal: this.plan.workBytes,
       // What the CURRENT pass has left to move, separately from the ring.
       // The ring counts the copy AND the read-back, so "remaining" over the
@@ -516,8 +517,11 @@ class SyncRunner {
 
   // ── Planning ─────────────────────────────────────────────────────────────
   buildPlan() {
-    const del = [], mkdir = [], copy = [], rmdir = [], moves = [];
+    const del = [], mkdir = [], copy = [], rmdir = [], moves = [], renames = [];
     for (const n of this.nodes) {
+      // (0.8.9) Windows-safe names: renamed in place before anything else.
+      if (n.fixL) renames.push({ n, side: 'left',  from: n.fixL });
+      if (n.fixR) renames.push({ n, side: 'right', from: n.fixR });
       switch (n.op) {
         case OP.DELETE_LEFT:  (n.type === 'folder' ? rmdir : del).push({ n, side: 'left'  }); break;
         case OP.DELETE_RIGHT: (n.type === 'folder' ? rmdir : del).push({ n, side: 'right' }); break;
@@ -545,11 +549,13 @@ class SyncRunner {
     del.sort((a, b) => b.n.depth - a.n.depth);
     rmdir.sort((a, b) => b.n.depth - a.n.depth);
     mkdir.sort((a, b) => a.n.depth - b.n.depth);
+    renames.sort((a, b) => a.n.depth - b.n.depth);   // a folder before what it holds
 
     this.plan.files     = copy.length;
     this.plan.deletions = del.length + rmdir.length;
     this.plan.folders   = mkdir.length;
     this.plan.moves     = moves.length;
+    this.plan.renames   = renames.length;
     this.plan.bytes     = copy.reduce((s, c) => s + (c.n[c.from].size || 0), 0);
     // Only the copies that will be read back count twice. With the read-back
     // off for a server, the ring and the ETA stop promising a second pass that
@@ -557,7 +563,7 @@ class SyncRunner {
     this.plan.verifyBytes = copy.reduce(
       (s, c) => s + (this.verifies(c.to) ? (c.n[c.from].size || 0) : 0), 0);
     this.plan.workBytes = this.plan.bytes + this.plan.verifyBytes;
-    return { del, mkdir, copy, rmdir, moves };
+    return { del, mkdir, copy, rmdir, moves, renames };
   }
 
   // ── Versioners ───────────────────────────────────────────────────────────
@@ -744,6 +750,23 @@ class SyncRunner {
       this.done.checked   = Math.max(0, (this.done.checked || 0) - acc.checked);
       throw err;
     }
+  }
+
+  // (0.8.9) One Windows-safe rename, in place on one side. The folders above
+  // were renamed first, so the old name is looked for under the new path.
+  async renameOne({ n, side, from }) {
+    const fsx = this.side(side).fs;
+    const toRel = this.relOn(n, side);
+    const parts = toRel.split('/');
+    parts[parts.length - 1] = from;
+    const src = this.abs(side, parts.join('/'));
+    const dst = this.abs(side, toRel);
+    await this.assertNoLinkOnTheWay(side, n, false);
+    if (!(await fsx.stat(src))) throw new Error('It is no longer there.');
+    // Never onto something: the comparison left out names that clash once
+    // cleaned, so anything here appeared since.
+    if (await fsx.stat(dst)) throw new Error(`"${toRel.split('/').pop()}" already exists there.`);
+    await fsx.rename(src, dst);
   }
 
   async _copyOne(item, lane, acc) {
@@ -1283,9 +1306,34 @@ class SyncRunner {
     this.emit(true, 'Preparing…');
     await this.preflight(plan);
 
+    // (0.8.9) -1. Windows-safe names: rename in place first, folders before
+    //    their contents, since every later path is written with the new
+    //    names. One failure stops the run: what follows would look for paths
+    //    that do not exist.
+    for (const item of plan.renames) {
+      await this.gate();
+      this.current = item.n.rel;
+      this.way = item.side;
+      try {
+        await this.withRetry(item.n.rel, () => this.renameOne(item));
+        this.done.renamed = (this.done.renamed || 0) + 1;
+        const to = this.relOn(item.n, item.side).split('/').pop();
+        this.notes.push(`Renamed for Windows in the ${item.side} folder: "${item.from}" → "${to}".`);
+      } catch (err) {
+        this.record(item.n, false, { side: item.side, error: `Could not rename "${item.from}" for Windows: ${err.message || err}` });
+        if (!/cancelled/i.test(err.message || '')) {
+          this.stopped = true;
+          this.notes.push('Stopped: a name could not be changed for Windows, so nothing else was done ' +
+            '(every later step uses the new names).');
+        }
+        break;
+      }
+      this.emit(false);
+    }
+
     // 0. execute detected moves — before anything else, so nothing they touch
     //    is deleted or re-copied by the later phases
-    for (const item of plan.moves) {
+    if (!this.stopped) for (const item of plan.moves) {
       await this.gate();
       try {
         const res = await this.withRetry(item.n.rel, () => this.moveOne(item));

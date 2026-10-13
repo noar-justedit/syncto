@@ -4,6 +4,34 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.8.9] — 2026-10-13
+
+Windows-safe names: the names a Mac accepts and Windows refuses, renamed during
+the synchronization, on the destination only or on both sides.
+
+### Added
+
+- **Windows-safe names** (Settings › Main). Names a Mac accepts and Windows
+  refuses: `< > : " | ? *`, control characters, a trailing space or dot, and
+  device names (CON, NUL, COM1…). Written to a share by a Mac, these come out
+  on a PC as boxes or odd symbols. With the option on, each refused character
+  becomes `_`, a trailing space or dot is dropped and a device name gets `_`
+  (`CON.txt` → `CON_.txt`). Parentheses, commas, `&`, apostrophes and accents
+  are legal on Windows and kept.
+  - **Destination only**: names created at the destination are clean, and
+    names already there are renamed in place. The source is never touched;
+    every run pairs `a:b` at the source with `a_b` at the destination.
+  - **Both sides**: the source is renamed too, before anything else is done.
+    The confirmation lists what will be renamed in the source and warns that
+    projects using those files (Premiere, Resolve, After Effects…) will lose
+    their links.
+  - Each rename is reported in the run's notes. Two names that become the same
+    once cleaned (`a:b` and `a_b`) are both left out and reported. A rename
+    that cannot be done stops the run before anything else happens.
+  - A Mac's custom-icon file (`Icon` + carriage return, a file named "Icon"
+    and a strange symbol on a PC) is left out: neither copied, renamed nor
+    deleted.
+
 ## [0.8.8] — 2026-10-11
 
 A complete review of the code, and everything it found that could lose data,

@@ -311,6 +311,22 @@ on a local drive. SFTP has no trash and no inode information, so use permanent
 deletion there, and expect renamed files to be re-copied rather than detected
 as moves.
 
+### Windows-safe names
+
+**Settings › Main › Windows-safe names** renames, during the synchronization,
+the names a Mac accepts and Windows refuses: `< > : " | ? *`, a trailing space
+or dot, and device names such as CON or NUL. Each refused character becomes
+`_`. Parentheses, commas, `&` and accents are legal on Windows and kept.
+
+- *Destination only* cleans the destination (new and existing names) and
+  never touches the source. The two spellings stay paired at every run.
+- *Both sides* renames the source as well. Projects that point at those files
+  (Premiere, Resolve, After Effects…) lose their links; the confirmation says
+  so and lists them.
+
+The file a custom folder icon leaves on a Mac (shown on a PC as "Icon" and a
+strange symbol) is left out while the option is on.
+
 ### When it finishes
 
 The power icon in the title bar offers *Do nothing*, *Quit syncto*, *Sleep* and

@@ -117,7 +117,8 @@ class Session {
     this.job = job;
     await this._openSides(job, credentials);
 
-    const cmp = Object.assign({}, job.compare);
+    // (0.8.9) The comparison needs the Windows-safe names setting (a sync one).
+    const cmp = Object.assign({}, job.compare, { safeNames: job.sync && job.sync.safeNames });
 
     // The database is read for two reasons: Two way and Update decide their
     // directions with it, and move detection needs the file ids it remembers.
@@ -805,9 +806,10 @@ function mergeStats(list) {
   const out = {
     rows: 0, createLeft: 0, createRight: 0, updateLeft: 0, updateRight: 0,
     deleteLeft: 0, deleteRight: 0, moveLeft: 0, moveRight: 0,
+    renameLeft: 0, renameRight: 0,
     conflicts: 0, equal: 0, excluded: 0, doNothing: 0,
     bytesLeft: 0, bytesRight: 0, bytesTotal: 0, filesToProcess: 0,
-    conflictList: [], catCounts: {},
+    conflictList: [], renameList: [], catCounts: {},
   };
   for (const s of list) {
     if (!s) continue;
@@ -815,6 +817,7 @@ function mergeStats(list) {
       if (typeof out[k] === 'number') out[k] += s[k] || 0;
     }
     out.conflictList.push(...(s.conflictList || []).slice(0, 5));
+    out.renameList.push(...(s.renameList || []).slice(0, 25));
     for (const c of Object.keys(s.catCounts || {})) {
       out.catCounts[c] = (out.catCounts[c] || 0) + s.catCounts[c];
     }

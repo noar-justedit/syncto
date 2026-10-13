@@ -4247,7 +4247,7 @@ function testIpcArity() {
     const panel = html.slice(a, html.indexOf('<div class="set-section" id="custom-section"', a));
     ok(!/set-hint|m-sub/.test(panel), 'no paragraph of explanation in the settings');
     const descs = [...panel.matchAll(/<span class="set-desc">([^<]+)</g)].map(m => m[1]);
-    eq(descs.length, 13, 'one short line beside each control');
+    eq(descs.length, 14, 'one short line beside each control');   // (0.8.9) + Windows-safe names
     ok(descs.every(d => d.length <= 48), 'short enough to fit beside it');
     ok(/\.set-desc\{[^}]*white-space:nowrap;/.test(html), 'and it never wraps to a second line');
     eq([...panel.matchAll(/set-sec-title">([^<]+)</g)].map(m => m[1]),
@@ -5718,6 +5718,131 @@ async function testRequest083() {
 }
 
 
+
+// ══ 51. Windows-safe names (0.8.9) ══════════════════════════════════════════
+// Asked by Noar (13/10/2026): folders from a Mac whose names Windows refuses
+// (":" shown as a box on the PC, "?", trailing dots…) renamed during the
+// synchronization, on the destination only or on both sides. Run alone:
+//   SYNCTO_ONLY=testSafeNames089 node test/run-tests.js
+async function testSafeNames089() {
+  console.log('\n\n51. Windows-safe names (0.8.9)');
+  const wn = require('../src/main/fs/winname');
+  const { loadJob, JOB_FORMAT } = require('../src/main/config');
+  const files = base => listAll(base).filter(f => !f.endsWith('/') && !f.includes('.syncto.') && !f.endsWith('syncto-checksums.txt'));
+  const job = (L, R, variant, safeNames) => makeJob(L, R, { sync: { variant, safeNames } });
+
+  // (w1) The cleaning itself.
+  eq(wn.windowsSafe('Industry: Digital'), 'Industry_ Digital', '":" becomes "_"');
+  eq(wn.windowsSafe('Industry Digital'), 'Industry_ Digital', 'and so does the box a Mac writes for it on a share');
+  eq(wn.windowsSafe('a<b>c"d|e?f*g'), 'a_b_c_d_e_f_g', '< > " | ? * become "_"');
+  eq(wn.windowsSafe('Report. '), 'Report', 'a trailing dot or space is dropped');
+  eq(wn.windowsSafe('Report\uf029'), 'Report', 'and so is the trailing dot a Mac wrote on a share (U+F029)');
+  eq([wn.windowsSafe('CON.txt'), wn.windowsSafe('nul'), wn.windowsSafe('com1.mov'), wn.windowsSafe('CONSOLE.txt')],
+     ['CON_.txt', 'nul_', 'com1_.mov', 'CONSOLE.txt'], 'device names get "_", longer names do not');
+  eq(wn.windowsSafe("Clip (v2), final & co's #1.mov"), "Clip (v2), final & co's #1.mov",
+     'parentheses, commas, &, apostrophes and # are legal on Windows and kept');
+  ok(wn.isMacIconFile('Icon\r') && wn.isMacIconFile('Icon') && !wn.isMacIconFile('Icon'), 'the Mac custom-icon file is recognised');
+  {
+    const j = defaultJob(); j.sync.safeNames = 'sideways'; j.format = JOB_FORMAT;
+    const f = path.join(scratch().dir, 'odd.syncto');
+    fs.writeFileSync(f, JSON.stringify(j));
+    eq(loadJob(f).sync.safeNames, 'off', 'an unknown value in a job file means off');
+    eq(wn.safeNamesMode({ safeNames: 'sideways' }), 'off', 'and the engine reads it as off too');
+    eq(defaultJob().sync.safeNames, 'off', 'off by default');
+  }
+
+  // (w2) Destination only, MIRROR: new items arrive cleaned, the source is
+  //      not touched, the Mac icon file stays home, next run has nothing to do.
+  {
+    const { L, R } = scratch();
+    write(L, 'Forum: Day 1/clip?.mov', 'clip');
+    write(L, 'Forum: Day 1/Icon\r', '');
+    const r1 = await runPair(job(L, R, 'mirror', 'destination'));
+    eq(r1.run.errors.length, 0, 'no error');
+    eq(files(R), ['Forum_ Day 1/clip_.mov'], 'the destination gets the cleaned names, and no icon file');
+    eq(files(L).sort(), ['Forum: Day 1/Icon\r', 'Forum: Day 1/clip?.mov'], 'the source keeps its names');
+    const r2 = await runPair(job(L, R, 'mirror', 'destination'));
+    ok(r2.s.nodes.every(n => n.op === OP.NONE) && !r2.s.nodes.some(n => n.fixL || n.fixR), 'next run: paired, nothing to do');
+    write(L, 'Forum: Day 1/clip?.mov', 'clip v2', Date.now() + 5000);
+    await runPair(job(L, R, 'mirror', 'destination'));
+    eq(read(R, 'Forum_ Day 1/clip_.mov'), 'clip v2', 'an edit at the source updates the cleaned copy');
+  }
+
+  // (w3) Destination only, names already bad at the destination: renamed in
+  //      place (no copy), said in the notes, source untouched.
+  {
+    const { L, R } = scratch();
+    const t = Date.now() - 3600e3;
+    write(L, 'Forum: Day 1/clip?.mov', 'clip', t);
+    write(R, 'Forum: Day 1/clip?.mov', 'clip', t);
+    const r = await runPair(job(L, R, 'mirror', 'destination'));
+    eq([r.cmp.stats ? r.cmp.stats.renameRight : r.s.stats.renameRight, (r.cmp.stats || r.s.stats).renameLeft], [2, 0],
+       'the comparison plans two renames, on the destination only');
+    eq(files(R), ['Forum_ Day 1/clip_.mov'], 'renamed in place');
+    eq(read(R, 'Forum_ Day 1/clip_.mov'), 'clip', 'same file, not a copy');
+    eq(r.run.notes.filter(m => /^Renamed for Windows in the right folder/.test(m)).length, 2, 'each rename is reported');
+    eq(files(L), ['Forum: Day 1/clip?.mov'], 'the source is not touched');
+  }
+
+  // (w4) Both sides, 2 WAYS: originals renamed too, then synchronized.
+  {
+    const { L, R } = scratch();
+    write(L, 'a:b.txt', 'from the Mac');
+    write(R, 'c|d.txt', 'from the PC');
+    const r = await runPair(job(L, R, 'twoWay', 'both'));
+    eq(r.run.errors.length, 0, 'no error');
+    eq([files(L), files(R)], [['a_b.txt', 'c_d.txt'], ['a_b.txt', 'c_d.txt']], 'both sides end with the same clean names');
+  }
+
+  // (w5) Two names that meet once cleaned: neither is synchronized.
+  {
+    const { L, R } = scratch();
+    write(L, 'a:b.txt', '1'); write(L, 'a_b.txt', '2'); write(L, 'ok.txt', '3');
+    const r = await runPair(job(L, R, 'mirror', 'destination'));
+    ok(r.cmp.errors.some(e => /become the same name for Windows \("a_b\.txt"\)/.test(e.message)), 'the clash is reported');
+    eq(files(R), ['ok.txt'], 'neither of the two is copied, the rest is');
+  }
+
+  // (w6) A rename that cannot be done stops the run before anything else.
+  {
+    const { L, R } = scratch();
+    const t = Date.now() - 3600e3;
+    write(L, 'x:y.txt', 'xy', t); write(R, 'x:y.txt', 'xy', t); write(L, 'new.txt', 'n');
+    const s = new Session(); const token = { cancelled: false };
+    const j = job(L, R, 'mirror', 'destination');
+    await s.compare(j, { token });
+    write(R, 'x_y.txt', 'appeared meanwhile');
+    const run = await s.sync(j, { token, appVersion: 'test' });
+    await s.close();
+    ok(run.errors.some(e => /Could not rename "x:y\.txt" for Windows: "x_y\.txt" already exists there/.test(e.message)), 'the refusal is reported');
+    ok(!exists(R, 'new.txt'), 'and nothing after it was done');
+    eq(read(R, 'x_y.txt'), 'appeared meanwhile', 'the file in the way is not overwritten');
+  }
+
+  // (w8) Destination only in 2 WAYS: an edit of the cleaned copy goes back
+  //      to the original under its own name; a deletion follows next run.
+  {
+    const { L, R } = scratch();
+    write(L, 'Shoot: day 2/take?.mov', 'v1', Date.now() - 7200e3);
+    await runPair(job(L, R, 'twoWay', 'destination'));
+    write(R, 'Shoot_ day 2/take_.mov', 'graded on the PC', Date.now());
+    await runPair(job(L, R, 'twoWay', 'destination'));
+    eq(read(L, 'Shoot: day 2/take?.mov'), 'graded on the PC', 'the edit reaches the original');
+    eq(files(L), ['Shoot: day 2/take?.mov'], 'without a second file on the Mac');
+    fs.unlinkSync(path.join(R, 'Shoot_ day 2/take_.mov'));
+    await runPair(job(L, R, 'twoWay', 'destination'));
+    ok(!exists(L, 'Shoot: day 2/take?.mov'), 'a deletion on the PC side follows (history kept under the clean name)');
+  }
+
+  // (w7) Off (the default): names and the icon file go through as before.
+  {
+    const { L, R } = scratch();
+    write(L, 'a:b.txt', '1'); write(L, 'Icon\r', '');
+    await runPair(job(L, R, 'mirror', 'off'));
+    eq(files(R).sort(), ['Icon\r', 'a:b.txt'], 'nothing renamed, nothing left out');
+  }
+}
+
 // ══ 50. Names too long for a destination (0.8.8) ═══════════════════════════
 // Reported on Windows: a 246-character file name failed with "ENOENT: no such
 // file or directory": ".syncto_tmp" took it to 257, past the 255 every
@@ -6578,6 +6703,7 @@ async function testReview088() {
       testRequest083,
       testReview088,
       testLongNames088,
+      testSafeNames089,
     ];
     const only = (process.env.SYNCTO_ONLY || '').split(',').map(x => x.trim()).filter(Boolean);
     // Each section on its own: an exception used to end the whole suite, so

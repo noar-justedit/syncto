@@ -290,6 +290,7 @@ function jobToUi() {
   $('st-times').checked    = j.sync.preserveTimes !== false;
   $('st-fixdates').checked = !!j.sync.fixDatesOnly;
   $('st-perms').checked    = !!j.sync.copyPermissions;
+  $('st-safenames').value  = ['destination', 'both'].includes(j.sync.safeNames) ? j.sync.safeNames : 'off';
   $('st-retry').value      = j.sync.retryCount;
   $('st-retry-delay').value= Math.round((j.sync.retryDelayMs || 5000) / 1000);
   $('st-ignore').checked   = !!j.sync.ignoreErrors;
@@ -336,6 +337,7 @@ function uiToJob() {
   j.sync.preserveTimes     = $('st-times').checked;
   j.sync.fixDatesOnly      = $('st-fixdates').checked;
   j.sync.copyPermissions   = $('st-perms').checked;
+  j.sync.safeNames         = $('st-safenames').value;
   j.sync.retryCount        = Math.max(0, parseInt($('st-retry').value, 10) || 0);
   j.sync.retryDelayMs      = Math.max(1, parseInt($('st-retry-delay').value, 10) || 5) * 1000;
   j.sync.ignoreErrors      = $('st-ignore').checked;
@@ -1299,6 +1301,8 @@ function askConfirm() {
     ['Excluded', s.excluded],
   ];
   if (s.moveLeft + s.moveRight) cfCells.splice(3, 0, ['Move (rename)', s.moveLeft + s.moveRight]);
+  const renames = (s.renameLeft || 0) + (s.renameRight || 0);
+  if (renames) cfCells.splice(3, 0, ['Rename (Win)', renames]);
   $('cf-grid').innerHTML = cfCells
     .map(([l, v]) => `<div class="srow"><div class="sr-lbl">${l}</div><div class="sr-val">${v}</div></div>`).join('');
 
@@ -1311,6 +1315,14 @@ function askConfirm() {
     warns.push(`${removals} item${removals > 1 ? 's' : ''} will be ${how}.`);
     state.cfTrashLine = j.sync.deletion === 'recycler' ? warns.length - 1 : -1;
   }
+  // (0.8.9) Renaming the source's own files is the one change a project file
+  // (Premiere, Resolve, After Effects) notices: its media go offline.
+  if (s.renameLeft) {
+    const ex = (s.renameList || []).filter(x => x.side === 'left').slice(0, 3).map(x => `"${x.from}"`).join(', ');
+    warns.push(`${s.renameLeft} item${s.renameLeft > 1 ? 's' : ''} in the SOURCE will be renamed for Windows (${ex}${s.renameLeft > 3 ? ', …' : ''}). ` +
+      'Projects that use them (Premiere, Resolve, After Effects…) will lose their links.');
+  }
+  if (s.renameRight) warns.push(`${s.renameRight} item${s.renameRight > 1 ? 's' : ''} in the destination will be renamed for Windows.`);
   if (s.conflicts) warns.push(`${s.conflicts} conflict${s.conflicts > 1 ? 's' : ''} will be skipped — resolve them by clicking their action cell.`);
   const changed = s.createLeft + s.createRight + s.updateLeft + s.updateRight + removals;
   if (changed >= 10 && changed > 0.5 * s.rows && (removals || s.updateLeft + s.updateRight)) {
@@ -2057,6 +2069,11 @@ function bind() {
     jobToUi(); $('ov-settings').classList.add('open');
   });
   $('set-close').addEventListener('click', () => { uiToJob(); $('ov-settings').classList.remove('open'); persist(); });
+  // (0.8.9) The renames are planned by the comparison: a plan made with the
+  // other setting must not be run.
+  $('st-safenames').addEventListener('change', () => {
+    if (state.stats) invalidateComparison('Windows-safe names changed — compare again.');
+  });
 
   // Per-job filter modal: closing applies and re-compares if a result is shown.
   $('btn-filter').addEventListener('click', () => { jobToUi(); $('ov-filter').classList.add('open'); });

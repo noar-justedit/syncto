@@ -6,10 +6,10 @@
 
 ## 1. État actuel
 
-- **Version du code : 0.8.8** (11/10/2026). En ligne sur GitHub : **à
-  demander à Noar** avant la note de release (0.8.5 au 07/10/2026 ; la 0.8.7
-  a pu être publiée depuis). Releases publiées connues : 0.7.1 → 0.8.3 et
-  0.8.5. La 0.6.0, la **0.8.4** et la **0.8.6 n'ont jamais été publiées** : le
+- **Version du code : 0.8.9** (13/10/2026). En ligne sur GitHub : **à demander
+  à Noar** avant la note de release (0.8.7 au 11/10/2026 ; la 0.8.8 a pu être
+  publiée depuis). Releases publiées connues : 0.7.1 → 0.8.3, 0.8.5 et 0.8.7.
+  La 0.6.0, la **0.8.4** et la **0.8.6 n'ont jamais été publiées** : le
   contenu de 0.8.4 est sorti avec 0.8.5, celui de 0.8.6 avec 0.8.7.
 - **Contenu de 0.8.6** (voir `CHANGELOG.md`) :
   - une paire re-pointée garde son historique de synchronisation ;
@@ -26,7 +26,9 @@
   (moteur, sécurité, interface, voir section 14) ; noms trop longs (signalé le
   11/10/2026, voir « Noms longs » en section 9) ; action de fin jamais active
   en auto-sync ; Electron 44 (macOS 13 minimum).
-- **Tests : 1314 vérifications, toutes vertes** (1169 en 0.8.7, 1106 en 0.8.5), aussi sous le Node intégré à Electron 44 (vérifié à 1279).
+- **Contenu de 0.8.9** : option « Windows-safe names » (Settings › Main :
+  Off / Destination only / Both sides), voir section 3 et section 9.
+- **Tests : 1346 vérifications, toutes vertes** (1314 en 0.8.8, 1169 en 0.8.7).
 - Dépôt : https://github.com/noar-justedit/syncto (GPL-3.0), branche `main`.
 - Versions des outils : Electron 44.7.0 (Chromium 152, Node 24.21 intégré ;
   passage de 43 à 44 demandé par Noar le 10/10/2026, sorti en 0.8.8),
@@ -98,6 +100,19 @@ identique → seule la date est corrigée.
   Windows seulement : rien de posé depuis le Mac pour l'instant.
 - **Notes privées supprimées** (03/10/2026) : tout le suivi est public, dans
   `AGENTS.md` et ce fichier (règles ARNO DEV).
+- **Noms compatibles Windows** (13/10/2026, `src/main/fs/winname.js`) :
+  option de job `sync.safeNames` = `off` (défaut) | `destination` (côté droit
+  seulement, noms existants compris) | `both` (source aussi). Remplace par `_`
+  ce que Windows refuse (`< > : " | ? *`, caractères de contrôle, et leurs
+  équivalents U+F001–U+F029 écrits par un Mac sur un partage SMB), retire
+  espace/point final, ajoute `_` aux noms de périphérique. Parenthèses et
+  virgules gardées : Windows les accepte (Noar pensait le contraire ; la
+  vraie cause des carrés sur PC est le « : » converti par le Mac). Le nom
+  nettoyé est l'identité de l'élément (clé de comparaison, base). Le fichier
+  d'icône Mac `Icon\r` est ignoré quand l'option est active. Renommages faits
+  en premier, dossiers avant leur contenu ; un échec arrête le run.
+- **Fichiers `._nom` (AppleDouble) non traités** (13/10/2026) : Noar n'en voit
+  pas sur ses partages ; s'il en apparaît, un filtre d'exclusion suffit.
 - **Action de fin jamais active en auto-sync** (11/10/2026) : tant que
   l'auto-sync est armé, quitter / veille / extinction sont ignorés (run auto
   ou lancé à la main), l'auto-sync reste armé, la ligne d'état le dit.
@@ -320,7 +335,8 @@ est rapportée `UNCAUGHT in <nom>`, les autres tournent quand même.
   pont preload), 42 (charte), 47 (paquets Linux, `basic_text`), 48 (demandes
   0.8.x, blocs `d1`…`d16`), 49 (`testReview088` : revue du 09/10/2026, blocs
   `e*` moteur, `s*` sécurité, `u*` interface, `v*` seconde passe, `x*`
-  Electron 44), 50 (`testLongNames088` : noms trop longs, blocs `n1`…`n5`).
+  Electron 44), 50 (`testLongNames088` : noms trop longs, blocs `n1`…`n5`),
+  51 (`testSafeNames089` : noms compatibles Windows, blocs `w1`…`w8`).
 - Un test de la section 44 est sensible au temps : s'il échoue isolément sur une
   machine chargée, relancer avant de chercher.
 - Règles d'écriture : tester le comportement, pas le commentaire ; tester le
@@ -337,6 +353,15 @@ est rapportée `UNCAUGHT in <nom>`, les autres tournent quand même.
 
 ## 9. Pièges connus (ce qui a déjà coûté du temps)
 
+- **Noms compatibles Windows** : chaque nœud a deux chemins par côté, celui
+  du disque au moment de la comparaison (`child.l/r`, pour lire) et celui
+  d'après les renommages (`relL/relR`, pour la synchro), plus `fixL/fixR`
+  (nom d'origine) quand un renommage est prévu. **Ne jamais changer la règle
+  de nettoyage** sans migration : les paires `a:b` ↔ `a_b` ne seraient plus
+  reconnues (en 2 WAYS, l'original passerait pour supprimé). Une base écrite
+  avant l'activation de l'option est indexée sous les anciens noms : le
+  premier run après activation n'a pas d'historique pour les noms nettoyés
+  (copie, jamais suppression).
 - **Noms longs** (`src/main/fs/longname.js`, 0.8.8). Limite d'UN nom : 255,
   en caractères UTF-16 (NTFS, HFS+) ou en octets UTF-8 (APFS, ext4, btrfs,
   donc un NAS Synology ; 143 sur un dossier partagé chiffré Synology). Windows
@@ -455,6 +480,13 @@ est rapportée `UNCAUGHT in <nom>`, les autres tournent quand même.
    auto (Apple events) et le Trousseau (serveurs SFTP enregistrés). Testé
    seulement sous Linux ici (l'app se lance, la copie répond).
 
+7. Noms compatibles Windows (0.8.9) : sur le Mac, dossier de
+   test avec `Forum: Day 1/clip?.mov` et une icône de dossier personnalisée,
+   synchro vers le NAS en « Destination only », puis vérifier sur le PC que
+   les noms sont propres et qu'aucun fichier « Icon » n'arrive. Confirmer avec
+   Noar ce que donne la couleur de dossier de macOS Tahoe sur le PC (elle est
+   stockée en attributs étendus, pas dans un fichier `Icon\r`).
+
 ## 12. Historique des versions
 
 | Version | Date | Tests | Contenu principal |
@@ -476,6 +508,7 @@ est rapportée `UNCAUGHT in <nom>`, les autres tournent quand même.
 | 0.8.6 | 05/10 | 1163 | historique des paires re-pointées, base et verrou cachés sous Windows, `push_github.command`, fichiers de suivi |
 | 0.8.7 | 07/10 | 1169 | bandeau de run : un titre par phase, anneau de phase + anneau du run |
 | 0.8.8 | 11/10 | 1314 | revue complète (moteur, sécurité, interface), noms longs, pas d'extinction en auto-sync, Electron 44 |
+| 0.8.9 | 13/10 | 1346 | noms compatibles Windows (destination seule ou deux côtés), fichier Icon du Mac ignoré |
 
 Le détail est dans `CHANGELOG.md`.
 

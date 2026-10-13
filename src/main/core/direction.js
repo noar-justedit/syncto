@@ -385,6 +385,8 @@ function computeStats(nodes) {
     updateLeft: 0, updateRight: 0,
     deleteLeft: 0, deleteRight: 0,
     moveLeft: 0, moveRight: 0,
+    renameLeft: 0, renameRight: 0,   // (0.8.9) Windows-safe names
+    renameList: [],
     conflicts: 0, equal: 0, excluded: 0, doNothing: 0,
     bytesLeft: 0, bytesRight: 0, bytesTotal: 0,
     filesToProcess: 0,
@@ -393,6 +395,11 @@ function computeStats(nodes) {
   };
   for (const n of nodes) {
     s.catCounts[n.cat] = (s.catCounts[n.cat] || 0) + 1;
+    for (const [side, fix] of [['left', n.fixL], ['right', n.fixR]]) {
+      if (!fix) continue;
+      if (side === 'left') s.renameLeft++; else s.renameRight++;
+      if (s.renameList.length < 25) s.renameList.push({ side, from: fix, to: n.name });
+    }
     if (!n.active) { s.excluded++; }
     switch (n.op) {
       case OP.CREATE_LEFT:    s.createLeft++;  s.bytesLeft  += sizeOf(n, 'right'); break;
@@ -415,7 +422,8 @@ function computeStats(nodes) {
   }
   s.bytesTotal = s.bytesLeft + s.bytesRight;
   s.filesToProcess = s.createLeft + s.createRight + s.updateLeft + s.updateRight +
-                     s.deleteLeft + s.deleteRight + s.moveLeft + s.moveRight;
+                     s.deleteLeft + s.deleteRight + s.moveLeft + s.moveRight +
+                     s.renameLeft + s.renameRight;
   return s;
 }
 

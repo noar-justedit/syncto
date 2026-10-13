@@ -30,6 +30,7 @@
 
 const { PathFilter, SoftFilter } = require('./filter');
 const { fits, shorten, diskName } = require('../fs/longname');
+const { windowsSafe, isMacIconFile, safeNamesMode } = require('../fs/winname');
 // Required lazily: lock.js takes LOCK_NAME from this file, so importing it at
 // the top would be a cycle and LOCK_NAME would be undefined on one of the two
 // load orders. One call per comparison, so the lookup costs nothing.
@@ -207,6 +208,8 @@ class Comparer {
     this.locks = [];          // lock files a run that never finished left behind
     this.stats  = { scanned: 0, comparedBytes: 0 };
     this.symlinks = this.cfg.symlinks || 'exclude';   // exclude | asLink
+    // (0.8.9) Windows-safe names: off | destination (right side) | both.
+    this.safe = safeNamesMode(this.cfg);
     // How many items these two folders held at the end of the last run, read
     // from the database before the scan started. Zero on a first comparison.
     //
@@ -255,7 +258,7 @@ class Comparer {
     // boundary happened to land on, and the running total across pairs starts
     // the next pair from a stale number.
     this._emit('');
-    await this._walk({ c: '', l: '', r: '' }, -1, 0, !!lRoot, !!rRoot);
+    await this._walk({ c: '', l: '', r: '', lt: '', rt: '' }, -1, 0, !!lRoot, !!rRoot);
     this._emit('');
     return {
       nodes: this.nodes, errors: this.errors, stats: this.stats,
@@ -292,6 +295,9 @@ class Comparer {
         // rewrites — treated as a user file, an outer MIRROR deleted it at
         // every other run (tried and reverted during the 0.8.8 review).
         if (ALWAYS_SKIP.has(e.name) || isSyncToInternal(e.name)) continue;
+        // (0.8.9) A Mac's custom-icon file ("Icon" + carriage return): with
+        // Windows-safe names on, it is neither copied, renamed nor deleted.
+        if (this.safe !== 'off' && isMacIconFile(e.name)) continue;
         if (e.name.endsWith(TEMP_EXT) || e.name.endsWith(OLD_EXT)) {
           // Leftover from a run that was killed or lost power. It is invisible
           // to the comparison — which is right — but nothing ever removed it
@@ -315,7 +321,7 @@ class Comparer {
         }
         // Case-insensitive key so a Mac and a Windows share agree on identity,
         // while the original spelling is preserved for display and for I/O.
-        const key = e.name.normalize('NFC').toLowerCase();
+        const key = this._key(e.name);
         if (map.has(key) || map.collided.has(key)) {
           // Two items differing only by case cannot both exist on the other
           // side of a case-insensitive filesystem. (0.8.8) Neither of them is
@@ -323,9 +329,14 @@ class Comparer {
           // readdir listed first with the other side's file, and a MIRROR
           // then overwrote the backup of a.txt with the content of A.txt.
           const other = map.has(key) ? map.get(key).name : '';
+          // (0.8.9) With Windows-safe names, two names can also meet once
+          // cleaned ("a:b" and "a_b").
+          const byCase = !other || other.normalize('NFC').toLowerCase() === e.name.normalize('NFC').toLowerCase();
           this.errors.push({
             path: base.fs.join(dir, e.name),
-            message: other
+            message: !byCase
+              ? `"${e.name}" and "${other}" become the same name for Windows ("${windowsSafe(e.name.normalize('NFC'))}") — neither is synchronized. Rename one of them.`
+              : other
               ? `"${e.name}" and "${other}" differ only by upper/lower case — neither is synchronized. Rename one of them.`
               : `"${e.name}" differs only by upper/lower case from another name here — not synchronized.`,
           });
@@ -348,8 +359,9 @@ class Comparer {
   // the short one.
   _pairShortened(from, to, toSide, short) {
     for (const [key, e] of from) {
-      if (to.has(key) || fits(e.name)) continue;
-      const sk = shorten(e.name).normalize('NFC').toLowerCase();
+      const base = this._clean(e.name);
+      if (to.has(key) || fits(base)) continue;
+      const sk = this._key(shorten(base));
       if (sk === key || from.has(sk) || (to.collided && to.collided.has(sk))) continue;
       const hit = to.get(sk);
       if (!hit) continue;
@@ -357,6 +369,21 @@ class Comparer {
       to.set(key, hit);
       short.set(key, toSide);
     }
+  }
+
+  // (0.8.9) The name an item is known by: cleaned for Windows when the option
+  // is on (NFC either way), so "a:b" and "a_b" are the same item.
+  _clean(name) {
+    const n = String(name).normalize('NFC');
+    return this.safe === 'off' ? n : windowsSafe(n);
+  }
+  _key(name) { return this._clean(name).toLowerCase(); }
+  _cleans(side) { return this.safe === 'both' || (this.safe === 'destination' && side === 'right'); }
+  // The name an existing item will have on `side` once the run has renamed it.
+  _after(side, diskName) {
+    if (!this._cleans(side)) return diskName;
+    const c = windowsSafe(diskName);
+    return c === diskName ? diskName : c;
   }
 
   // `rels` carries three views of the current directory: `c` the canonical one
@@ -389,16 +416,28 @@ class Comparer {
       const l = L.get(key) || null;
       const r = R.get(key) || null;
       // The long name is the item's identity, whichever side holds the short one.
-      const shortOn = short.get(key) || ((!l || !r) && !fits((l || r).name) ? (l ? 'right' : 'left') : null);
-      const name  = (shortOn === 'left' ? r : (l || r)).name.normalize('NFC');
+      const shortOn = short.get(key) || ((!l || !r) && !fits(this._clean((l || r).name)) ? (l ? 'right' : 'left') : null);
+      const orig  = (shortOn === 'left' ? r : (l || r)).name.normalize('NFC');
+      const name  = this._clean(orig);
       const rel   = rels.c ? rels.c + '/' + name : name;
-      const lName = l ? l.name : this._spell('left',  diskName(name));
-      const rName = r ? r.name : this._spell('right', diskName(name));
+      // (0.8.9) Two spellings per side: the one on disk now (to read it during
+      // the comparison) and the one it will have after this run's renames
+      // (what the synchronization works on). They differ only for a name
+      // cleaned for Windows; a side that is not cleaned keeps its names.
+      const lAfter = l ? this._after('left', l.name)
+                       : this._spell('left', diskName(this._cleans('left') ? name : orig));
+      const rAfter = r ? this._after('right', r.name)
+                       : this._spell('right', diskName(this._cleans('right') ? name : orig));
+      const lName = l ? l.name : lAfter;
+      const rName = r ? r.name : rAfter;
       const child = {
         c: rel,
         l: rels.l ? rels.l + '/' + lName : lName,
         r: rels.r ? rels.r + '/' + rName : rName,
+        lt: rels.lt ? rels.lt + '/' + lAfter : lAfter,
+        rt: rels.rt ? rels.rt + '/' + rAfter : rAfter,
       };
+      this._fix = { left: l && lAfter !== l.name ? l.name : null, right: r && rAfter !== r.name ? r.name : null };
 
       const kind = (l || r).type;
       this._shortOn = shortOn;
@@ -434,8 +473,8 @@ class Comparer {
       // disagreement these are the same string as `rel`, and relOn() already
       // falls back to `rel` when they are null — so storing them was three
       // copies of every path in memory: 288 MB instead of 191 at 400 000 rows.
-      relL: rels.l === rel ? null : rels.l,
-      relR: rels.r === rel ? null : rels.r,
+      relL: rels.lt === rel ? null : rels.lt,
+      relR: rels.rt === rel ? null : rels.rt,
       name, type, parent: parentIdx, depth,
       // (0.8.8) The side where this item has (or will get) a shortened name.
       short: this._shortOn || null,
@@ -470,6 +509,10 @@ class Comparer {
                  (r && this.soft.passes(r.size, r.mtime));
       if (!ok) node.active = false;
     }
+    // (0.8.9) The name this item has on disk now, on a side where the run
+    // will rename it for Windows. Only set when there is a rename to do.
+    if (this._fix && this._fix.left)  node.fixL = this._fix.left;
+    if (this._fix && this._fix.right) node.fixR = this._fix.right;
     return node;
   }
 
