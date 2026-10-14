@@ -103,7 +103,12 @@ function formatChecksumList(algo, entries, meta) {
   ];
   if (meta && meta.pair) head.push(`# pair: ${meta.pair}`);
   if (meta && meta.side) head.push(`# side: ${meta.side}`);
-  const body = entries.map(e => `${e.hash}  ${e.rel}`);
+  // (0.9.0) A name holding a line break (the Mac's "Icon\r") broke its line in
+  // two. Escaped the way md5sum and xxhsum do: the line starts with "\", and
+  // "\\", "\n", "\r" stand for a backslash, a line feed, a carriage return.
+  const body = entries.map(e => /[\\\n\r]/.test(e.rel)
+    ? `\\${e.hash}  ${e.rel.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/\r/g, '\\r')}`
+    : `${e.hash}  ${e.rel}`);
   return head.concat(body).join('\n') + '\n';
 }
 
@@ -114,8 +119,12 @@ function parseChecksumList(text) {
     const m = /^#\s*algorithm:\s*(\S+)/i.exec(line);
     if (m) { algo = m[1]; continue; }
     if (!line || line.startsWith('#')) continue;
-    const mm = /^([0-9a-fA-F]+)\s\s?(.+)$/.exec(line);
-    if (mm) out.push({ hash: mm[1].toLowerCase(), rel: mm[2] });
+    // (0.9.0) "\" first: an escaped name (see formatChecksumList).
+    const esc = line.startsWith('\\');
+    const mm = /^([0-9a-fA-F]+)\s\s?(.+)$/.exec(esc ? line.slice(1) : line);
+    if (!mm) continue;
+    const rel = esc ? mm[2].replace(/\\(\\|n|r)/g, (_, c) => c === 'n' ? '\n' : c === 'r' ? '\r' : '\\') : mm[2];
+    out.push({ hash: mm[1].toLowerCase(), rel });
   }
   return { algo, entries: out };
 }

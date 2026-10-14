@@ -183,6 +183,30 @@ class PathFilter {
     return res;
   }
 
+  // (0.9.0) One item, several spellings: with Windows-safe names on, an item is
+  // known by its cleaned name ("Archive_ old") while the filter was written
+  // with the name the Finder shows ("Archive: old"). Testing the cleaned name
+  // alone made such an exclusion match nothing, and MIRROR deleted the items
+  // it was meant to protect. Included when ANY spelling is included, excluded
+  // when ANY spelling is excluded.
+  passFileAny(rels) {
+    if (this.trivial) return true;
+    const list = [...new Set(rels.map(normRel).filter(Boolean))];
+    if (list.length <= 1) return this.passFile(list[0] || '');
+    const inc = list.some(r => this._hit(this.include, r, 'file') || this._ancestorHit(this.include, r));
+    if (!inc) return false;
+    return !list.some(r => this._hit(this.exclude, r, 'file') || this._ancestorHit(this.exclude, r));
+  }
+
+  passFolderAny(rels) {
+    if (this.trivial) return true;
+    const list = [...new Set(rels.map(normRel).filter(Boolean))];
+    if (list.length <= 1) return this.passFolder(list[0] || '');
+    const inc = list.some(r => this._hit(this.include, r, 'folder') || this._ancestorHit(this.include, r) || this._couldContain(r));
+    if (!inc) return false;
+    return !list.some(r => this._hit(this.exclude, r, 'folder') || this._ancestorHit(this.exclude, r));
+  }
+
   // True when a descendant of this folder might still be included:
   //  - a name-only include mask ("*.jpg", "CACHE") matches at ANY depth, so no
   //    folder may ever be pruned because of it — the match could be anywhere

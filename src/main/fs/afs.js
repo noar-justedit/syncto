@@ -72,13 +72,22 @@ function expandMacros(phrase, now) {
   // server address they leaked: a shared job with
   // sftp://u@%COMPUTERNAME%.example.org/%USERNAME% sent both names to that
   // host through its DNS lookup, while the field still showed "%…%".
-  const remote = /^\s*sftp:\/\//i.test(String(phrase || ''));
-  return String(phrase || '').replace(/%([A-Za-z_][A-Za-z0-9_]*)%/g, (full, name) => {
+  // (0.9.0) Nor in a network path: a shared job naming
+  // \\someone.example\x\%USERNAME%\%COMPUTERNAME% made Windows connect to that
+  // machine with the values in the path (and the login presented with it).
+  // A path that only BECOMES a network path once expanded (%LOGONSERVER%\x)
+  // is not expanded either.
+  const REMOTE = /^\s*(sftp:\/\/|\\\\|\/\/)/i;
+  const src = String(phrase || '');
+  const expand = withEnv => src.replace(/%([A-Za-z_][A-Za-z0-9_]*)%/g, (full, name) => {
     const k = name.toLowerCase();
     if (Object.prototype.hasOwnProperty.call(map, k)) return map[k];
-    if (!remote && process.env[name] != null) return process.env[name];
+    if (withEnv && process.env[name] != null) return process.env[name];
     return full;
   });
+  if (REMOTE.test(src)) return expand(false);
+  const out = expand(true);
+  return REMOTE.test(out) ? expand(false) : out;
 }
 
 // ── Location parsing ───────────────────────────────────────────────────────
@@ -197,7 +206,9 @@ class FsPool {
 // never carry a secret past this point.
 function redactLocation(phrase) {
   const s = String(phrase == null ? '' : phrase);
-  return s.replace(/^(sftp:\/\/)([^@/:]+):([^@/]*)@/i, '$1$2@');
+  // (0.9.0) Leading spaces allowed, as parseLocation allows them: " sftp://u:p@h"
+  // connected (it trims) but was not redacted, and the password was saved.
+  return s.replace(/^(\s*sftp:\/\/)([^@/:]+):([^@/]*)@/i, '$1$2@');
 }
 
 module.exports = { FsPool, parseLocation, expandMacros, redactLocation };

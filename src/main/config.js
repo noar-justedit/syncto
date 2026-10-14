@@ -554,7 +554,8 @@ class Prefs {
 // Take it out of the path, and put it where every other secret lives: the OS
 // credential store, keyed by user@host, so the job keeps working.
 function captureUrlPassword(data, phrase) {
-  const m = /^sftp:\/\/([^@/:]+):([^@/]*)@([^/:]+)(?::(\d+))?/i.exec(String(phrase || ''));
+  // (0.9.0) Leading spaces allowed, as parseLocation allows them.
+  const m = /^\s*sftp:\/\/([^@/:]+):([^@/]*)@([^/:]+)(?::(\d+))?/i.exec(String(phrase || ''));
   if (!m || !m[2]) return phrase;
   const [, username, password, host, port] = m;
   if (!Array.isArray(data.servers)) data.servers = [];

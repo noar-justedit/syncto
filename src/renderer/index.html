@@ -161,7 +161,7 @@ gap:0;padding:4px 4px;border-radius:5px;font-size:12.5px;cursor:default;}
 .ov-row.off{opacity:.38;}
 .ov-pct{position:relative;height:15px;background:var(--bg);border:1px solid var(--border);
 border-radius:3px;overflow:hidden;margin-right:7px;}
-.ov-pct .bar{position:absolute;left:0;top:0;bottom:0;background:rgba(53,201,139,.35);}
+.ov-pct .bar{position:absolute;left:0;top:0;bottom:0;background:rgba(160,168,190,.28);}  /* (0.9.0) a share of size, not "done": neutral, not green */
 .ov-pct .lbl{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
 font-family:var(--mono);font-size:9.5px;font-weight:700;color:var(--text2);}
 .ov-name{display:flex;align-items:center;gap:5px;min-width:0;color:var(--text2);}
@@ -224,6 +224,9 @@ font-size:11.5px;font-weight:600;padding:4px 10px;cursor:pointer;}
 
 /* ── Folder pair ──────────────────────────────── */
 #pairwrap{flex-shrink:0;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--bg2);}
+/* (0.9.0) Many pairs scroll inside their card: twelve of them pushed COMPARE,
+   SYNCHRONIZE and CANCEL below the bottom of the window. */
+#pairwrap{max-height:28vh;overflow-y:auto;min-height:0;}
 .br-btn{flex-shrink:0;padding:0 12px;border-radius:var(--rs);border:1px solid var(--border);
 background:var(--bg3);color:var(--text3);font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font);}
 .br-btn:hover{color:var(--text);border-color:var(--border2);}
@@ -402,8 +405,6 @@ animation:btnGlowRed2 1.9s ease-in-out infinite;}
 #search{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;
 font-size:12px;color:var(--text);font-family:var(--mono);outline:none;width:180px;}
 #search:focus{border-color:var(--accent-g);}
-.chk{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--text3);cursor:pointer;}
-.chk input{accent-color:var(--accent);width:13px;height:13px;cursor:pointer;}
 
 /* ── Grid — two aligned panes, FreeFileSync style ─
    One row per item. The LEFT pane shows the item as it exists in the source,
@@ -506,14 +507,14 @@ padding:6px 12px;cursor:pointer;font-family:inherit;}
 .srv-tree::-webkit-scrollbar,.err-body::-webkit-scrollbar{width:13px;height:13px;}
 #gridscroll::-webkit-scrollbar-track,#ov-list::-webkit-scrollbar-track,
 .recent-list::-webkit-scrollbar-track,.mcard::-webkit-scrollbar-track,
-.srv-tree::-webkit-scrollbar-track,.err-body::-webkit-scrollbar-track-track{background:transparent;}
+.srv-tree::-webkit-scrollbar-track,.err-body::-webkit-scrollbar-track{background:transparent;}
 #gridscroll::-webkit-scrollbar-thumb,#ov-list::-webkit-scrollbar-thumb,
 .recent-list::-webkit-scrollbar-thumb,.mcard::-webkit-scrollbar-thumb,
-.srv-tree::-webkit-scrollbar-thumb,.err-body::-webkit-scrollbar-thumb-thumb{background:#454956;border-radius:8px;
+.srv-tree::-webkit-scrollbar-thumb,.err-body::-webkit-scrollbar-thumb{background:#454956;border-radius:8px;
 border:3px solid transparent;background-clip:content-box;min-height:40px;}
 #gridscroll::-webkit-scrollbar-thumb:hover,#ov-list::-webkit-scrollbar-thumb:hover,
 .recent-list::-webkit-scrollbar-thumb:hover,.mcard::-webkit-scrollbar-thumb:hover,
-.srv-tree::-webkit-scrollbar-thumb:hover,.err-body::-webkit-scrollbar-thumb:hover-thumb:hover{background:#6a6f80;background-clip:content-box;}
+.srv-tree::-webkit-scrollbar-thumb:hover,.err-body::-webkit-scrollbar-thumb:hover{background:#6a6f80;background-clip:content-box;}
 
 /* ── Status strip ─────────────────────────────── */
 #statusbar{flex-shrink:0;display:flex;align-items:center;gap:7px;padding:8px 16px;
@@ -710,15 +711,11 @@ color:var(--text3);}
 border:1px solid var(--border);border-radius:7px;padding:8px 10px;overflow-wrap:anywhere;}
 .rl-path.gone{color:var(--text3);text-decoration:line-through;text-decoration-color:rgba(242,85,90,.5);}
 .rl-path.ok{color:var(--green);border-color:rgba(53,201,139,.35);background:rgba(53,201,139,.07);}
-.rl-lbl{font-size:10.5px;font-weight:800;letter-spacing:.09em;text-transform:uppercase;
-color:var(--text3);margin:10px 0 6px;}
 .rl-note{font-size:11.5px;color:var(--text3);margin-top:7px;line-height:1.5;}
 .rl-acts{display:flex;gap:7px;margin-top:11px;}
 .rl-btn{padding:7px 12px;border-radius:6px;border:1px solid var(--border2);background:var(--bg4);
 color:var(--text2);font-family:inherit;font-size:11.5px;font-weight:600;cursor:pointer;}
 .rl-btn:hover{color:var(--text);border-color:var(--text3);}
-.rl-btn.use{background:rgba(53,201,139,.12);border-color:rgba(53,201,139,.4);color:var(--green);}
-.rl-more{font-size:11.5px;color:var(--text3);margin-top:9px;line-height:1.5;overflow-wrap:anywhere;}
 /* Red: a folder or a drive that is not there stops the job (0.8.3 — it was
    orange in 0.8.0, and an offline volume read as a mere suggestion). */
 #missing-badge{display:inline-flex;align-items:center;font-family:inherit;font-size:11px;
@@ -774,7 +771,7 @@ padding:8px 11px;border-radius:6px;margin-bottom:13px;border:1px solid transpare
 line-height:1.45;}
 .srv-status svg{width:14px;height:14px;flex-shrink:0;}
 .srv-status.idle{background:var(--bg3);border-color:var(--border);color:var(--text3);}
-.srv-status.busy{background:var(--orange-d);border-color:rgba(242,160,61,.35);color:var(--orange);}
+.srv-status.busy{background:var(--blue-d);border-color:rgba(77,144,240,.35);color:var(--blue);}  /* (0.9.0) connecting is neutral: blue */
 .srv-status.good{background:var(--green-d);border-color:var(--green-g);color:var(--green);}
 .srv-status.bad{background:var(--red-d);border-color:rgba(242,85,90,.4);color:var(--red);}
 @keyframes srvspin{to{transform:rotate(360deg)}}
@@ -833,7 +830,6 @@ display:flex;align-items:center;justify-content:center;margin-top:1px;}
 .sum-verify.good{border-color:var(--green-g);background:var(--green-d);}
 .sum-verify.good .sv-ico{background:rgba(53,201,139,.2);color:var(--green);}
 .sum-verify.good b{color:var(--green);}
-.sum-verify.plain .sv-ico{background:var(--bg4);color:var(--text2);}
 /* Copied, but nothing read it back. Not an error — a promise not made. */
 .sum-verify.warn{border-color:rgba(230,160,60,.45);background:rgba(230,160,60,.10);}
 .sum-verify.warn .sv-ico{background:rgba(230,160,60,.2);color:var(--orange);}
@@ -896,6 +892,8 @@ padding:3px 7px;cursor:pointer;font-family:inherit;}
 stroke-linecap:round;stroke-linejoin:round;}
 .err-copy.done{color:var(--green);border-color:rgba(74,199,124,.4);}
 .err-item{font-size:11.5px;font-family:var(--mono);color:var(--text3);padding:2px 0;overflow-wrap:anywhere;}
+/* (0.9.0) The line that says a list was cut short. */
+.err-item.more{font-family:var(--font);font-style:italic;color:var(--text2);}
 .file-links{display:flex;flex-direction:column;gap:4px;margin-bottom:12px;}
 .file-link{font-size:11.5px;font-family:var(--mono);color:var(--blue);cursor:pointer;
 overflow-wrap:anywhere;text-decoration:none;}
@@ -952,6 +950,8 @@ font-size:12.5px;color:var(--text);cursor:pointer;position:relative;white-space:
 .ctx-it.off:hover{background:none;}
 .ctx-it svg{width:14px;height:14px;flex-shrink:0;}
 .ctx-it .ok{color:var(--green);} .ctx-it .ko{color:var(--red);}
+/* (0.9.0) Excluding deletes nothing: not red. */
+.ctx-it .ko.skip{color:var(--text2);}
 .ctx-it .lbl{flex:1;}
 .ctx-it .key{font-family:var(--mono);font-size:10.5px;color:var(--text3);
 border:1px solid var(--border2);border-radius:4px;padding:1px 6px;}
@@ -1056,7 +1056,7 @@ html,body{background:var(--page);}
 /* ── Labels: capitals 10/700, fixed 12 px height ───────────────────────── */
 .sb-hd{border-bottom:none;padding:13px 14px 6px;}
 .sb-hd h2,.cc-label,.tgroup > label,.prow-hdr .fld-lbl,#gridhead .hd-big,
-.set-sec-title,.rl-tag,.rl-lbl,.slabel,.sr-lbl{
+.set-sec-title,.rl-tag,.slabel,.sr-lbl{
   font-family:var(--font);font-size:10px;font-weight:700;letter-spacing:.14em;
   text-transform:uppercase;color:var(--text3);height:12px;line-height:12px;}
 .cc-label{margin-bottom:10px;}
@@ -1097,7 +1097,7 @@ html,body{background:var(--page);}
 .ov-row.sel .ov-name,.ov-row.scoped .ov-name{color:var(--text);}
 .ov-row.picked{background:transparent;box-shadow:var(--focus);}
 .ov-row.picked.scoped{box-shadow:var(--focus);}
-.ov-chk input,.chk input,.grow .c-chk input{accent-color:var(--text2);}
+.ov-chk input,.grow .c-chk input{accent-color:var(--text2);}
 .ov-twist:hover{background:var(--ins);}
 .ov-pairhead .n,.grow-hdr .gh-num{min-width:0;height:auto;border:none;
   font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:.06em;
@@ -1268,12 +1268,10 @@ html,body{background:var(--page);}
 .rl-path{background:var(--page);border:none;border-radius:var(--r-field);}
 .rl-path.ok{border:none;}
 .rl-btn{background:var(--card);border:none;border-radius:9px;}
-.rl-btn.use{background:rgba(53,201,139,.15);border:none;}
 .sum-verify{border:none;background:var(--ins);border-radius:var(--r-ins);}
 .sum-verify.good{background:rgba(53,201,139,.1);}
 .sum-verify.warn{background:rgba(242,160,61,.1);}
 .sum-verify.bad{background:rgba(242,85,90,.1);}
-.sum-verify.plain .sv-ico{background:var(--raise);}
 .sum-ico,.sum-ico.ok,.sum-ico.err,.sum-ico.cancel{border:none;border-radius:12px;}
 .sum-recheck{background:var(--ins);border:none;border-radius:var(--r-ins);}
 .srow{background:var(--ins);border:none;border-radius:var(--r-ins);}
@@ -1427,6 +1425,9 @@ body.lassoing .tooltip-float{display:none !important;}
 #cf-warn.err-block{background:rgba(242,160,61,.08);}
 /* Sentences in the text font; monospace stays for paths and numbers. */
 .status-note,.set-row select,.srv-status,#cf-warn-body .err-item,#cf-block-body .err-item{font-family:var(--font);}
+/* (0.9.0) And the other sentences: the auto-sync card, the run summary's
+   errors and notes, the auto-sync line at the bottom. */
+#ov-auto .err-item,#sum-errors-body .err-item,#sum-notes-body .err-item,#footer .fc#footer-auto{font-family:var(--font);}
 /* Server window: the port field keeps its width; a long login@host no
    longer squeezes the server name down to one letter. */
 .set-row .srv-row2 input.portx{flex:0 0 82px;width:82px;}
@@ -1448,9 +1449,6 @@ body.lassoing .tooltip-float{display:none !important;}
    list above keeps some rows. */
 @media (max-height:760px){
   #bottombar.live .pb-inner{padding:10px 16px 10px;}
-  #bottombar.live .pb-pct-ring{width:88px;height:88px;}
-  #bottombar.live.run .ring-txt{font-size:20px;}
-  #bottombar.live .pb-title{font-size:22px;}
   #bottombar.live .pb-hd{gap:16px;}
   #bottombar.live .pb-stats{margin-top:4px;}
   #bottombar.live .sbox{padding-top:5px;padding-bottom:5px;}

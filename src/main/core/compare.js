@@ -29,7 +29,7 @@
 // Optional whole-hour shifts cover DST and timezone-naive filesystems.
 
 const { PathFilter, SoftFilter } = require('./filter');
-const { fits, shorten, diskName } = require('../fs/longname');
+const { fits, diskName, tagOf, tagIn } = require('../fs/longname');
 const { windowsSafe, isMacIconFile, safeNamesMode } = require('../fs/winname');
 // Required lazily: lock.js takes LOCK_NAME from this file, so importing it at
 // the top would be a cycle and LOCK_NAME would be undefined on one of the two
@@ -219,6 +219,18 @@ class Comparer {
     // the whole reason for comparing. The interface says "about".
     this.expected = Math.max(0, ctx.expected || 0);
     this.startedAt = Date.now();
+    // (0.9.0) Names too long for a destination that the last run knew, by
+    // the short name they have there: "<folder>\0<short key>" -> long name.
+    // A long original deleted at the source left its short copy unpaired: it
+    // looked new, and 2 WAYS copied it back under the short name.
+    this.shortIndex = null;
+    for (const rel of ctx.knownRels || []) {
+      const cut = rel.lastIndexOf('/');
+      const leaf = rel.slice(cut + 1);
+      if (fits(leaf)) continue;
+      if (!this.shortIndex) this.shortIndex = new Map();
+      this.shortIndex.set((cut < 0 ? '' : rel.slice(0, cut)) + '\u0000' + tagOf(leaf), leaf);
+    }
   }
 
   _emit(current) {
@@ -303,7 +315,7 @@ class Comparer {
           // to the comparison — which is right — but nothing ever removed it
           // either, so an interrupted 180 GB copy sat on the NAS for ever and
           // the space vanished with no explanation anywhere in the app.
-          this.leftovers.push({ side, path: base.fs.join(dir, e.name), size: e.size || 0 });
+          this.leftovers.push({ side, path: base.fs.join(dir, e.name), size: e.size || 0, type: e.type });
           continue;
         }
         if (e.type === 'symlink' && this.symlinks === 'exclude') continue;
@@ -315,7 +327,9 @@ class Comparer {
         // made it look absent, and MIRROR deleted the other side's copy.
         if (e.unreadable) {
           const relC = (relDir ? relDir.normalize('NFC') + '/' : '') + e.name.normalize('NFC');
-          const filtered = e.type === 'folder' ? !this.filter.passFolder(relC) : !this.filter.passFile(relC);
+          // (0.9.0) Both spellings, as in _walk.
+          const rels = this.safe === 'off' ? [relC] : [relC, relC.split('/').map(windowsSafe).join('/')];
+          const filtered = e.type === 'folder' ? !this.filter.passFolderAny(rels) : !this.filter.passFileAny(rels);
           if (filtered || SYSTEM_LOCKED.has(e.name.toLowerCase())) continue;
           throw Object.assign(new Error(`"${e.name}" could not be read (${e.unreadable})`), { code: e.unreadable });
         }
@@ -359,10 +373,19 @@ class Comparer {
   // the short one.
   _pairShortened(from, to, toSide, short) {
     for (const [key, e] of from) {
-      const base = this._clean(e.name);
+      // (0.9.0) The name as it is on the destination's disk: cleaned only on a
+      // side that cleans. "Session: <long>" from the right lands on a left
+      // that keeps its names as shorten("Session: …"), not shorten("Session_ …"),
+      // and the two were never paired again.
+      const base = this._cleans(toSide) ? this._clean(e.name) : e.name.normalize('NFC');
       if (to.has(key) || fits(base)) continue;
-      const sk = this._key(shorten(base));
-      if (sk === key || from.has(sk) || (to.collided && to.collided.has(sk))) continue;
+      // Found by its tag, taken from the item's identity (see shorten()).
+      if (!to.byTag) {
+        to.byTag = new Map();
+        for (const [k, x] of to) { const t = tagIn(x.name); if (t) to.byTag.set(t, k); }
+      }
+      const sk = to.byTag.get(tagOf(this._clean(e.name)));
+      if (!sk || sk === key || from.has(sk) || (to.collided && to.collided.has(sk))) continue;
       const hit = to.get(sk);
       if (!hit) continue;
       to.delete(sk);
@@ -378,6 +401,12 @@ class Comparer {
     return this.safe === 'off' ? n : windowsSafe(n);
   }
   _key(name) { return this._clean(name).toLowerCase(); }
+  // (0.9.0) Every name a filter may have been written with: the item's
+  // identity and, with Windows-safe names on, each side's name on disk.
+  _spellings(child) {
+    if (this.safe === 'off') return [child.c];
+    return [child.c, child.l.normalize('NFC'), child.r.normalize('NFC')];
+  }
   _cleans(side) { return this.safe === 'both' || (this.safe === 'destination' && side === 'right'); }
   // The name an existing item will have on `side` once the run has renamed it.
   _after(side, diskName) {
@@ -408,6 +437,27 @@ class Comparer {
     const short = new Map();
     this._pairShortened(L, R, 'right', short);
     this._pairShortened(R, L, 'left', short);
+    // (0.9.0) A short copy whose long original is gone: still the same item,
+    // known by the long name the last run recorded.
+    const longName = new Map();
+    if (this.shortIndex) {
+      for (const [M, other, side] of [[L, R, 'left'], [R, L, 'right']]) {
+        const moves = [];
+        for (const [key] of M) {
+          if (other.has(key) || short.has(key)) continue;
+          const t = tagIn(M.get(key).name);
+          const hit = t && this.shortIndex.get((rels.c || '') + '\u0000' + t);
+          if (!hit) continue;
+          const longKey = this._key(hit);
+          if (longKey === key || L.has(longKey) || R.has(longKey)) continue;
+          moves.push([key, longKey, hit]);
+        }
+        for (const [key, longKey, hit] of moves) {
+          M.set(longKey, M.get(key)); M.delete(key);
+          short.set(longKey, side); longName.set(longKey, hit);
+        }
+      }
+    }
     const keys = new Set([...L.keys(), ...R.keys()].filter(k => !clash.has(k)));
     const sorted = [...keys].sort();
 
@@ -416,8 +466,11 @@ class Comparer {
       const l = L.get(key) || null;
       const r = R.get(key) || null;
       // The long name is the item's identity, whichever side holds the short one.
-      const shortOn = short.get(key) || ((!l || !r) && !fits(this._clean((l || r).name)) ? (l ? 'right' : 'left') : null);
-      const orig  = (shortOn === 'left' ? r : (l || r)).name.normalize('NFC');
+      // (0.9.0) Measured as the name will be on the missing side's disk.
+      const missing = !l ? 'left' : !r ? 'right' : null;
+      const onMissing = missing && (this._cleans(missing) ? this._clean((l || r).name) : (l || r).name.normalize('NFC'));
+      const shortOn = short.get(key) || (missing && !fits(onMissing) ? missing : null);
+      const orig  = longName.get(key) || (shortOn === 'left' ? r : (l || r)).name.normalize('NFC');
       const name  = this._clean(orig);
       const rel   = rels.c ? rels.c + '/' + name : name;
       // (0.8.9) Two spellings per side: the one on disk now (to read it during
@@ -425,9 +478,9 @@ class Comparer {
       // (what the synchronization works on). They differ only for a name
       // cleaned for Windows; a side that is not cleaned keeps its names.
       const lAfter = l ? this._after('left', l.name)
-                       : this._spell('left', diskName(this._cleans('left') ? name : orig));
+                       : this._spell('left', diskName(this._cleans('left') ? name : orig, name));
       const rAfter = r ? this._after('right', r.name)
-                       : this._spell('right', diskName(this._cleans('right') ? name : orig));
+                       : this._spell('right', diskName(this._cleans('right') ? name : orig, name));
       const lName = l ? l.name : lAfter;
       const rName = r ? r.name : rAfter;
       const child = {
@@ -445,7 +498,7 @@ class Comparer {
       const typeClash = l && r && l.type !== r.type;
 
       if (kind === 'folder' && !typeClash) {
-        if (!this.filter.passFolder(rel)) continue;
+        if (!this.filter.passFolderAny(this._spellings(child))) continue;
         const idx = this.nodes.length;
         this.nodes.push(this._makeNode(idx, child, name, 'folder', parentIdx, depth, l, r, null));
         this.stats.scanned++;
@@ -454,7 +507,7 @@ class Comparer {
         continue;
       }
 
-      if (!this.filter.passFile(rel)) continue;
+      if (!this.filter.passFileAny(this._spellings(child))) continue;
       const node = this._makeNode(this.nodes.length, child, name,
         typeClash ? 'file' : kind, parentIdx, depth, l, r, typeClash);
       if (!typeClash && l && r && kind !== 'symlink') await this._categorizeFile(node, child, l, r);

@@ -133,8 +133,8 @@ suffit, la suite n'a pas besoin du binaire.
   de la version en cours (demandes 0.8.x : section 48, `testRequest083`, blocs
   `d1`…`d16` ; revue du 09/10/2026 : section 49, `testReview088` ; noms trop
   longs : section 50, `testLongNames088` ; noms compatibles Windows : section
-  51, `testSafeNames089` ; une nouvelle
-  version peut continuer là ou ouvrir la section 52).
+  51, `testSafeNames089` ; audit du 13/10/2026 : section 52, `testAudit1013` ;
+  une nouvelle version peut continuer là ou ouvrir la section 53).
 - **Vérifier un test en le cassant** : remettre l'ancien code, constater que le
   test passe au rouge, remettre en état.
 - Beaucoup de tests lisent `app.js` / `index.html` avec des expressions
@@ -161,7 +161,8 @@ suffit, la suite n'a pas besoin du binaire.
 7. **Demander quelle version est en ligne**, puis écrire la note de release
    (anglais) depuis celle-là. Modèle : titre, chapeau, « **N checks pass**, up
    from M at X.Y.Z », sections Fixed / Added / Changed / Removed,
-   « Upgrading », plateformes, bloc de build.
+   « Upgrading », plateformes, bloc de build. Elle est enregistrée dans
+   `docs/RELEASE-X.Y.Z.md`, donc dans le ZIP (demande de Noar, 13/10/2026).
 8. Fournir **`syncto_vX.Y.Z.zip`** : le dossier tel qu'il doit être sur GitHub,
    sans `node_modules/`, `dist/`, `.git/`, `.DS_Store`, droits d'exécution
    conservés sur `*.command` et `*.sh`.

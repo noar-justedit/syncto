@@ -70,11 +70,16 @@ function splitExt(name) {
 // "<as much of the beginning as fits>~<tag>.<ext>". Cut on whole characters
 // (never half an emoji), without a trailing space or dot, which Windows drops
 // silently and would make the name differ from what was asked for.
-function shorten(name, limit) {
+// (0.9.0) `tagName`: the name the 8 hex are taken from, when it is not `name`
+// itself. With Windows-safe names on, an item is known by its cleaned name
+// while a side that keeps its names writes it with the original spelling:
+// both short forms carry the tag of the cleaned name, so they can be paired
+// whatever the spelling of their beginning.
+function shorten(name, limit, tagName) {
   const max = limit == null ? limits.name : limit;
   const nfc = String(name).normalize('NFC');
   const [stem, ext] = splitExt(nfc);
-  const tail = '~' + tagOf(nfc) + ext;
+  const tail = '~' + tagOf(tagName == null ? nfc : tagName) + ext;
   const cps = Array.from(stem);
   let lo = 0, hi = cps.length;
   while (lo < hi) {
@@ -86,8 +91,15 @@ function shorten(name, limit) {
 
 // The name to create at a destination for `name`: itself when it fits
 // everywhere, its shortened form otherwise.
-function diskName(name) {
-  return fits(name) ? name : shorten(name);
+function diskName(name, tagName) {
+  return fits(name) ? name : shorten(name, undefined, tagName);
+}
+
+// (0.9.0) The tag of a name written by shorten(), or null.
+const SHORT_RE = /~([0-9a-f]{8})(\.[^.\s]{1,15})?$/;
+function tagIn(name) {
+  const m = SHORT_RE.exec(String(name));
+  return m ? m[1] : null;
 }
 
 // "<path><ext>" for a scratch file, with a shortened base name when the
@@ -98,4 +110,4 @@ function scratchPath(fsx, p, ext) {
   return fsx.join(fsx.dirname(p), shorten(base, SCRATCH_MAX - ext.length) + ext);
 }
 
-module.exports = { limits, SCRATCH_MAX, fits, shorten, diskName, scratchPath, tagOf };
+module.exports = { limits, SCRATCH_MAX, fits, shorten, diskName, scratchPath, tagOf, tagIn };

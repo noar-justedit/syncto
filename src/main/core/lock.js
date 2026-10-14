@@ -554,13 +554,36 @@ async function acquireOne(fsx, folderPath, opts) {
 // and the server holding the file.
 const ALREADY_ABANDONED_MS = DETECT_ABANDONED_MS + 60000;
 
+// (0.9.0) What time it is for the disk holding `dir`, read from the date it
+// gives a file created there now. A lock's date is written by that disk's
+// clock (a NAS, a server), not ours: a NAS running two minutes behind made
+// every LIVE lock look two minutes old, and it was taken over at once while
+// its owner was still writing. Null when the probe cannot be written.
+async function folderNow(fsx, dir) {
+  if (typeof fsx.writeExclusive !== 'function') return null;
+  const p = fsx.join(dir, `.syncto.clock-${process.pid}-${Math.random().toString(36).slice(2, 10)}`);
+  try {
+    await fsx.writeExclusive(p, Buffer.alloc(0));
+    const st = await fsx.stat(p);
+    return st && st.mtime ? st.mtime : null;
+  } catch (_) {
+    return null;
+  } finally {
+    try { await fsx.unlink(p); } catch (_) {}
+  }
+}
+
 async function watchLifeSigns(fsx, lockPath, info, onStatus, token) {
   let last = await fsx.stat(lockPath);
   if (!last) return false;                        // vanished: free to take
   // Left behind by a syncto that was force-quit, crashed or lost its power —
   // two minutes ago or two weeks ago. Watching it for another minute proved
   // nothing new, and people deleted it by hand rather than wait (0.8.5).
-  if (last.mtime && Date.now() - last.mtime > ALREADY_ABANDONED_MS) return false;
+  // (0.9.0) Old by the disk's own clock, not only by ours.
+  if (last.mtime && Date.now() - last.mtime > ALREADY_ABANDONED_MS) {
+    const now = await folderNow(fsx, fsx.dirname(lockPath));
+    if (now == null || now - last.mtime > ALREADY_ABANDONED_MS) return false;
+  }
   let lastChange = Date.now();
   let lastSize = last.size, lastMtime = last.mtime;
 
@@ -705,6 +728,6 @@ async function acquireAll(entries, opts) {
 
 module.exports = {
   acquireOne, acquireAll, abandonedLockName, processStatus, localLockInfo, readLockInfo,
-  findLeftoverLocks, clearStaleLock, isCorpseName, isLockFileName, checkStillOurs, isHeldHere,
+  findLeftoverLocks, clearStaleLock, isCorpseName, isLockFileName, checkStillOurs, isHeldHere, folderNow,
   EMIT_LIFE_SIGN_MS, POLL_LIFE_SIGN_MS, DETECT_ABANDONED_MS, LOCK_NAME,
 };

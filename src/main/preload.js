@@ -42,7 +42,6 @@ const api = {
   getOverview: (view, open, sort) => ipcRenderer.invoke('get-overview', view, open, sort),
   revealNode : (idx, side)=> ipcRenderer.invoke('reveal-node', idx, side),
   preflight  : (job)     => ipcRenderer.invoke('preflight', job),
-  takeMigrationNotes: () => ipcRenderer.invoke('take-migration-notes'),
 
   // After the run, and phone notifications.
   // BOTH arguments. The handler refuses to touch the machine unless `clean`

@@ -204,8 +204,16 @@ class NativeFs {
     return fs.createReadStream(p, Object.assign({ highWaterMark: READ_BLOCK }, opts || {}));
   }
 
+  // (0.9.0) Never through a symbolic link: a link planted under a name syncto
+  // writes (".syncto.db.syncto_tmp", "clip.mov.syncto_tmp") put the bytes on
+  // whatever it pointed at, outside both folders. O_NOFOLLOW makes the open
+  // fail on a link instead (macOS, Linux). Same system calls otherwise.
+  // Windows has no such flag; creating a link there needs administrator
+  // rights, and a share's links are not followed by default.
   createWriteStream(p) {
-    return fs.createWriteStream(p, { highWaterMark: READ_BLOCK });
+    const c = fs.constants;
+    const flags = c.O_NOFOLLOW ? (c.O_WRONLY | c.O_CREAT | c.O_TRUNC | c.O_NOFOLLOW) : 'w';
+    return fs.createWriteStream(p, { flags, highWaterMark: READ_BLOCK });
   }
 
   // Creates a file only if it does not exist yet — the atomic primitive the

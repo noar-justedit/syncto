@@ -24,7 +24,7 @@ const fs = require('fs');
 const { Comparer, CAT, OP, CHECKSUM_FILE } = require('./compare');
 const { PathFilter } = require('./filter');
 const { applyDirections, computeStats, operationFor, applyFolderRules,
-        detectMoves, dissolveMove, usesDatabase } = require('./direction');
+        detectMoves, dissolveMove, usesDatabase, plannedRenames } = require('./direction');
 const { loadPairDb, savePairDb, buildSession, pairIdFor, readSideSession } = require('./db');
 const { SyncRunner } = require('./sync');
 const { FsPool, parseLocation, redactLocation } = require('../fs/afs');
@@ -34,6 +34,34 @@ const { isSafeRel } = require('./relpath');
 const { offlineVolume, isUncPath } = require('./volume');
 const { acquireAll, clearStaleLock, isLockFileName, DETECT_ABANDONED_MS } = require('./lock');
 const { SftpFs } = require('../fs/sftp');
+const { clearLink } = require('./safewrite');
+
+// (0.9.0) What a plan depends on, besides the folders: the mode, how files are
+// compared, the filters, move detection, date repair and Windows-safe names.
+// Changing any of them after a comparison used to keep the old plan armed:
+// compare in MIRROR, click UPDATE, and the confirmation said UPDATE while the
+// engine ran the MIRROR plan, deletions included. Keys are sorted so the same
+// settings always give the same text, however the object was built.
+function stableJson(v) {
+  if (Array.isArray(v)) return '[' + v.map(stableJson).join(',') + ']';
+  if (v && typeof v === 'object') {
+    return '{' + Object.keys(v).sort().filter(k => v[k] !== undefined)
+      .map(k => JSON.stringify(k) + ':' + stableJson(v[k])).join(',') + '}';
+  }
+  return JSON.stringify(v === undefined ? null : v);
+}
+function planKeyOf(job) {
+  const s = (job && job.sync) || {};
+  const custom = s.variant === 'custom';
+  return stableJson({
+    compare: (job && job.compare) || {},
+    variant: s.variant || 'mirror',
+    custom: custom ? (s.custom || null) : null,
+    customChange: custom ? (s.customChange || null) : null,
+    fixDatesOnly: !!s.fixDatesOnly,
+    safeNames: s.safeNames === 'destination' || s.safeNames === 'both' ? s.safeNames : 'off',
+  });
+}
 
 // (0.8.6) The id the pair had under the paths it held before the user changed
 // them, or null when that history must not be read.
@@ -130,11 +158,12 @@ class Session {
     // knowable total — you find out how big it is by finishing — so without
     // that number the interface cannot honestly show progress at all. With it,
     // a backup that runs every day can say "about 60%" and mean it.
-    this.db = null; this.dbNote = null; this.dbCarriedFrom = null;
+    this.db = null; this.dbNote = null; this.dbCarriedFrom = null; this.dbDocs = null;
     this.pairId = pairIdFor(job.pairId, this.left.path, this.right.path);
     this.wantMoves = cmp.detectMoves !== false;
     if (usesDatabase(job.sync.variant) || this.wantMoves) {
-      let { db, reason } = await loadPairDb(this.left, this.right, this.pairId);
+      let { db, reason, docs } = await loadPairDb(this.left, this.right, this.pairId);
+      this.dbDocs = docs;
       // (0.8.6) A pair the user re-pointed — a renamed drive, a volume that
       // came back as "NAS 1", a folder picked again in the relink window — has
       // a new path-derived id, and so no history under it. The window keeps
@@ -156,6 +185,7 @@ class Session {
           !!(await readSideSession(this.right.fs, this.right.path, this.pairId)));
         if (prevId && !newOnEither) {
           const prev = await loadPairDb(this.left, this.right, prevId);
+          this.dbDocs = prev.docs;
           if (prev.db.available) {
             db = prev.db; reason = null;
             this.dbCarriedFrom = prevId;
@@ -172,6 +202,9 @@ class Session {
       left: this.left, right: this.right,
       config: cmp, token, onProgress,
       expected: this.expected,
+      // (0.9.0) What the last run recorded, to recognise a short copy whose
+      // long original is gone.
+      knownRels: (this.db && this.db.items) ? Object.keys(this.db.items) : null,
     });
     const res = await comparer.run();
     this.nodes  = res.nodes;
@@ -228,10 +261,36 @@ class Session {
   }
 
   _touched() { this._idxCache = null; }
+  // (0.9.0) A row that lands during a run can only LEAVE the list: the cached
+  // list is filtered when next asked for, instead of rebuilt from every node
+  // at every file (13 % of the main thread at 400 000 rows).
+  _landed() { if (this._idxCache) this._idxCache.stale = true; }
+
+  // (0.9.0) The Windows-safe renames of the current plan, by row: idx ->
+  // { l, r } (the names they replace). Recomputed when the plan changes
+  // (every edit recomputes the stats), not when a file lands during a run.
+  _renameMap() {
+    if (this._renFor !== this.stats || !this._ren) {
+      const m = new Map();
+      for (const { n, side, from } of plannedRenames(this.nodes || [])) {
+        const e = m.get(n.idx) || { l: null, r: null };
+        e[side === 'left' ? 'l' : 'r'] = from;
+        m.set(n.idx, e);
+      }
+      this._ren = m; this._renFor = this.stats;
+    }
+    return this._ren;
+  }
 
   _visibleIndices(view) {
     const key = this._viewKey(view || {});
-    if (this._idxCache && this._idxCache.key === key) return this._idxCache.list;
+    if (this._idxCache && this._idxCache.key === key) {
+      if (this._idxCache.stale) {
+        this._idxCache.list = this._idxCache.list.filter(i => !this.nodes[i].doneInRun);
+        this._idxCache.stale = false;
+      }
+      return this._idxCache.list;
+    }
     const list = this._computeVisible(view);
     this._idxCache = { key, list };
     return list;
@@ -249,13 +308,18 @@ class Session {
     // Scoped to one folder, from a click in the overview: that folder and
     // everything under it, nothing else.
     const scope = v.scope && v.scope.rel ? v.scope.rel : '';
+    // (0.9.0) A row with nothing to copy but a name to clean for Windows is
+    // work: it was hidden with the identical rows, and a comparison planning
+    // only renames said "Everything is in sync" over five items to process.
+    const ren = this._renameMap();
     for (const n of this.nodes) {
       if (n.doneInRun) continue;           // landed during the run in progress
       if (scope && n.rel !== scope && !n.rel.startsWith(scope + '/')) continue;
-      if (!v.showEqual && !askedForEqual && n.op === OP.NONE) continue;
+      if (!v.showEqual && !askedForEqual && n.op === OP.NONE && !ren.has(n.idx)) continue;
       if (!v.showExcluded && !n.active) continue;
       if (v.onlyCategory && n.cat !== v.onlyCategory) continue;
-      if (v.onlyOperation && n.op !== v.onlyOperation) continue;
+      if (v.onlyOperation === 'rename') { if (!ren.has(n.idx)) continue; }
+      else if (v.onlyOperation && n.op !== v.onlyOperation) continue;
       if (needle && !n.rel.toLowerCase().includes(needle)) continue;
       out.push(n.idx);
     }
@@ -278,6 +342,8 @@ class Session {
       idx: n.idx, rel: n.rel, name: n.name, type: n.type, depth: n.depth,
       cat: n.cat, catMsg: n.catMsg, dir: n.dir, op: n.op, active: n.active,
       mv: n.movePair != null ? (this.nodes[n.movePair] ? this.nodes[n.movePair].rel : null) : null,
+      // (0.9.0) Renamed for Windows by this run: the names it replaces.
+      fx: this._renameMap().get(n.idx) || null,
       l: n.left.exists  ? { size: n.left.size,  mtime: n.left.mtime  } : null,
       r: n.right.exists ? { size: n.right.size, mtime: n.right.mtime } : null,
     };
@@ -309,8 +375,11 @@ class Session {
       if (!n) continue;
       out.add(n.idx);
       if (n.type === 'folder') {
-        const prefix = n.rel + '/';
-        for (const d of this.nodes) if (d.rel.startsWith(prefix)) out.add(d.idx);
+        // (0.9.0) Nodes are listed parent first with idx === position, so a
+        // folder's contents are the nodes right after it that are deeper.
+        // Scanning every node for every folder froze the app 17 s when 500
+        // folders were excluded at once in a 400 000-row comparison.
+        for (let j = n.idx + 1; j < this.nodes.length && this.nodes[j].depth > n.depth; j++) out.add(j);
       }
     }
     return [...out];
@@ -369,6 +438,7 @@ class Session {
   // you want to click a folder that is NOT changing and find it in the grid.
   overview(view, open, sort) {
     const all = !!(view && view.showEqual);
+    const ren = this._renameMap();
     // Unticking a folder takes its work away, so the row would vanish from a
     // panel that only lists work — and with it the tick box you would use to
     // put it back. "Show excluded", the switch the grid already has, keeps
@@ -387,8 +457,9 @@ class Session {
       // Walked rather than split: at 400 000 rows an array per node — rebuilt
       // every time a folder is unfolded — was 138 ms of pure allocation.
       const rel = n.rel;
-      const busy = n.active && n.op !== OP.NONE && n.op !== OP.DO_NOTHING &&
-                   n.op !== OP.MOVE_LEFT_FROM && n.op !== OP.MOVE_RIGHT_FROM;
+      const busy = (n.active && n.op !== OP.NONE && n.op !== OP.DO_NOTHING &&
+                    n.op !== OP.MOVE_LEFT_FROM && n.op !== OP.MOVE_RIGHT_FROM) ||
+                   ren.has(n.idx);   // (0.9.0) a rename for Windows is work too
       let key = '';
       let from = 0;
       for (let i = 0; from <= rel.length; i++) {
@@ -643,7 +714,7 @@ class Session {
       config: Object.assign({}, job.sync),
       lanes,
       token, onProgress, trashItem,
-      onRowDone: () => this._touched(),
+      onRowDone: () => this._landed(),
     });
     let run;
     try {
@@ -673,7 +744,11 @@ class Session {
         const delOp = side === 'left' ? OP.DELETE_LEFT : OP.DELETE_RIGHT;
         const anyDeleted = (this.nodes || []).some(nd => nd.op === delOp &&
           (run.applied.get(nd.rel) || {}).deleted);
-        if (!list.length && !anyDeleted) continue;
+        // (0.9.0) Same for a rename for Windows: the line under the old name
+        // made Verify Folder report an intact file as missing.
+        const renamedHere = run.renamedIdx ? run.renamedIdx[side] : null;
+        const anyRenamed = !!(renamedHere && renamedHere.size);
+        if (!list.length && !anyDeleted && !anyRenamed) continue;
         const algo = 'xxh64';
         const target = this[side];
         const p = target.fs.join(target.path, CHECKSUM_FILE);
@@ -715,6 +790,27 @@ class Session {
             const own = spelt.get(rel);
             if (own) byRel.delete(own);
           }
+          if (anyRenamed) {
+            // The path each row had on disk before this run's renames, and
+            // the one it has now; lines move from the first to the second
+            // with their hash (a rename does not touch the data).
+            const nodes = this.nodes;
+            const before = new Array(nodes.length), now = new Array(nodes.length);
+            for (const n of nodes) {
+              const own = side === 'left' ? (n.relL || n.rel) : (n.relR || n.rel);
+              const leaf = own.slice(own.lastIndexOf('/') + 1);
+              const fix = side === 'left' ? n.fixL : n.fixR;
+              const pb = n.parent != null && n.parent >= 0 ? before[n.parent] + '/' : '';
+              const pn = n.parent != null && n.parent >= 0 ? now[n.parent] + '/' : '';
+              before[n.idx] = pb + (fix || leaf);
+              now[n.idx] = pn + (fix && !renamedHere.has(n.idx) ? fix : leaf);
+              if (before[n.idx] !== now[n.idx] && byRel.has(before[n.idx]) && n.type !== 'folder') {
+                const e = byRel.get(before[n.idx]);
+                byRel.delete(before[n.idx]);
+                byRel.set(now[n.idx], Object.assign({}, e, { rel: now[n.idx] }));
+              }
+            }
+          }
           for (const e of list) byRel.set(e.rel, e);
           const merged = [...byRel.values()].sort((a, b) => a.rel < b.rel ? -1 : 1);
           await writeText(target.fs, p, formatChecksumList(algo, merged, { pair: job.name, side }));
@@ -746,7 +842,8 @@ class Session {
           this.nodes, run.applied, this.db,
           job.compare.compareVariant || 'timeSize',
           this.left.path, this.right.path, keepRel);
-        dbStamp = await savePairDb(this.left, this.right, pairId, session);
+        dbStamp = await savePairDb(this.left, this.right, pairId, session, this.dbDocs);
+        this.dbDocs = null;   // (0.9.0) used once: the files have changed now
       } catch (err) {
         // This is an ERROR, not a note. A two-way run whose database was not
         // written looks perfect and lies to the next one: delete a file the
@@ -770,6 +867,7 @@ class Session {
       notes    : run.notes,
       cancelled: run.cancelled,
       stopped  : run.stopped,
+      stopReason: run.stopReason || null,
       startedAt, endedAt,
       durationMs: endedAt - startedAt,
       checksumFiles: sidecars,
@@ -870,6 +968,7 @@ class MultiSession {
     // standing — sync() would happily run against half-compared sessions.
     this.comparedAt = 0;
     this.stats = null;
+    this.planKey = planKeyOf(job);
     this.pairs = this._pairsOf(job);
     if (!this.pairs.length) throw new Error('Set at least one folder pair.');
     const offline = offlineVolumesOf(this.pairs);
@@ -960,8 +1059,12 @@ class MultiSession {
 
   rows(offset, limit, view) {
     const multi = this.sessions.length > 1;
-    const all = [];
-    let shown = 0;
+    // (0.9.0) Only the window asked for is built; the rest is counted. One
+    // object per visible row of every pair, at every scroll step, cost 65 ms
+    // a frame at 400 000 rows with "show identical" on.
+    const from = offset || 0, to = from + (limit || 200);
+    const slice = [];
+    let shown = 0, total = 0;
     for (let p = 0; p < this.sessions.length; p++) {
       if (!this._inScope(p, view)) continue;
       const s = this.sessions[p];
@@ -971,12 +1074,15 @@ class MultiSession {
       // used to leave its heading behind, so five synchronized pairs produced
       // a list of five rows that looked like work and hid the "nothing to do"
       // message the window has for exactly this case.
-      if (vis.length) { if (multi) all.push({ hdr: true, p, vis }); shown++; }
-      for (const i of vis) all.push({ p, i });
+      if (!vis.length) continue;
+      shown++;
+      if (multi) { if (total >= from && total < to) slice.push({ hdr: true, p, vis }); total++; }
+      const a = Math.max(0, from - total), b = Math.min(vis.length, to - total);
+      for (let k = a; k < b; k++) slice.push({ p, i: vis[k] });
+      total += vis.length;
     }
-    const slice = all.slice(offset || 0, (offset || 0) + (limit || 200));
     return {
-      total: all.length,
+      total,
       pairs: this.sessions.length,
       pairsShown: shown,
       rows: slice.map(e => {
@@ -1123,6 +1229,9 @@ class MultiSession {
     if (!same) {
       throw new Error('The folders changed since the last comparison. Compare again before synchronizing.');
     }
+    if (planKeyOf(job) !== this.planKey) {
+      throw new Error('The mode or a comparison setting changed since the last comparison. Compare again before synchronizing.');
+    }
 
     // Before the locks, not after: acquireAll creates a base folder that does
     // not exist yet, which would make a missing drive look like an empty one
@@ -1205,13 +1314,18 @@ class MultiSession {
 
     const perPair = [];
     let doneBytes = 0, doneFiles = 0, doneItems = 0, cancelled = false;
-    const counters = { files: 0, bytes: 0, deleted: 0, folders: 0, moved: 0, errors: 0, failed: 0, dated: 0 };
+    const counters = { files: 0, bytes: 0, deleted: 0, folders: 0, moved: 0, renamed: 0, errors: 0, failed: 0, dated: 0 };
     let verified = 0;
     const allErrors = [], allNotes = [], checksumFiles = [];
     const dbSaved = [];
 
+    // (0.9.0) A pair that stopped was reported as "Completed with 1 error":
+    // the flag never left the pair. With "Continue on error" off the next
+    // pairs are not started either ("nothing after this point").
+    let stopped = false, stopReason = null;
     for (let p = 0; p < this.sessions.length; p++) {
       if (token && token.cancelled) { cancelled = true; break; }
+      if (stopped && job.sync.ignoreErrors === false) break;
       const pr = this.pairs[p];
       const pairJob = Object.assign({}, job, {
         left: pr.left, right: pr.right,
@@ -1290,6 +1404,7 @@ class MultiSession {
       allNotes.push(...res.notes.map(n => multi ? `[${pairLabel(pr)}] ${n}` : n));
       checksumFiles.push(...(res.checksumFiles || []));
       cancelled = cancelled || res.cancelled;
+      if (res.stopped && !stopped) { stopped = true; stopReason = res.stopReason || 'error'; }
     }
     const endedAt = Date.now();
     // (0.8.8) One last event with the final figures: after a pair that failed
@@ -1332,6 +1447,7 @@ class MultiSession {
       errors: allErrors,
       notes : allNotes,
       cancelled,
+      stopped, stopReason,
       lockLost,
       startedAt, endedAt,
       durationMs: endedAt - startedAt,
@@ -1407,7 +1523,9 @@ async function verifyFolder(pool, phrase, opts) {
 }
 
 // ── Small text helpers that work on any backend ────────────────────────────
-function writeText(fsx, p, content) {
+// (0.9.0) Not through a link planted under the list's name (see safewrite.js).
+async function writeText(fsx, p, content) {
+  await clearLink(fsx, p);
   return new Promise((resolve, reject) => {
     const ws = fsx.createWriteStream(p);
     ws.on('error', reject);
@@ -1609,5 +1727,6 @@ async function checkJobPaths(job, opts) {
   return out;
 }
 
-module.exports = { Session, MultiSession, verifyFolder, CHECKSUM_FILE, writeText, readText,
+module.exports = {
+  planKeyOf, Session, MultiSession, verifyFolder, CHECKSUM_FILE, writeText, readText,
   pairLabel, checkJobPaths, clearStaleLocks };

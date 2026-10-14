@@ -187,6 +187,20 @@ function fmtCount(n, full) {
   return (v / 1e6).toFixed(v < 1e7 ? 1 : 0).replace(/\.0$/, '') + 'M';
 }
 
+// (0.9.0) A call to the engine that fails as a call (a job that cannot be sent,
+// a crash on the other side) used to leave the window "busy" for good:
+// COMPARE greyed out until restart. It reads as an ordinary failure instead.
+async function ipc(promise) {
+  try { return await promise; }
+  catch (err) { return { ok: false, error: (err && err.message) || String(err) }; }
+}
+
+// (0.9.0) "A → B" with each side isolated: an Arabic or Hebrew folder name
+// turned the whole label right to left, destination first.
+function bidiLabel(s) {
+  return String(s == null ? '' : s).split(' → ').map(x => '\u2068' + x + '\u2069').join(' → ');
+}
+
 function fmtBytes(b) {
   const n = Number(b) || 0;
   if (n === 0) return '0 B';
@@ -246,8 +260,9 @@ const OP_VIEW = {
 };
 
 const CAT_LABEL = {
-  equal: 'identical', leftOnly: 'left only', rightOnly: 'right only',
-  leftNewer: 'left newer', rightNewer: 'right newer', different: 'different',
+  // (0.9.0) Source and destination, as everywhere else in the window.
+  equal: 'identical', leftOnly: 'source only', rightOnly: 'destination only',
+  leftNewer: 'source newer', rightNewer: 'destination newer', different: 'different',
   timeInvalid: 'invalid date', conflict: 'conflict',
 };
 
@@ -397,7 +412,7 @@ function renderEmptyState(res) {
     b.style.display = act ? 'inline-block' : 'none';
     if (act) { b.textContent = act.label; b.dataset.act = act.key; }
   };
-  const n = v => v.toLocaleString();
+  const n = v => fmtCount(v, true);
 
   // (0) A run emptied the list: everything landed, the run is not over yet
   // (a read-back or the clean-up may still be going).
@@ -436,6 +451,14 @@ function renderEmptyState(res) {
   }
 
   // (4) The one that matters: everything is already identical.
+  // (0.9.0) Unless names are still to change for Windows: that is work.
+  const ren = (s.renameLeft || 0) + (s.renameRight || 0);
+  if (ren) {
+    set('', ICO_FILTER, '',
+      `${n(ren)} name${ren > 1 ? 's' : ''} to change for Windows, nothing to copy or delete.`,
+      { label: 'Show everything', key: 'clear' });
+    return;
+  }
   const bits = [];
   if (pairs > 1) bits.push(`${pairs} pairs`);
   bits.push(`${n(s.rows)} item${s.rows > 1 ? 's' : ''} compared`);
@@ -557,12 +580,12 @@ const GH_ARROW = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" str
 
 function rowHtml(r, absIndex) {
   if (r.hdr) {
-    return `<div class="grow grow-hdr" data-tip="Pair ${r.pair}/${r.pairs}: ${esc(r.left)} → ${esc(r.right)}">
+    return `<div class="grow grow-hdr" data-tip="Pair ${r.pair}/${r.pairs}: ${esc(bidiLabel(r.left + ' → ' + r.right))}">
       <span class="gh-num">PAIR ${r.pair}</span>
       <span class="gh-path">${esc(r.left)}</span>
       <span class="gh-arrow">${GH_ARROW}</span>
       <span class="gh-path">${esc(r.right)}</span>
-      <span class="gh-todo">${r.todo ? r.todo + ' to process' : 'in sync'}</span>
+      <span class="gh-todo">${r.todo ? fmtCount(r.todo, true) + ' to process' : 'in sync'}</span>
     </div>`;
   }
   const indent = Math.min(r.depth, 8) * 11;
@@ -573,13 +596,22 @@ function rowHtml(r, absIndex) {
       ? `detected move — will be renamed to ${r.mv}, nothing re-copied`
       : `detected move — will be renamed from ${r.mv}, nothing re-copied`;
   }
+  // (0.9.0) A name this run changes for Windows: said on the row, in blue
+  // like every rename.
+  let nameL = v.nameL, nameR = v.nameR;
+  if (r.fx) {
+    const was = [r.fx.l && `source "${r.fx.l}"`, r.fx.r && `destination "${r.fx.r}"`].filter(Boolean).join(', ');
+    tipText = `${r.op === 'none' ? '' : tipText + ' · '}renamed for Windows: ${was} → "${r.name}"`;
+    if (r.fx.l) nameL = 'nm-mov';
+    if (r.fx.r) nameR = 'nm-mov';
+  }
   return `<div class="grow${r.active ? '' : ' off'}${v.row ? ' ' + v.row : ''}${r.idx === state.selIdx ? ' sel' : ''}" data-i="${absIndex}" data-idx="${r.idx}" data-tip="${esc(tipText)}">
     <div class="c-chk"><input type="checkbox" ${r.active ? 'checked' : ''} data-act="toggle"></div>
-    ${paneCell(r, 'left', v.nameL, indent)}
+    ${paneCell(r, 'left', nameL, indent)}
     <div class="num">${r.l && r.type !== 'folder' ? fmtBytes(r.l.size) : ''}</div>
     <div class="dt">${r.l ? fmtDate(r.l.mtime) : ''}</div>
     <div class="c-act ${v.cls}" data-act="cycle">${v.arr}</div>
-    ${paneCell(r, 'right', v.nameR, indent)}
+    ${paneCell(r, 'right', nameR, indent)}
     <div class="num">${r.r && r.type !== 'folder' ? fmtBytes(r.r.size) : ''}</div>
     <div class="dt">${r.r ? fmtDate(r.r.mtime) : ''}</div>
   </div>`;
@@ -694,7 +726,7 @@ async function toggleExcludeTemp(idx) {
 
 const CTX_REVEAL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="m9 13 3 3 3-3"/></svg>';
 const CTX_OK = '<svg class="ok" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>';
-const CTX_KO = '<svg class="ko" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg>';
+const CTX_KO = '<svg class="ko skip" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg>';
 const CTX_SQ = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>';
 const CTX_SQ_CHK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 11 3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>';
 
@@ -848,7 +880,7 @@ function renderStats() {
   $('status-empty').style.display = 'none';
 
   const chip = (cls, label, value, key, kind) =>
-    `<span class="stat ${cls}${isActiveFilter(key, kind) ? ' on' : ''}" data-key="${key}" data-kind="${kind}">${label} <b>${value}</b></span>`;
+    `<span class="stat ${cls}${isActiveFilter(key, kind) ? ' on' : ''}" data-key="${key}" data-kind="${kind}">${label} <b>${fmtCount(value, true)}</b></span>`;
 
   const parts = [];
   if (s.createRight) parts.push(chip('g', 'create →', s.createRight, 'createRight', 'op'));
@@ -859,6 +891,10 @@ function renderStats() {
   if (s.deleteLeft)  parts.push(chip('r', '← delete', s.deleteLeft,  'deleteLeft',  'op'));
   if (s.moveRight)   parts.push(chip('b', 'move →',   s.moveRight,   'moveRightTo', 'op'));
   if (s.moveLeft)    parts.push(chip('b', '← move',   s.moveLeft,    'moveLeftTo',  'op'));
+  // (0.9.0) Names to change for Windows: work like any other, and counted in
+  // "items to process", but no chip said so.
+  { const ren = (s.renameLeft || 0) + (s.renameRight || 0);
+    if (ren) parts.push(chip('b', 'Windows names', ren, 'rename', 'op')); }
   // (0.8.8) Orange: a conflict is a decision to make, and red is kept for
   // what will be deleted.
   if (s.conflicts)   parts.push(chip('o', 'conflicts', s.conflicts,  'conflict',    'op'));
@@ -926,6 +962,7 @@ function completePairs() {
 // folders, the engine replayed the old plan, and a mirror went the wrong way.
 function invalidateComparison(reason) {
   state.comparedPairs = null;
+  state.comparedPlan = null;
   state.stats = null;
   state.selIdx = null;
   // The scope names a folder of a tree that is about to be replaced.
@@ -940,6 +977,54 @@ function invalidateComparison(reason) {
 
 function pairsKey(pairs) {
   return (pairs || []).map(p => `${p.left} ${p.right}`).join('');
+}
+
+// (0.9.0) What a plan depends on besides the folders, the same list as the
+// engine's planKeyOf (session.js): mode, comparison, filters, move detection,
+// date repair, Windows-safe names. Changing any of them after a comparison
+// kept SYNCHRONIZE armed on the old plan: compare in MIRROR, click UPDATE, and
+// the confirmation said UPDATE over a MIRROR plan with its deletions.
+function stableJson(v) {
+  if (Array.isArray(v)) return '[' + v.map(stableJson).join(',') + ']';
+  if (v && typeof v === 'object') {
+    return '{' + Object.keys(v).sort().filter(k => v[k] !== undefined)
+      .map(k => JSON.stringify(k) + ':' + stableJson(v[k])).join(',') + '}';
+  }
+  return JSON.stringify(v === undefined ? null : v);
+}
+function planKeyOf(job) {
+  const s = (job && job.sync) || {};
+  const custom = s.variant === 'custom';
+  return stableJson({
+    compare: (job && job.compare) || {},
+    variant: s.variant || 'mirror',
+    custom: custom ? (s.custom || null) : null,
+    customChange: custom ? (s.customChange || null) : null,
+    fixDatesOnly: !!s.fixDatesOnly,
+    safeNames: s.safeNames === 'destination' || s.safeNames === 'both' ? s.safeNames : 'off',
+  });
+}
+// True when it dropped the comparison.
+function invalidateIfPlanChanged() {
+  if (!state.comparedPlan) return false;
+  if (planKeyOf(state.job) === state.comparedPlan) return false;
+  invalidateComparison('Settings changed — compare again before synchronizing.');
+  return true;
+}
+
+// (0.9.0) What must not change while a comparison or a run is going: the
+// modes, the folders, the comparison method, the filter, auto-sync, and the
+// settings that shape the plan. It used to be blocked for the mouse only
+// (pointer-events), so Tab + Enter still swapped a pair or changed the mode
+// in the middle of a run. `inert` takes the keyboard away too.
+const PLAN_REGIONS = ['syncmodes', 'pairwrap', 'pair-add-row', 'seg-cmp', 'btn-filter'];
+const PLAN_INPUTS  = ['st-moves', 'st-include', 'st-exclude', 'st-fixdates', 'st-safenames'];
+function lockPlan(on, run) {
+  for (const id of PLAN_REGIONS) { const el = $(id); if (el) el.inert = !!on; }
+  for (const el of document.querySelectorAll('.autorow')) el.inert = !!on;
+  const sb = $('sidebar'); if (sb) sb.inert = !!run;
+  for (const id of PLAN_INPUTS) { const el = $(id); if (el) el.disabled = !!on; }
+  for (const el of document.querySelectorAll('select.cust')) el.disabled = !!on;
 }
 
 // Called from onPathChanged, which every path edit, browse, swap, pair add or
@@ -964,7 +1049,12 @@ async function doCompare() {
   state.speeds = [];
   startCompareUi('COMPARING');
 
-  const res = await API.compare(state.job);
+  // (0.9.0) Taken BEFORE the comparison: what was compared is what was on
+  // screen when COMPARE was pressed. Taken after, an edit made meanwhile was
+  // armed as if it had been compared.
+  const comparedPairs = pairsKey(completePairs());
+  const comparedPlan  = planKeyOf(state.job);
+  const res = await ipc(API.compare(state.job));
 
   state.busy = null;
   setBusyUi(false);
@@ -994,7 +1084,8 @@ async function doCompare() {
   }
 
   state.stats = res.stats;
-  state.comparedPairs = pairsKey(completePairs());
+  state.comparedPairs = comparedPairs;
+  state.comparedPlan  = comparedPlan;
   state.view.onlyOperation = '';
   state.view.onlyCategory  = '';
   renderStats();
@@ -1099,7 +1190,7 @@ function renderRelinkList() {
     }
     const hist = e.hadHistory
       ? `<div class="rl-note">Synchronized ${e.lastRun ? 'on ' + esc(new Date(e.lastRun).toLocaleDateString()) : 'before'}` +
-        `${e.items ? `, holding ${e.items.toLocaleString()} items` : ''}.</div>`
+        `${e.items ? `, holding ${fmtCount(e.items, true)} items` : ''}.</div>`
       : '';
     return `<div class="rl-row" data-i="${i}">
       <div class="rl-hd"><span class="rl-tag">${esc(tag)}</span><span class="rl-state">${e.offline ? esc(e.offline) + ' not mounted' : 'missing'}</span></div>
@@ -1208,7 +1299,13 @@ async function clearStaleLocksNow() {
   el.textContent = 'Checking…';
   // Checking can take a full minute per lock: the file is watched for life
   // signs before anything is removed, exactly as a waiting run would.
-  const res = await API.clearLocks(state.job, staleLocks);
+  // (0.9.0) The countdown the engine sends is shown (it was never listened to).
+  const off = API.onLockProgress(st => {
+    if (st && st.takingOver) el.textContent = 'Removing…';
+    else if (st && st.secondsLeft != null) el.textContent = `Checking… ${st.secondsLeft} s`;
+  });
+  const res = await ipc(API.clearLocks(state.job, staleLocks));
+  if (typeof off === 'function') off();
   if (!res || !res.ok) {
     renderLockBadge();
     showError('Could not clear the lock files', (res && res.error) || 'Unknown error');
@@ -1284,8 +1381,11 @@ function verificationPhrase() {
 }
 
 function askConfirm() {
-  const s = state.stats;
   uiToJob();
+  // (0.9.0) Last line of defence in the window (the engine checks too).
+  if (invalidateIfPlanChanged()) return;
+  const s = state.stats;
+  if (!s) return;
   const j = state.job;
   const CMP_LBL = { timeSize: 'time & size', content: 'content', size: 'size' };
 
@@ -1302,9 +1402,9 @@ function askConfirm() {
   ];
   if (s.moveLeft + s.moveRight) cfCells.splice(3, 0, ['Move (rename)', s.moveLeft + s.moveRight]);
   const renames = (s.renameLeft || 0) + (s.renameRight || 0);
-  if (renames) cfCells.splice(3, 0, ['Rename (Win)', renames]);
+  if (renames) cfCells.splice(3, 0, ['Windows names', renames]);
   $('cf-grid').innerHTML = cfCells
-    .map(([l, v]) => `<div class="srow"><div class="sr-lbl">${l}</div><div class="sr-val">${v}</div></div>`).join('');
+    .map(([l, v]) => `<div class="srow"><div class="sr-lbl">${l}</div><div class="sr-val">${typeof v === 'number' ? fmtCount(v, true) : v}</div></div>`).join('');
 
   const warns = [];
   const removals = s.deleteLeft + s.deleteRight;
@@ -1351,7 +1451,7 @@ async function doSync() {
   state.busy = 'sync';
   startRunUi('Synchronizing…');
 
-  const res = await API.sync(state.job);
+  const res = await ipc(API.sync(state.job));
 
   state.busy = null;
   setBusyUi(false);
@@ -1404,21 +1504,30 @@ async function doCompareQuiet() {
   $('pb-ring').classList.add('spin');
   $('pb-pct').textContent = '';
   let res;
+  const comparedPairs = pairsKey(completePairs());
+  const comparedPlan  = planKeyOf(state.job);
   try {
-    res = await API.compare(state.job);
+    res = await ipc(API.compare(state.job));
   } finally {
     state.busy = null;
     $('pb-ring').classList.remove('spin');
     $('btn-pause').style.display = '';
     setBusyUi(false);
   }
-  if (!res || !res.ok || res.cancelled) {
+  // (0.9.0) Stopped with CANCEL is not a failure, and is not said as one.
+  if (res && res.cancelled) {
+    invalidateComparison('The check after the run was stopped — compare again to synchronize.');
+    setRecheck(null);
+    return;
+  }
+  if (!res || !res.ok) {
     invalidateComparison('Compare again to synchronize.');
     setRecheck('ko', 'The folders could not be compared again — press Compare when you are ready.');
     return;
   }
   state.stats = res.stats;
-  state.comparedPairs = pairsKey(completePairs());
+  state.comparedPairs = comparedPairs;
+  state.comparedPlan  = comparedPlan;
   renderStats();
   await refreshGrid(true);
   await refreshOverview();
@@ -1481,6 +1590,7 @@ function setBusyUi(on, title, steps) {
   // a "Verify" step beside it would promise something that is not happening.
   $('pb-steps').style.display = (on && steps) ? '' : 'none';
   if (on && steps) renderSteps('copy');
+  lockPlan(!!on, !!(on && steps));
   $('btn-compare').disabled = on;
   $('btn-sync').disabled = on || (isAutoOn() ? false : (!state.stats || state.stats.filesToProcess === 0));
   $('btn-abort').style.display = on ? '' : 'none';
@@ -1562,7 +1672,7 @@ API.onCompareProgress(p => {
   $('pb-file').textContent = label + (p.current || '—');
 
   const scanned = p.scannedTotal != null ? p.scannedTotal : (p.scanned || 0);
-  $('s-files').textContent = String(scanned);
+  $('s-files').textContent = fmtCount(scanned, true);
   const bytes = p.bytesTotal != null ? p.bytesTotal : (p.bytes || 0);
   $('s-size').textContent = bytes ? fmtBytes(bytes) + ' read' : '—';
 
@@ -1574,7 +1684,7 @@ API.onCompareProgress(p => {
   // 22 000 items in the first second showed a blank rate, which is the moment
   // someone is most likely to be wondering whether anything is happening.
   $('s-spd').textContent = ms >= 400
-    ? Math.round(scanned / (ms / 1000)).toLocaleString() + ' items/s'
+    ? fmtCount(Math.round(scanned / (ms / 1000)), true) + ' items/s'
     : '—';
 
   const ring = $('pb-ring');
@@ -1713,7 +1823,7 @@ API.onSyncProgress(p => {
   bar.style.setProperty('--pb-glow',   verifying ? 'rgba(77,144,240,.45)' : 'var(--green-g)');
   renderSteps(p.pass, state.lastWillVerify);   // remembered: not every event carries it (0.8.8)
   renderFlow(p);
-  $('s-files').innerHTML   = `${p.filesDone}<span class="stot"> / ${p.filesTotal}</span>`;
+  $('s-files').innerHTML   = `${fmtCount(p.filesDone, true)}<span class="stot"> / ${fmtCount(p.filesTotal, true)}</span>`;
   // The bytes of the pass that is running, not of the whole run: the ring
   // counts the copy and the read-back together, so this tile used to read
   // twice the size of the folder the overview had just listed.
@@ -1721,8 +1831,8 @@ API.onSyncProgress(p => {
   $('s-size-lbl').textContent = verifying ? 'Left to verify' : 'Left to copy';
   $('s-spd').textContent   = fmtSpeed(p.bytesPerSec);
   $('s-eta').textContent   = fmtEta(p.etaSec);
-  $('s-del').textContent   = String(p.deleted || 0);
-  $('s-err').textContent   = String(p.errors || 0);
+  $('s-del').textContent   = fmtCount(p.deleted || 0, true);
+  $('s-err').textContent   = fmtCount(p.errors || 0, true);
   $('s-err').classList.toggle('zero', !p.errors);   // red only when there is one (0.8.8)
   const title = $('pb-title');
   // After the verification pass only folder deletions and pruning remain —
@@ -1885,6 +1995,7 @@ function showSummary(res) {
   $('sum-ico').innerHTML = kind === 'ok' ? ICO_OK : kind === 'err' ? ICO_ERR : ICO_CANCEL;
   $('sum-h1').textContent = res.cancelled ? 'Cancelled'
     : res.lockLost ? 'Stopped — another machine took the folder'
+    : res.stopReason === 'rename' ? 'Stopped — a name could not be changed for Windows'
     : stopped ? 'Stopped at the first error'
     : failed ? `Completed with ${failed} error${failed > 1 ? 's' : ''}` : 'Completed successfully';
   $('sum-h2').textContent = `${state.job.name} · ${fmtEta(res.durationMs / 1000)}`;
@@ -1902,22 +2013,30 @@ function showSummary(res) {
   if (res.counters.failed) cells.splice(1, 0, ['Files not copied', res.counters.failed]);
   if (res.counters.dated) cells.splice(1, 0, ['Dates corrected', res.counters.dated]);
   if (res.counters.moved) cells.splice(2, 0, ['Files moved', res.counters.moved]);
+  if (res.counters.renamed) cells.splice(2, 0, ['Renamed for Windows', fmtCount(res.counters.renamed, true)]);
   if (res.verified) cells.splice(2, 0, ['Files verified', res.verified]);
   $('sum-grid').innerHTML = cells
-    .map(([l, v]) => `<div class="srow"><div class="sr-lbl">${l}</div><div class="sr-val">${v}</div></div>`).join('');
+    .map(([l, v]) => `<div class="srow"><div class="sr-lbl">${l}</div><div class="sr-val">${typeof v === 'number' ? fmtCount(v, true) : v}</div></div>`).join('');
 
   renderVerifyLine(res);
 
+  // (0.9.0) A list cut short says so: 60 rename notes hid the one saying why
+  // the run stopped, and nothing showed there was more.
+  const more = (n, shown) => n > shown
+    ? `<div class="err-item more">…and ${fmtCount(n - shown, true)} more — Copy gives the whole list.</div>` : '';
   $('sum-errors').style.display = failed ? '' : 'none';
   $('sum-errors-body').innerHTML = res.errors.slice(0, 60)
-    .map(e => `<div class="err-item">${esc(e.rel)} — ${esc(e.message)}</div>`).join('');
+    .map(e => `<div class="err-item">${esc(e.rel)} — ${esc(e.message)}</div>`).join('') + more(res.errors.length, 60);
   setCopyBlock('sum-errors-body', res.errors.map(e => `${e.rel} — ${e.message}`),
     copyHeader(`${res.errors.length} error${res.errors.length > 1 ? 's' : ''}`));
 
-  $('sum-notes').style.display = res.notes.length ? '' : 'none';
-  $('sum-notes-body').innerHTML = res.notes.slice(0, 40)
-    .map(n => `<div class="err-item">${esc(n)}</div>`).join('');
-  setCopyBlock('sum-notes-body', res.notes.slice(), copyHeader(`${res.notes.length} notes`));
+  // (0.9.0) Why a run stopped comes first.
+  const isStop = n => /^(\[[^\]]*\] )?Stopped/.test(n);
+  const notes = res.notes.filter(isStop).concat(res.notes.filter(n => !isStop(n)));
+  $('sum-notes').style.display = notes.length ? '' : 'none';
+  $('sum-notes-body').innerHTML = notes.slice(0, 40)
+    .map(n => `<div class="err-item">${esc(n)}</div>`).join('') + more(notes.length, 40);
+  setCopyBlock('sum-notes-body', notes, copyHeader(`${notes.length} notes`));
 
   const files = (res.checksumFiles || []).slice();
   $('sum-files').innerHTML = files
@@ -2033,7 +2152,7 @@ async function doVerify() {
   $('vf-line').textContent = `${res.total} files · ${res.algo || 'xxh64'}`;
   $('vf-grid').innerHTML = [
     ['Verified', res.verified], ['Mismatched', res.mismatched], ['Missing', res.missing],
-  ].map(([l, v]) => `<div class="srow"><div class="sr-lbl">${l}</div><div class="sr-val">${v}</div></div>`).join('');
+  ].map(([l, v]) => `<div class="srow"><div class="sr-lbl">${l}</div><div class="sr-val">${fmtCount(v, true)}</div></div>`).join('');
 
   const bad = res.results.filter(r => r.status !== 'ok');
   $('vf-bad').style.display = bad.length ? '' : 'none';
@@ -2070,9 +2189,16 @@ function bind() {
   });
   $('set-close').addEventListener('click', () => { uiToJob(); $('ov-settings').classList.remove('open'); persist(); });
   // (0.8.9) The renames are planned by the comparison: a plan made with the
-  // other setting must not be run.
-  $('st-safenames').addEventListener('change', () => {
-    if (state.stats) invalidateComparison('Windows-safe names changed — compare again.');
+  // other setting must not be run. (0.9.0) Same for every setting that shapes
+  // the plan (move detection, date repair, filters, custom directions).
+  $('ov-settings').addEventListener('change', e => {
+    const t = e.target;
+    if (!t || !(PLAN_INPUTS.includes(t.id) || t.matches('select.cust'))) return;
+    if (state.busy) return;   // locked anyway; the run follows its own plan
+    uiToJob();
+    if (t.id === 'st-safenames' && state.stats && planKeyOf(state.job) !== state.comparedPlan) {
+      invalidateComparison('Windows-safe names changed — compare again.');
+    } else invalidateIfPlanChanged();
   });
 
   // Per-job filter modal: closing applies and re-compares if a result is shown.
@@ -2195,16 +2321,22 @@ function bind() {
   $('seg-cmp').addEventListener('click', e => {
     const b = e.target.closest('button');
     if (!b) return;
+    if (state.busy) return;
     state.job.compare.compareVariant = b.dataset.v;
     setSeg('seg-cmp', b.dataset.v);
+    invalidateIfPlanChanged();
     persist();
   });
 
   $('syncmodes').addEventListener('click', e => {
     const b = e.target.closest('.mbtn');
-    if (!b) return;
+    // (0.9.0) VERIFY sits in this row but is not a mode (no data-v): clicking
+    // it set the mode to undefined, which the engine and the saved job read
+    // as MIRROR. An UPDATE or 2 WAYS job silently became one that deletes.
+    if (!b || !b.dataset.v || state.busy) return;
     state.job.sync.variant = b.dataset.v;
     setVariantBtn(b.dataset.v);
+    invalidateIfPlanChanged();
     persist();
   });
 
@@ -2536,7 +2668,10 @@ async function refreshOverview() {
   const ov = await API.getOverview(state.view, open, state.ovSort);
   if (!ov || !ov.rows.length) {
     const nothing = state.stats.rows > 0;
-    box.innerHTML = nothing
+    const ren = (state.stats.renameLeft || 0) + (state.stats.renameRight || 0);
+    box.innerHTML = ren
+      ? `<div class="ov-empty">${fmtCount(ren, true)} name${ren > 1 ? 's' : ''} to change for Windows, nothing to copy.</div>`
+      : nothing
       ? '<div class="ov-empty">Nothing to do — both sides already match.<br>Tick “Show identical” to list the folders anyway.</div>'
       : '<div class="ov-empty">Both folders are empty.</div>';
     return;
@@ -2559,7 +2694,7 @@ async function refreshOverview() {
   box.classList.toggle('can-reset', viewIsNarrowed());
   box.innerHTML = ov.rows.map(g => {
     const head = (multi && g.first)
-      ? `<div class="ov-pairhead"><span class="n">${g.pair}</span>${esc(g.pairLabel)}</div>`
+      ? `<div class="ov-pairhead"><span class="n">${g.pair}</span>${esc(bidiLabel(g.pairLabel))}</div>`
       : '';
     const scoped = state.view.scope && state.view.scope.p === g.pairIdx &&
                    state.view.scope.rel === g.rel;
@@ -2573,7 +2708,7 @@ async function refreshOverview() {
     <div class="ov-row${g.idx === state.selIdx ? ' sel' : ''}${g.active ? '' : ' off'}${scoped ? ' scoped' : ''}${state.ovSel.has(key) ? ' picked' : ''}"
          data-idx="${g.idx}" data-name="${esc(g.name)}" data-rel="${esc(g.rel)}" data-type="${g.type}"
          data-pair="${g.pairIdx}" data-active="${g.active ? 1 : 0}" data-kids="${g.kids ? 1 : 0}"
-         data-tip="${g.pairLabel ? '[' + esc(g.pairLabel) + '] ' : ''}${esc(g.rel)} — ${g.items} item${g.items === 1 ? '' : 's'}, ${esc(fmtBytes(g.bytes))}.${g.kids ? ' Click to select · double-click to open it and show it in the grid.' : ' Click to select · double-click to show it in the grid.'}">
+         data-tip="${g.pairLabel ? '[' + esc(bidiLabel(g.pairLabel)) + '] ' : ''}${esc(g.rel)} — ${fmtCount(g.items, true)} item${g.items === 1 ? '' : 's'}, ${esc(fmtBytes(g.bytes))}.${g.kids ? ' Click to select · double-click to open it and show it in the grid.' : ' Click to select · double-click to show it in the grid.'}">
       <div class="ov-chk"><input type="checkbox" ${g.active ? 'checked' : ''} data-act="toggle"></div>
       <div class="ov-pct"><div class="bar" style="width:${g.pct}%"></div><div class="lbl">${g.pct}%</div></div>
       <div class="ov-name" style="padding-left:${g.depth * 11}px">${twist}${g.type === 'folder' ? ICON_FOLDER : ICON_FILE}<span>${esc(g.name)}</span></div>
@@ -2632,7 +2767,7 @@ function renderScopeBar() {
   if (!sc || !sc.rel) { bar.style.display = 'none'; return; }
   bar.style.display = '';
   $('scope-name').textContent = sc.rel;
-  $('scope-pair').textContent = sc.label || '';
+  $('scope-pair').textContent = bidiLabel(sc.label || '');
   $('scope-pair').style.display = sc.label ? '' : 'none';
 }
 
@@ -2907,14 +3042,28 @@ async function autoRun() {
 
   state.busy = 'compare';
   startCompareUi('AUTO-SYNC · COMPARING');
-  const cmp = await API.compare(state.job);
+  const comparedPairs = pairsKey(completePairs());
+  const comparedPlan  = planKeyOf(state.job);
+  const cmp = await ipc(API.compare(state.job));
   $('btn-pause').style.display = '';
   if (!cmp.ok) {
     state.busy = null; setBusyUi(false);
     $('footer-auto').textContent = `auto-sync ${stamp()}: comparison failed — ${cmp.error}`;
     return;
   }
+  // (0.9.0) CANCEL during auto-sync's comparison: this cycle ends there. It
+  // used to go on to a synchronization the engine refused, then report a
+  // failure and send a "run failed" notification for a stop asked for.
+  if (cmp.cancelled) {
+    state.busy = null; setBusyUi(false);
+    state.stats = null;
+    renderStats(); await refreshGrid(true); await refreshOverview();
+    $('footer-auto').textContent = `auto-sync ${stamp()}: comparison cancelled — nothing synchronized`;
+    return;
+  }
   state.stats = cmp.stats;
+  state.comparedPairs = comparedPairs;
+  state.comparedPlan  = comparedPlan;
   renderStats(); await refreshGrid(true); await refreshOverview();
 
   // Unattended run + unreadable folder = the one combination that must never
@@ -2935,7 +3084,7 @@ async function autoRun() {
 
   state.busy = 'sync';
   startRunUi('Auto-sync — synchronizing…');
-  const res = await API.sync(state.job);
+  const res = await ipc(API.sync(state.job));
   state.busy = null;
   setBusyUi(false);
   if (!res.ok) {
@@ -2951,6 +3100,7 @@ async function autoRun() {
   const bits = [];
   if (c.files)  bits.push(`${c.files} copied`);
   if (c.moved)  bits.push(`${c.moved} moved`);
+  if (c.renamed) bits.push(`${c.renamed} renamed for Windows`);
   if (c.deleted)bits.push(`${c.deleted} removed`);
   $('footer-auto').textContent =
     `auto-sync ${stamp()}: ${bits.length ? bits.join(', ') : 'done'}${res.errors.length ? ` — ${res.errors.length} ERROR(S)` : ''}`;
@@ -3513,7 +3663,9 @@ async function srvDraw() {
 }
 
 async function srvUseFolder() {
-  const url = await API.serverUrl(srv.conn, srv.picked);
+  let url;
+  try { url = await API.serverUrl(srv.conn, srv.picked); }
+  catch (err) { showError('Could not use this folder', (err && err.message) || String(err)); return; }
   const t = srv.target;
   uiToJob();                       // keep whatever else was typed in the rows
   state.job.pairs[t.index][t.side] = url;
@@ -3616,12 +3768,17 @@ function bindServerDialog() {
 
 // ── Tooltips ───────────────────────────────────────────────────────────────
 function installTooltips() {
-  let tip = null;
+  let tip = null, owner = null;
+  const drop = () => { if (tip) { tip.remove(); tip = null; } owner = null; };
   document.addEventListener('mouseover', e => {
     const el = e.target.closest('[data-tip]');
-    if (!el) return;
+    // (0.9.0) The row a tooltip belongs to can be redrawn under the mouse (the
+    // grid is, twice a second during a run): no mouseout ever comes, and the
+    // tooltip stayed on screen. It goes as soon as the mouse is elsewhere.
+    if (!el) { if (tip && (!owner || !owner.isConnected || !owner.contains(e.target))) drop(); return; }
     if (tip) tip.remove();
     tip = null;
+    owner = el;
     if (document.body.classList.contains('lassoing')) return;   // no tooltip while a lasso is drawn
     tip = document.createElement('div');
     tip.className = 'tooltip-float';
@@ -3640,12 +3797,65 @@ function installTooltips() {
     if (!e.target.closest('[data-tip]')) return;
     if (tip) { tip.remove(); tip = null; }
   });
-  document.addEventListener('mousedown', () => { if (tip) { tip.remove(); tip = null; } });
+  document.addEventListener('mousedown', drop);
+  document.addEventListener('scroll', drop, true);
+  // A redraw that removes the row: checked each second while a tip is up.
+  setInterval(() => { if (tip && owner && !owner.isConnected) drop(); }, 1000);
 }
 
 // ── Boot ───────────────────────────────────────────────────────────────────
+// (0.9.0) A window that opens takes the focus, and keeps Tab inside it: the
+// confirmation left it on SYNCHRONIZE behind the overlay, and Tab went on to
+// PAUSE in the hidden strip. Cancel (or the first button) gets it, unless the
+// window put it somewhere itself; closing gives it back.
+function installOverlayFocus() {
+  const focusables = ov => [...ov.querySelectorAll('button,input,select,textarea,[tabindex]:not([tabindex="-1"])')]
+    .filter(x => !x.disabled && x.offsetParent !== null);
+  const top = () => { const l = [...document.querySelectorAll('.ov.open')]; return l[l.length - 1] || null; };
+  const before = new WeakMap();
+  const obs = new MutationObserver(list => {
+    for (const m of list) {
+      const ov = m.target;
+      const open = ov.classList.contains('open');
+      if (open && !before.has(ov)) {
+        before.set(ov, document.activeElement);
+        setTimeout(() => {
+          if (!ov.classList.contains('open') || ov.contains(document.activeElement)) return;
+          const f = focusables(ov);
+          const first = f.find(x => x.classList.contains('m-btn')) || f[0];
+          if (first) first.focus();
+        }, 0);
+      } else if (!open && before.has(ov)) {
+        const prev = before.get(ov);
+        before.delete(ov);
+        if (prev && prev.isConnected && typeof prev.focus === 'function' && !top()) prev.focus();
+      }
+    }
+  });
+  for (const ov of document.querySelectorAll('.ov')) obs.observe(ov, { attributes: true, attributeFilter: ['class'] });
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Tab') return;
+    const ov = top();
+    if (!ov) return;
+    const f = focusables(ov);
+    if (!f.length) return;
+    const i = f.indexOf(document.activeElement);
+    if (e.shiftKey ? i <= 0 : (i === -1 || i === f.length - 1)) {
+      e.preventDefault();
+      (e.shiftKey ? f[f.length - 1] : f[0]).focus();
+    }
+  }, true);
+}
+
 (async function boot() {
   if (API.platform !== 'darwin') document.body.classList.add('win');
+  // (0.9.0) The shortcuts in the tooltips, as this system writes them.
+  if (API.platform !== 'darwin') {
+    for (const el of document.querySelectorAll('[data-tip*="⌘"]')) {
+      el.dataset.tip = el.dataset.tip.replace(/⇧⌘/g, 'Ctrl+Shift+').replace(/⌘/g, 'Ctrl+');
+    }
+  }
+  installOverlayFocus();
   state.version = await API.getVersion();
   const prefs = await API.loadPrefs();
   state.job = prefs.job;

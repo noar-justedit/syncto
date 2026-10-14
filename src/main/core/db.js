@@ -30,6 +30,7 @@
 // Several folder pairs can share a base folder, so entries are keyed by a pair
 // id (see pairIdFor).
 
+const { clearLink } = require('./safewrite');
 const zlib = require('zlib');
 const { promisify } = require('util');
 const gzip   = promisify(zlib.gzip);
@@ -100,7 +101,11 @@ function writeFileBuffer(fsx, p, buf) {
 // `onDamaged` is called when a file IS present but cannot be read — that is a
 // very different situation from "no database yet", and reporting the two the
 // same way hid a corrupted file behind a reassuring message.
-async function readDb(fsx, basePath, onDamaged) {
+// (0.9.0) `out`, when given, receives the file's fingerprint and the document,
+// so the save at the end of the run can reuse it (see savePairDb). `reuse`:
+// a { digest, doc } from that earlier read; when the file has not changed
+// since (same bytes), the document is not decompressed and parsed again.
+async function readDb(fsx, basePath, onDamaged, out, reuse) {
   const p = fsx.join(basePath, DB_NAME);
   let buf;
   try {
@@ -110,6 +115,8 @@ async function readDb(fsx, basePath, onDamaged) {
     return null;
   }
   if (!buf || !buf.length) return null;
+  const digest = require('crypto').createHash('sha1').update(buf).digest('hex');
+  if (reuse && reuse.doc && reuse.digest === digest) return reuse.doc;
   try {
     // Compressed data expands: a megabyte of zeros is gigabytes of nothing,
     // and this runs in the process that is holding the folder locks.
@@ -125,6 +132,7 @@ async function readDb(fsx, basePath, onDamaged) {
       if (onDamaged) onDamaged(`${p} was written by another version of syncto.`);
       return null;
     }
+    if (out) { out.digest = digest; out.doc = json; }
     return json;
   } catch (err) {
     if (onDamaged) onDamaged(`${p} is damaged (${err.message}) — it will be rebuilt from this run.`);
@@ -141,6 +149,8 @@ async function writeDb(fsx, basePath, doc) {
   // all of them silently fell back to "no database yet" on the next run.
   const tmp = target + '.syncto_tmp';
   try {
+    // (0.9.0) Not through a link planted under the scratch name.
+    await clearLink(fsx, tmp);
     await writeFileBuffer(fsx, tmp, buf);
     try {
       await fsx.rename(tmp, target);
@@ -170,7 +180,11 @@ class SyncDb {
     // (0.8.8) Without a prototype: files named "constructor", "toString" or
     // "__proto__" matched the built-in properties of a plain object, were never
     // found as themselves and stayed conflicts for ever.
-    this.items = Object.assign(Object.create(null), (session && session.items) || {});
+    // (0.9.0) Made prototype-free in place instead of copied: the copy of every
+    // item took half a second at 400 000 of them. JSON.parse makes
+    // "__proto__" an own key, which stays readable once the prototype is gone.
+    const items = session && session.items && typeof session.items === 'object' ? session.items : null;
+    this.items = items ? Object.setPrototypeOf(items, null) : Object.create(null);
   }
 
   // entry: { type, cmpVar, left:{mtime,size,id}, right:{mtime,size,id} }
@@ -193,10 +207,18 @@ class SyncDb {
 async function loadPairDb(left, right, pairId) {
   const damage = [];
   const note = m => damage.push(m);
+  // (0.9.0) Kept for the save at the end of the run (`docs` in the result).
+  const docs = { left: {}, right: {} };
   const [dl, dr] = await Promise.all([
-    readDb(left.fs, left.path, note),
-    readDb(right.fs, right.path, note),
+    readDb(left.fs, left.path, note, docs.left),
+    readDb(right.fs, right.path, note, docs.right),
   ]);
+  const res = await judgePair(dl, dr, damage, pairId);
+  res.docs = docs;
+  return res;
+}
+
+async function judgePair(dl, dr, damage, pairId) {
   // A damaged file is not the same story as a fresh folder, and telling the
   // user "no database yet" about a file that is sitting right there — with a
   // gunzip error behind it — sent them looking in the wrong place.
@@ -214,19 +236,24 @@ async function loadPairDb(left, right, pairId) {
 
 // Merges the new session into whatever else those folders already store, so a
 // base folder shared by several pairs keeps every session.
-async function savePairDb(left, right, pairId, session) {
+// (0.9.0) `docs`: what loadPairDb read. A side whose file still holds the same
+// bytes is not decompressed and parsed a second time (1.4 s per side at
+// 400 000 items); one that changed since (another pair of the job, another
+// machine) is read again, as before.
+async function savePairDb(left, right, pairId, session, docs) {
   const stamp = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   const payload = Object.assign({}, session, { stamp, updated: Date.now() });
 
-  const merge = async (side) => {
-    const doc = (await readDb(side.fs, side.path)) || { format: FORMAT, version: VERSION, sessions: {} };
+  const merge = async (side, which) => {
+    const reuse = docs && docs[which];
+    const doc = (await readDb(side.fs, side.path, null, null, reuse)) || { format: FORMAT, version: VERSION, sessions: {} };
     doc.format = FORMAT; doc.version = VERSION;
     if (!doc.sessions) doc.sessions = {};
     doc.sessions[pairId] = payload;
     await writeDb(side.fs, side.path, doc);
   };
-  await merge(left);
-  await merge(right);
+  await merge(left, 'left');
+  await merge(right, 'right');
   return stamp;
 }
 

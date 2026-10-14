@@ -36,6 +36,8 @@
 
 const { OP, TEMP_EXT, OLD_EXT, ALWAYS_SKIP, OS_LITTER_FOLDERS, isSyncToInternal, equalContent, CHECKSUM_FILE } = require('./compare');
 const { scratchPath } = require('../fs/longname');
+const { plannedRenames } = require('./direction');
+const { clearLink } = require('./safewrite');
 const { createHasher, hashStream, algoFor } = require('./hash');
 const { assertSafeRel } = require('./relpath');
 const { Versioner, runTimestamp, streamCopy } = require('./versioning');
@@ -168,7 +170,6 @@ class SyncRunner {
     this.onProgress = ctx.onProgress || (() => {});
     this.stamp = runTimestamp();
 
-    this.results   = [];
     this.applied   = new Map();
     this.toVerify  = [];     // filled by the copy pass, drained by the verify pass
     this.errors    = [];
@@ -474,8 +475,9 @@ class SyncRunner {
   }
 
   record(node, ok, extra) {
+    // (0.9.0) No longer kept in a list: nothing read it, and at 400 000 copies
+    // it held about 50 MB until the end of the run.
     const r = Object.assign({ rel: node.rel, op: node.op, type: node.type, ok }, extra || {});
-    this.results.push(r);
     // (0.8.8) Said once, when the item is created there under its short name.
     const side = extra && extra.side;
     if (ok && side && node.short === side && !extra.deleted && !(node[side] && node[side].exists)) {
@@ -515,13 +517,25 @@ class SyncRunner {
     throw lastErr;
   }
 
+  // (0.9.0) One fingerprint engine per lane and pass, reset (init) at the
+  // start of every file, instead of a new WebAssembly instance per file: on
+  // 5 000 small files that alone took the run from 18 s to 11 s. A lane
+  // works on one file at a time, so two files never share one.
+  async _hasher(pass, lane, algo) {
+    if (!this._hashers) this._hashers = new Map();
+    const k = pass + ':' + (lane || 0) + ':' + algo;
+    let h = this._hashers.get(k);
+    if (!h) { h = await createHasher(algo); this._hashers.set(k, h); }
+    return h;
+  }
+
   // ── Planning ─────────────────────────────────────────────────────────────
   buildPlan() {
-    const del = [], mkdir = [], copy = [], rmdir = [], moves = [], renames = [];
+    const del = [], mkdir = [], copy = [], moves = [], rmdir = [];
+    // (0.8.9) Windows-safe names: renamed in place before anything else.
+    // (0.9.0) Only for rows that take part in the run (see plannedRenames).
+    const renames = plannedRenames(this.nodes);
     for (const n of this.nodes) {
-      // (0.8.9) Windows-safe names: renamed in place before anything else.
-      if (n.fixL) renames.push({ n, side: 'left',  from: n.fixL });
-      if (n.fixR) renames.push({ n, side: 'right', from: n.fixR });
       switch (n.op) {
         case OP.DELETE_LEFT:  (n.type === 'folder' ? rmdir : del).push({ n, side: 'left'  }); break;
         case OP.DELETE_RIGHT: (n.type === 'folder' ? rmdir : del).push({ n, side: 'right' }); break;
@@ -762,7 +776,19 @@ class SyncRunner {
     const src = this.abs(side, parts.join('/'));
     const dst = this.abs(side, toRel);
     await this.assertNoLinkOnTheWay(side, n, false);
-    if (!(await fsx.stat(src))) throw new Error('It is no longer there.');
+    if (!(await fsx.stat(src))) {
+      // (0.9.0) Already done: by another pair of this job sharing the folder
+      // (they are all compared before the first one runs), or by an attempt
+      // whose answer was lost on the way back from a server. The run used to
+      // stop here, copying nothing for that pair.
+      const there = await fsx.stat(dst);
+      const seen = n[side] || {};
+      const sameItem = there && (n.type === 'folder'
+        ? there.type === 'folder'
+        : there.type === 'file' && (seen.size == null || there.size === seen.size));
+      if (sameItem) return 'already';
+      throw new Error('It is no longer there.');
+    }
     // Never onto something: the comparison left out names that clash once
     // cleaned, so anything here appeared since.
     if (await fsx.stat(dst)) throw new Error(`"${toRel.split('/').pop()}" already exists there.`);
@@ -949,7 +975,7 @@ class SyncRunner {
     if (!failSafe && existed) await this.archiveExisting(to, n);
     if (!failSafe) { if (!this._wrote) this._wrote = new Set(); this._wrote.add(to + '\u0000' + n.rel); }
 
-    const hasher = algo ? await createHasher(algo) : null;
+    const hasher = algo ? await this._hasher('copy', lane, algo) : null;
     let copied;
     try {
       this.phase = 'copy';
@@ -1095,6 +1121,14 @@ class SyncRunner {
 
     // (0.8.8) A move is a write too: not through a link planted on the way.
     await this.assertNoLinkOnTheWay(side, n, false);
+    // (0.9.0) The comparison saw nothing at the new name. Something there now
+    // (another pair, another person, written since) would be overwritten by
+    // the rename without a word: refused, as a copy is (0.8.8). The same file
+    // seen under another spelling (a case-only difference) is not a clash.
+    const there = await fsx.stat(to);
+    if (there && !(st.id && there.id === st.id) && from.toLowerCase() !== to.toLowerCase()) {
+      throw new Error('A file appeared at the new name since the comparison — not replaced. Compare again.');
+    }
     await fsx.mkdir(fsx.dirname(to));
     try {
       await fsx.rename(from, to);
@@ -1188,7 +1222,6 @@ class SyncRunner {
     }
     this.emit(true, this.token.cancelled ? 'Cancelled' : (this.stopped ? 'Stopped' : 'Done'));
     return {
-      results  : this.results,
       applied  : this.applied,
       errors   : this.errors,
       notes    : this.notes,
@@ -1198,6 +1231,8 @@ class SyncRunner {
       plan     : this.plan,
       cancelled: !!this.token.cancelled,
       stopped  : !!this.stopped,
+      stopReason: this.stopReason || null,
+      renamedIdx: this.renamedIdx,
       stamp    : this.stamp,
     };
   }
@@ -1210,7 +1245,9 @@ class SyncRunner {
     if (this.cfg.ignoreErrors) return false;
     if (!this.stopped) {
       this.stopped = true;
-      this.notes.push('Stopped at the first error because "ignore errors" is off. ' +
+      this.stopReason = 'error';
+      // (0.9.0) Named as the setting is.
+      this.notes.push('Stopped at the first error because "Continue on error" is off. ' +
         'Nothing after this point was attempted.');
     }
     return true;
@@ -1245,6 +1282,8 @@ class SyncRunner {
     const probe = fsx.join(this.side(side).path, '.syncto.trash-probe');
     let ok = false;
     try {
+      // (0.9.0) Not through a link planted under the probe's name.
+      await clearLink(fsx, probe);
       await new Promise((resolve, reject) => {
         const ws = fsx.createWriteStream(probe);
         ws.on('error', reject);
@@ -1302,9 +1341,19 @@ class SyncRunner {
   }
 
   async _run() {
+    // (0.9.0) Which rows were renamed for Windows, per side: the checksum
+    // list moves their lines to the new names.
+    this.renamedIdx = { left: new Set(), right: new Set() };
     const plan = this.buildPlan();
     this.emit(true, 'Preparing…');
     await this.preflight(plan);
+    await this.dropLeftoverLinks();
+    // (0.9.0) The .syncto_tmp files an interrupted run left behind are swept
+    // first, while their paths are still the ones the comparison saw: swept
+    // at the end, one inside a folder renamed for Windows was looked for
+    // under the old name and stayed until the next run. The lock is already
+    // held on both folders.
+    await this.sweepLeftovers();
 
     // (0.8.9) -1. Windows-safe names: rename in place first, folders before
     //    their contents, since every later path is written with the new
@@ -1315,14 +1364,18 @@ class SyncRunner {
       this.current = item.n.rel;
       this.way = item.side;
       try {
-        await this.withRetry(item.n.rel, () => this.renameOne(item));
+        const res = await this.withRetry(item.n.rel, () => this.renameOne(item));
         this.done.renamed = (this.done.renamed || 0) + 1;
+        this.renamedIdx[item.side].add(item.n.idx);
+        // (0.9.0) A row with nothing else to do leaves the list, like a copy.
+        if (item.n.op === OP.NONE && !item.n.doneInRun) { item.n.doneInRun = true; if (this.onRowDone) this.onRowDone(); }
         const to = this.relOn(item.n, item.side).split('/').pop();
-        this.notes.push(`Renamed for Windows in the ${item.side} folder: "${item.from}" → "${to}".`);
+        if (res !== 'already') this.notes.push(`Renamed for Windows in the ${item.side} folder: "${item.from}" → "${to}".`);
       } catch (err) {
         this.record(item.n, false, { side: item.side, error: `Could not rename "${item.from}" for Windows: ${err.message || err}` });
         if (!/cancelled/i.test(err.message || '')) {
           this.stopped = true;
+          this.stopReason = 'rename';
           this.notes.push('Stopped: a name could not be changed for Windows, so nothing else was done ' +
             '(every later step uses the new names).');
         }
@@ -1494,7 +1547,7 @@ class SyncRunner {
             this.notes.push('The write cache could not be flushed on this volume, so the ' +
               'verification read may have been served from memory rather than from the medium.');
           }
-          const verifier = await createHasher(item.algo);
+          const verifier = await this._hasher('verify', lane, item.algo);
           const back = await hashStream(fsx, item.path, verifier,
             b => { this.done.workBytes += b; this.meter.add(b); this.emit(false); }, this.token);
           if (back !== item.digest) throw new Error(`Checksum mismatch (${item.algo}).`);
@@ -1513,8 +1566,6 @@ class SyncRunner {
           // The file already carries its final name, so the database must NOT
           // record it as synchronized — the next run has to look at it again.
           this.applied.delete(item.rel);
-          const res = this.results.find(r => r.rel === item.rel && r.ok);
-          if (res) { res.ok = false; res.error = err.message || String(err); }
           this.halt(err);
         } finally {
           this.inFlight--;
@@ -1552,17 +1603,30 @@ class SyncRunner {
       this.emit(false);
     }
 
-    // 6. sweep the .syncto_tmp files a previous run left behind. They are
-    //    half-written copies, never user data, and the comparison hides them —
-    //    so nothing else would ever remove them. We hold the lock on both
-    //    folders here, so no other machine is writing them right now.
-    await this.sweepLeftovers();
+    // 6. (the .syncto_tmp files a previous run left behind are swept at the
+    //    start since 0.9.0: half-written copies, never user data, hidden by
+    //    the comparison, so nothing else would ever remove them.)
 
     // Prune stale revisions once everything else is done.
     for (const side of ['left', 'right']) {
       const v = this.versionerFor(side);
       if (v) { try { await v.prune(m => this.notes.push(m)); } catch (_) {} }
     }
+  }
+
+  // (0.9.0) A symbolic link found under a scratch name ("clip.mov.syncto_tmp")
+  // is not a leftover of ours: somebody put it there, and a copy would write
+  // through it. Removed (the link only) before anything is written.
+  async dropLeftoverLinks() {
+    const list = this.leftovers || [];
+    const links = list.filter(x => x.type === 'symlink');
+    if (!links.length) return;
+    for (const item of links) {
+      try { await this.side(item.side).fs.unlink(item.path); } catch (_) {}
+    }
+    this.leftovers = list.filter(x => x.type !== 'symlink');
+    this.notes.push(`Removed ${links.length} link${links.length > 1 ? 's' : ''} found under syncto's temporary names ` +
+      `(nothing is ever written through a link).`);
   }
 
   async sweepLeftovers() {

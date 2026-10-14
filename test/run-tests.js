@@ -6644,6 +6644,542 @@ async function testReview088() {
   }
 }
 
+
+// ══ 52. Audit of 13/10/2026 ═════════════════════════════════════════════════
+// A full review of 0.8.9 (engine, security, window, speed). Every defect it
+// confirmed and Noar asked to fix (lots A to D) has its check here. Run alone:
+//   SYNCTO_ONLY=testAudit1013 node test/run-tests.js
+async function testAudit1013() {
+  console.log('\n\n52. Audit of 13/10/2026 (0.9.0)');
+  const root = path.join(__dirname, '..');
+  const app  = fs.readFileSync(path.join(root, 'src/renderer/app.js'), 'utf8').replace(/\u0000/g, '');
+  const html = fs.readFileSync(path.join(root, 'src/renderer/index.html'), 'utf8');
+  const files = base => listAll(base).filter(f => !f.endsWith('/') && !f.includes('.syncto.') && !f.endsWith('syncto-checksums.txt'));
+  const fnBody = name => {
+    const i = app.indexOf(name);
+    if (i < 0) return '';
+    const open = app.indexOf('{', i);
+    let depth = 0;
+    for (let k = open; k < app.length; k++) {
+      if (app[k] === '{') depth++;
+      else if (app[k] === '}' && --depth === 0) return app.slice(i, k + 1);
+    }
+    return app.slice(i);
+  };
+
+  // ── Lot A: data loss and security ─────────────────────────────────────────
+
+  // (a1) VERIFY sits in the modes row without being a mode: clicking it set
+  //      the mode to undefined, read as MIRROR by the engine and the job file.
+  {
+    const h = app.slice(app.indexOf("$('syncmodes').addEventListener('click'"));
+    ok(/if \(!b \|\| !b\.dataset\.v \|\| state\.busy\) return;/.test(h.slice(0, 600)),
+       'a button of the modes row without a mode (VERIFY) leaves the mode alone');
+    ok(/<button class="mbtn" id="btn-verify"(?![^>]*data-v)/.test(html), 'and VERIFY indeed has none');
+  }
+
+  // (a2) Changing the mode or a comparison setting after a comparison: the
+  //      engine refuses the old plan, the window drops it.
+  {
+    const { planKeyOf } = require('../src/main/core/session');
+    const { L, R } = scratch();
+    write(L, 'a.txt', 'a'); write(R, 'old.txt', 'old');
+    const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+    job.pairs = [{ left: L, right: R }];
+    const m = new MultiSession();
+    await m.compare(job, { token: {} });
+    const upd = JSON.parse(JSON.stringify(job)); upd.sync.variant = 'update';
+    let err = null;
+    try { await m.sync(upd, { token: {} }); } catch (e) { err = e; }
+    ok(err && /mode or a comparison setting changed/.test(err.message), 'MIRROR compared, UPDATE asked: the engine refuses');
+    ok(exists(R, 'old.txt'), 'and nothing was deleted');
+    const filt = JSON.parse(JSON.stringify(job)); filt.compare.excludeFilter = '*.txt';
+    ok(planKeyOf(filt) !== planKeyOf(job), 'a filter change is a plan change');
+    const deletion = JSON.parse(JSON.stringify(job)); deletion.sync.deletion = 'recycler'; deletion.sync.retryCount = 5;
+    eq(planKeyOf(deletion), planKeyOf(job), 'how deletions are done or retried is not');
+    const shuffled = JSON.parse(JSON.stringify(job));
+    shuffled.compare = Object.fromEntries(Object.entries(job.compare).reverse());
+    eq(planKeyOf(shuffled), planKeyOf(job), 'the order of the keys does not matter');
+    const run = await m.sync(job, { token: {} });
+    eq(run.errors.length, 0, 'the same settings run');
+    ok(!exists(R, 'old.txt'), 'and run the plan that was shown');
+    await m.close();
+
+    ok(fnBody('function planKeyOf(job)').replace(/\s+/g, ' ') ===
+       fs.readFileSync(path.join(root, 'src/main/core/session.js'), 'utf8').slice(
+         fs.readFileSync(path.join(root, 'src/main/core/session.js'), 'utf8').indexOf('function planKeyOf(job)')).replace(/\s+/g, ' ')
+         .slice(0, fnBody('function planKeyOf(job)').replace(/\s+/g, ' ').length),
+       'the window and the engine use the same list of settings');
+    const cmp = fnBody('async function doCompare()');
+    ok(cmp.indexOf('const comparedPlan  = planKeyOf(state.job);') < cmp.indexOf('API.compare(state.job)') &&
+       cmp.indexOf('const comparedPairs = pairsKey(completePairs());') < cmp.indexOf('API.compare(state.job)') &&
+       cmp.indexOf('API.compare(state.job)') > 0 &&
+       /state\.comparedPlan  = comparedPlan;/.test(cmp),
+       'the window records what was compared BEFORE the comparison, not after');
+    ok(/invalidateIfPlanChanged\(\);\s*persist\(\);\s*\}\);\s*\$\('syncmodes'\)/.test(app) &&
+       /setVariantBtn\(b\.dataset\.v\);\s*invalidateIfPlanChanged\(\);/.test(app),
+       'a click on a mode or a comparison method drops a plan made with the other');
+    ok(/\$\('ov-settings'\)\.addEventListener\('change'/.test(app) && /PLAN_INPUTS\.includes\(t\.id\) \|\| t\.matches\('select\.cust'\)/.test(app),
+       'so does a change of move detection, date repair, filters or custom directions');
+    ok(/function askConfirm\(\) \{\s*uiToJob\(\);[\s\S]{0,120}if \(invalidateIfPlanChanged\(\)\) return;/.test(app),
+       'and the confirmation checks once more');
+  }
+
+  // (a3) During a comparison or a run, the controls that shape the plan are
+  //      out of reach of the keyboard too (inert), not only of the mouse.
+  {
+    const busy = fnBody('function setBusyUi(on, title, steps)');
+    ok(/lockPlan\(!!on, !!\(on && steps\)\);/.test(busy), 'every busy state locks the plan');
+    const lock = fnBody('function lockPlan(on, run)');
+    ok(/el\.inert = !!on/.test(lock) && /sb\.inert = !!run/.test(lock) && /el\.disabled = !!on/.test(lock),
+       'modes, folders, method, filter and auto-sync are inert, the jobs list during a run, the plan settings disabled');
+    eq(app.match(/const PLAN_REGIONS = \[([^\]]*)\]/)[1].split(',').map(s => s.trim().replace(/'/g, '')),
+       ['syncmodes', 'pairwrap', 'pair-add-row', 'seg-cmp', 'btn-filter'], 'the regions locked');
+    for (const id of app.match(/const PLAN_INPUTS  = \[([^\]]*)\]/)[1].split(',').map(s => s.trim().replace(/'/g, ''))) {
+      ok(html.includes(`id="${id}"`), `the plan setting ${id} exists`);
+    }
+  }
+
+  // (a4) Windows-safe names: a filter written with the real name still applies.
+  for (const mode of ['destination', 'both']) {
+    const { L, R } = scratch();
+    write(L, 'Keep/ok.txt', 'ok');
+    write(R, 'Archive: old/precious.txt', 'precious');
+    write(L, 'Forum: Day 1/draft?.txt', 'draft');
+    const r = await runPair(makeJob(L, R, { sync: { variant: 'mirror', safeNames: mode },
+      compare: { excludeFilter: '/Archive: old/\ndraft?.txt' } }));
+    eq(r.run.errors.length, 0, `${mode}: no error`);
+    ok(exists(R, 'Archive: old/precious.txt'), `${mode}: an exclusion written with the real name protects the folder from MIRROR`);
+    ok(!exists(R, 'Forum_ Day 1/draft_.txt'), `${mode}: and a file excluded by its real name is not copied`);
+    ok(exists(R, 'Keep/ok.txt'), `${mode}: the rest is synchronized`);
+  }
+  {
+    const { L, R } = scratch();
+    write(R, 'Archive: old/precious.txt', 'precious');
+    await runPair(makeJob(L, R, { sync: { variant: 'mirror', safeNames: 'destination' }, compare: { excludeFilter: '/Archive_ old/' } }));
+    ok(exists(R, 'Archive: old/precious.txt'), 'the cleaned spelling still works');
+    const { PathFilter } = require('../src/main/core/filter');
+    const pf = new PathFilter('/Only: this/', '');
+    ok(pf.passFolderAny(['Only_ this', 'Only: this']) && !pf.passFolderAny(['Other', 'Other']),
+       'an include written with the real name includes too');
+  }
+
+  // (a5) A symbolic link planted under a name syncto writes is never written
+  //      through: the file it points at, outside the folders, is untouched.
+  if (process.platform !== 'win32') {
+    const { dir, L, R } = scratch();
+    write(L, 'a.txt', 'hello');
+    write(L, 'clip.mov', 'clip');
+    const victims = ['db', 'list', 'scratch', 'probe'].map(k => { const p = path.join(dir, 'victim-' + k); fs.writeFileSync(p, 'ORIGINAL'); return p; });
+    fs.symlinkSync(victims[0], path.join(R, '.syncto.db.syncto_tmp'));
+    fs.symlinkSync(victims[1], path.join(R, 'syncto-checksums.txt'));
+    fs.symlinkSync(victims[2], path.join(R, 'clip.mov.syncto_tmp'));
+    fs.symlinkSync(victims[3], path.join(R, '.syncto.trash-probe'));
+    const job = makeJob(L, R, { sync: { variant: 'mirror', writeChecksumList: true, deletion: 'recycler' } });
+    const s = new Session(); const token = { cancelled: false, paused: false };
+    const trashItem = async (fsx, p) => { try { fs.unlinkSync(p); return true; } catch (_) { return false; } };
+    await s.compare(job, { token });
+    await s.preflight(job, { trashItem });
+    const run = await s.sync(job, { token, appVersion: 'test', trashItem });
+    await s.close();
+    eq(victims.map(v => fs.readFileSync(v, 'utf8')), ['ORIGINAL', 'ORIGINAL', 'ORIGINAL', 'ORIGINAL'],
+       'the database, the checksum list, a copy and the trash probe never write through a planted link');
+    eq(read(R, 'clip.mov'), 'clip', 'the files are copied all the same');
+    ok(fs.lstatSync(path.join(R, 'syncto-checksums.txt')).isFile() && fs.lstatSync(path.join(R, '.syncto.db')).isFile(),
+       'and the list and the database are real files in the folder');
+    ok(run.notes.some(m => /link found under syncto's temporary names/.test(m)), 'the removed link is mentioned');
+    // And the native layer itself refuses to open a link for writing.
+    const { NativeFs } = require('../src/main/fs/native');
+    const lp = path.join(dir, 'link-out');
+    fs.symlinkSync(victims[0], lp);
+    const e = await new Promise(res => { const ws = new NativeFs().createWriteStream(lp); ws.on('error', res); ws.on('finish', () => res(null)); ws.end('x'); });
+    ok(e && e.code === 'ELOOP' && fs.readFileSync(victims[0], 'utf8') === 'ORIGINAL', 'opening a link for writing fails (O_NOFOLLOW)');
+  }
+
+  // (a6) A detected move does not overwrite a file that appeared at its new
+  //      name since the comparison.
+  {
+    const { L, R } = scratch();
+    write(L, 'P.txt', 'big clip');
+    const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+    await runPair(job);
+    fs.renameSync(path.join(L, 'P.txt'), path.join(L, 'Q.txt'));
+    const s = new Session(); const token = { cancelled: false, paused: false };
+    await s.compare(job, { token });
+    ok(s.nodes.some(n => n.op === OP.MOVE_RIGHT_TO), 'the rename is detected as a move');
+    write(R, 'Q.txt', "somebody else's work");
+    const run = await s.sync(job, { token, appVersion: 'test' });
+    await s.close();
+    eq(read(R, 'Q.txt'), "somebody else's work", 'the file that appeared is not overwritten');
+    ok(run.errors.some(e => /appeared at the new name since the comparison/.test(e.message)), 'and the move is reported, not done');
+  }
+
+  // (a7) A lock whose date looks old only because the NAS clock is behind is
+  //      watched, not taken over at once.
+  {
+    const { acquireOne, folderNow } = require('../src/main/core/lock');
+    const { NativeFs } = require('../src/main/fs/native');
+    const SKEW = 3 * 60 * 1000;
+    class Behind extends NativeFs {   // a disk whose clock runs 3 minutes behind
+      async stat(p) { const st = await super.stat(p); if (st && st.mtime) st.mtime -= SKEW; return st; }
+    }
+    const nfs = new Behind();
+    const { L } = scratch();
+    const lp = path.join(L, LOCK_NAME);
+    fs.writeFileSync(lp, JSON.stringify({ format: 'syncto-lock', version: 1, lockId: 'f'.repeat(32), installId: '0'.repeat(32),
+      computerName: 'OTHER-MAC', userId: 'someone', sessionId: 1, processId: 99999, since: Date.now() }) + '\n');
+    const now = await folderNow(nfs, L);
+    ok(now && Math.abs(Date.now() - SKEW - now) < 5000, "the disk's own time is read from a probe file");
+    ok(!fs.readdirSync(L).some(n => n.startsWith('.syncto.clock-')), 'which is removed');
+    const hb = setInterval(() => { try { fs.appendFileSync(lp, ' '); } catch (_) {} }, 500);
+    const token = { cancelled: false };
+    setTimeout(() => { token.cancelled = true; }, 3000);
+    let res;
+    try { res = await acquireOne(nfs, L, { token, onStatus: () => {} }); } catch (e) { res = e.message; }
+    clearInterval(hb);
+    eq(res, 'Cancelled', 'a live lock looking three minutes old (NAS clock behind) is waited for, not taken');
+    const old = new Date(Date.now() - 10 * 60 * 1000); fs.utimesSync(lp, old, old);
+    const t = Date.now();
+    const lock = await acquireOne(nfs, L, {});
+    ok(Date.now() - t < 5000, 'one silent for ten minutes by that same clock is still taken at once');
+    await lock.release();
+  }
+
+  // (a8) Environment variables are not expanded in a network path.
+  {
+    const { expandMacros } = require('../src/main/fs/afs');
+    process.env.SYNCTO_TEST_SECRET = 'tok123';
+    process.env.SYNCTO_TEST_SERVER = '\\\\dc1';
+    eq(expandMacros('\\\\evil.example\\x\\%SYNCTO_TEST_SECRET%'), '\\\\evil.example\\x\\%SYNCTO_TEST_SECRET%', 'not in \\\\host\\share');
+    eq(expandMacros('//evil.example/x/%SYNCTO_TEST_SECRET%'), '//evil.example/x/%SYNCTO_TEST_SECRET%', 'nor in //host/share');
+    eq(expandMacros('%SYNCTO_TEST_SERVER%\\share'), '%SYNCTO_TEST_SERVER%\\share', 'nor in a path that would become one');
+    eq(expandMacros('/Volumes/%SYNCTO_TEST_SECRET%/x'), '/Volumes/tok123/x', 'a local path still gets them');
+    ok(/^\\\\evil\\\d{4}-\d\d-\d\d$/.test(expandMacros('\\\\evil\\%date%')), 'and the date macros work everywhere');
+    delete process.env.SYNCTO_TEST_SECRET; delete process.env.SYNCTO_TEST_SERVER;
+  }
+
+  // (a9) A password in an address with spaces before it is redacted too.
+  {
+    const { redactLocation } = require('../src/main/fs/afs');
+    eq(redactLocation(' sftp://alice:S3cret@nas.local/backup'), ' sftp://alice@nas.local/backup', 'leading space');
+    eq(redactLocation('\tsftp://alice:S3cret@nas.local/backup'), '\tsftp://alice@nas.local/backup', 'leading tab');
+    const cfg = fs.readFileSync(path.join(root, 'src/main/config.js'), 'utf8');
+    ok(/const m = \/\^\\s\*sftp:/.test(cfg), 'and the password is moved to the credential store in that case too');
+  }
+  // ── Lot B: Windows-safe and long names ────────────────────────────────────
+  {
+    const ln = require('../src/main/fs/longname');
+    const saved = ln.limits.name;
+    ln.limits.name = 60;
+    try {
+      // (b1) 2 WAYS: deleting a long-named original deletes its short copy,
+      //      instead of bringing it back under the short name.
+      {
+        const { L, R } = scratch();
+        const long = 'Interview of the speaker, full length, colour graded ' + 'f'.repeat(20) + '.mov';
+        const short = ln.shorten(long);
+        const t = Date.now() - 3600e3;
+        write(L, long, 'v1', t); write(L, 'other.txt', 'o', t);
+        const job = makeJob(L, R, { sync: { variant: 'twoWay' } });
+        await runPair(job);
+        ok(exists(R, short), 'the copy is written under the short name');
+        await runPair(job);
+        fs.unlinkSync(path.join(L, long));
+        const r = await runPair(job);
+        eq(r.run.errors.length, 0, 'no error');
+        ok(!exists(L, short) && !exists(R, short) && !exists(L, long), 'the deletion reaches the short copy, nothing comes back');
+        eq(files(R), ['other.txt'], 'the rest stays');
+      }
+      // (b2) A long name that moves to another folder is a move again.
+      {
+        const { L, R } = scratch();
+        const long = 'Interview of the speaker, full length, colour graded ' + 'g'.repeat(20) + '.mov';
+        const t = Date.now() - 3600e3;
+        write(L, 'D1/' + long, 'clip', t);
+        const job = makeJob(L, R, { sync: { variant: 'mirror' } });
+        await runPair(job);
+        fs.mkdirSync(path.join(L, 'D2'));
+        fs.renameSync(path.join(L, 'D1', long), path.join(L, 'D2', long));
+        const r = await runPair(job);
+        eq(r.run.counters.moved, 1, 'renamed at the destination, not copied again');
+        ok(exists(R, 'D2/' + ln.shorten(long)), 'under its short name');
+      }
+      // (b3) Destination only, 2 WAYS: a name both long and refused by Windows,
+      //      created on the destination, is paired with its copy at the
+      //      source at every later run.
+      {
+        const { L, R } = scratch();
+        const name = 'Session: keynote, full length, colour graded ' + 'k'.repeat(20) + '.mov';
+        write(R, name, 'v1', Date.now() - 3600e3);
+        const job = makeJob(L, R, { sync: { variant: 'twoWay', safeNames: 'destination' } });
+        await runPair(job);
+        const r = await runPair(job);
+        eq([files(L).length, files(R).length], [1, 1], 'one copy on each side');
+        ok(r.s.nodes.every(n => n.op === OP.NONE), 'paired: nothing to do at the next run');
+        ok(/^Session: /.test(files(L)[0]) && /^Session_ /.test(files(R)[0]), 'the source keeps its spelling, the destination is cleaned');
+      }
+    } finally { ln.limits.name = saved; }
+  }
+
+  // (b4) Two pairs writing to the same destination: the second finds the
+  //      rename already done by the first and carries on.
+  {
+    const { dir } = scratch();
+    const L1 = path.join(dir, 'L1'), L2 = path.join(dir, 'L2'), C = path.join(dir, 'C');
+    const t = Date.now() - 3600e3;
+    write(L1, 'x:y.txt', 'xy', t); write(L2, 'x:y.txt', 'xy', t); write(C, 'x:y.txt', 'xy', t);
+    write(L2, 'new from pair 2.txt', 'n', t);
+    const job = makeJob('', '', { sync: { variant: 'update', safeNames: 'destination' } });
+    job.pairs = [{ left: L1, right: C }, { left: L2, right: C }];
+    const ms = new MultiSession();
+    await ms.compare(job, { token: {} });
+    const run = await ms.sync(job, { token: {} });
+    await ms.close();
+    eq(run.errors.length, 0, 'no error');
+    ok(exists(C, 'new from pair 2.txt') && exists(C, 'x_y.txt'), 'pair 2 ran');
+    eq(run.counters.renamed, 2, 'the run counts its renames (one done, one found done)');
+    eq(run.notes.filter(m => /Renamed for Windows/.test(m)).length, 1, 'and reports the one it did');
+  }
+
+  // (b5) Unticked rows, rows the soft filter leaves out, conflicts and rows
+  //      set to "do nothing" are not renamed.
+  {
+    const { L, R } = scratch();
+    const t = Date.now() - 3600e3;
+    write(L, 'Big: clip.mov', 'x'.repeat(5000), t); write(R, 'Big: clip.mov', 'x'.repeat(5000), t);
+    write(L, 'Unticked: me.txt', 'u'.repeat(20000), t); write(R, 'Unticked: me.txt', 'u'.repeat(20000), t);
+    write(L, 'Clash: x', 'file', t); write(R, 'Clash: x/inside.txt', 'f', t);
+    write(L, 'Kept: me.txt', 'k'.repeat(20000), t); write(R, 'Kept: me.txt', 'k'.repeat(20000), t);
+    const job = makeJob(L, R, { sync: { variant: 'mirror', safeNames: 'both' },
+      compare: { softFilter: { sizeMinUnit: 'kb', sizeMin: 10 } } });
+    const s = new Session(); const token = { cancelled: false, paused: false };
+    await s.compare(job, { token });
+    s.setActive([s.nodes.find(n => n.rel === 'Unticked_ me.txt').idx], false);
+    eq([s.stats.renameLeft, s.stats.renameRight], [1, 1], 'only the row that takes part is counted, on each side');
+    const rows = s.rows(0, 50, {}).rows;
+    ok(rows.some(r => r.rel === 'Kept_ me.txt' && r.fx && r.fx.l === 'Kept: me.txt' && r.fx.r === 'Kept: me.txt'),
+       'and listed in the grid with the names it replaces, although nothing is copied');
+    ok(s.rows(0, 50, { onlyOperation: 'rename' }).rows.every(r => r.fx), 'the rename chip lists exactly those');
+    await s.sync(job, { token, appVersion: 'test' });
+    await s.close();
+    eq(files(L).sort(), ['Big: clip.mov', 'Clash: x', 'Kept_ me.txt', 'Unticked: me.txt'], 'the source: only the row that takes part is renamed');
+    eq(files(R).sort(), ['Big: clip.mov', 'Clash: x/inside.txt', 'Kept_ me.txt', 'Unticked: me.txt'], 'the destination: same');
+  }
+  // A folder left out keeps its name even when a file inside is renamed? No:
+  // a folder is renamed when something inside takes part in the run.
+  {
+    const { L, R } = scratch();
+    const t = Date.now() - 3600e3;
+    write(L, 'Day: 1/new.txt', 'n', t);
+    write(R, 'Day: 1/old.txt', 'o', t); write(L, 'Day: 1/old.txt', 'o', t);
+    const r = await runPair(makeJob(L, R, { sync: { variant: 'mirror', safeNames: 'destination' } }));
+    eq(r.run.errors.length, 0, 'no error');
+    eq(files(R).sort(), ['Day_ 1/new.txt', 'Day_ 1/old.txt'], 'the folder holding work is renamed, its contents follow');
+  }
+
+  // (b6) The window: a run stopped by a failed rename says so, notes cut
+  //      short say so, renames are counted.
+  {
+    ok(/res\.stopReason === 'rename' \? 'Stopped — a name could not be changed for Windows'/.test(app), 'the headline names a stop on a rename');
+    ok(/const notes = res\.notes\.filter\(isStop\)\.concat/.test(app), 'why it stopped comes first in the notes');
+    ok(/more\(notes\.length, 40\)/.test(app) && /more\(res\.errors\.length, 60\)/.test(app), 'a list cut short says how much is missing');
+    ok(/\['Renamed for Windows', fmtCount\(res\.counters\.renamed, true\)\]/.test(app), 'the summary counts the renames');
+    ok(/chip\('b', 'Windows names', ren, 'rename', 'op'\)/.test(app), 'a chip counts them before the run');
+    ok(/if \(c\.renamed\) bits\.push/.test(app), 'and the auto-sync line after it');
+    ok(/to change for Windows, nothing to copy or delete/.test(fnBody('function renderEmptyState(res)')) &&
+       /to change for Windows, nothing to copy\./.test(app), 'an empty list or overview with renames left does not say "in sync"');
+    const { L, R } = scratch();
+    write(L, 'a.txt', 'a'); write(L, 'b.txt', 'b');
+    const job = makeJob(L, R, { sync: { variant: 'mirror', ignoreErrors: false } });
+    job.pairs = [{ left: L, right: R }, { left: L, right: path.join(R, 'second') }];
+    const ms = new MultiSession();
+    await ms.compare(job, { token: {} });
+    fs.unlinkSync(path.join(L, 'a.txt'));     // vanishes between the comparison and the run
+    const run = await ms.sync(job, { token: {} });
+    await ms.close();
+    ok(run.stopped && run.stopReason === 'error', 'a pair that stopped makes the whole run "stopped"');
+    ok(!exists(R, 'second/b.txt'), 'and with "Continue on error" off the next pair is not started');
+  }
+
+  // ── Lot C: the window, and what it is told ────────────────────────────────
+  {
+    // (c1) Many pairs scroll inside their card.
+    ok(/#pairwrap\{max-height:28vh;overflow-y:auto;min-height:0;\}/.test(html), 'the pairs scroll, the buttons below stay in the window');
+    // (c2) The scroll bars of the Errors and Notes panels are drawn.
+    ok(!/scrollbar-track-track|scrollbar-thumb-thumb|:hover-thumb:hover/.test(html), 'no mangled scroll-bar selector left');
+    ok(/\.err-body::-webkit-scrollbar-thumb\{background:#454956/.test(html), 'the panels get the same thumb as every list');
+    // (c3) A failed call does not freeze the window; auto-sync stops on CANCEL.
+    ok(!/await API\.(compare|sync)\(state\.job\)/.test(app), 'every comparison and run goes through ipc()');
+    ok(/async function ipc\(promise\) \{\s*try \{ return await promise; \}\s*catch \(err\) \{ return \{ ok: false/.test(app), 'which turns a failed call into a failure');
+    const auto = fnBody('async function autoRun()');
+    ok(/if \(cmp\.cancelled\) \{[\s\S]{0,300}comparison cancelled — nothing synchronized/.test(auto) &&
+       auto.indexOf('if (cmp.cancelled)') < auto.indexOf("state.busy = 'sync';"), 'auto-sync ends its cycle when its comparison is cancelled');
+    ok(/state\.comparedPlan  = comparedPlan;/.test(auto), 'and records what it compared, like a manual comparison');
+    const quiet = fnBody('async function doCompareQuiet()');
+    ok(/if \(res && res\.cancelled\) \{[\s\S]{0,200}setRecheck\(null\);/.test(quiet), 'stopping the check after a run is not reported as a failure');
+    // (c4) Tooltips go when their row is redrawn.
+    const tips = fnBody('function installTooltips()');
+    ok(/!owner\.isConnected/.test(tips) && /addEventListener\('scroll', drop, true\)/.test(tips), 'a tooltip does not outlive its row');
+    // (c5) Thousands separators everywhere.
+    ok(/<b>\$\{fmtCount\(value, true\)\}<\/b>/.test(app), 'in the chips');
+    ok(/fmtCount\(r\.todo, true\) \+ ' to process'/.test(app), 'in the pair headers');
+    ok(/\$\{fmtCount\(p\.filesDone, true\)\}<span class="stot"> \/ \$\{fmtCount\(p\.filesTotal, true\)\}/.test(app), 'in the run tiles');
+    eq((app.match(/<div class="sr-val">\$\{v\}<\/div>/g) || []).length, 0, 'in the confirmation, summary and verify grids');
+    ok(!/\.toLocaleString\(\)/.test(app.replace(/new Date\(\)\.toLocaleString\(\)/g, '')), 'always in one format, whatever the system language');
+    // (c6) Right-to-left names do not reverse "A → B".
+    ok(/function bidiLabel\(s\)[\s\S]{0,160}\\u2068' \+ x \+ '\\u2069/.test(app) &&
+       (app.match(/bidiLabel\(/g) || []).length >= 5, 'each side of a pair label is isolated');
+    // (c7) Words: Source / Destination, and the setting's own name.
+    ok(/leftOnly: 'source only', rightOnly: 'destination only'/.test(app), 'the row tooltips say source and destination');
+    ok(/"Continue on error" is off/.test(fs.readFileSync(path.join(root, 'src/main/core/sync.js'), 'utf8')), 'the stop note names the setting');
+    ok(/\['Windows names', renames\]/.test(app), 'the confirmation tile no longer reads like "Move (rename)"');
+    // (c8) Shortcuts in the tooltips, as Windows writes them.
+    ok(/replace\(\/⇧⌘\/g, 'Ctrl\+Shift\+'\)\.replace\(\/⌘\/g, 'Ctrl\+'\)/.test(app), '⌘ becomes Ctrl+ off a Mac');
+    // (c9) The charter.
+    ok(/\.srv-status\.busy\{background:var\(--blue-d\)/.test(html), 'connecting is blue');
+    ok(/\.ctx-it \.ko\.skip\{color:var\(--text2\);\}/.test(html) && /const CTX_KO = '<svg class="ko skip"/.test(app), 'excluding is not red');
+    ok(!/\.ov-pct \.bar\{[^}]*53,201,139/.test(html), 'a share of size is not green');
+    ok(/#ov-auto \.err-item,#sum-errors-body \.err-item,#sum-notes-body \.err-item,#footer \.fc#footer-auto\{font-family:var\(--font\);\}/.test(html),
+       'sentences in the text font');
+    // (c10) A window that opens takes the focus.
+    ok(/installOverlayFocus\(\);/.test(app) && /new MutationObserver/.test(fnBody('function installOverlayFocus()')), 'focus goes into an overlay and stays there');
+    // (c11) The lock countdown is shown while leftovers are checked.
+    ok(/API\.onLockProgress\(st =>/.test(fnBody('async function clearStaleLocksNow()')), 'the lock badge counts down');
+    ok(!/takeMigrationNotes/.test(fs.readFileSync(path.join(root, 'src/main/preload.js'), 'utf8')), 'the bridge has no call without a handler');
+    // (c12) Dead rules gone, the short-window block not repeated.
+    ok(!/\.rl-more\{|\.rl-btn\.use\{|\.sum-verify\.plain|\n\.chk\{/.test(html), 'unused styles removed');
+    const first = html.slice(html.indexOf('@media (max-height:760px){'), html.indexOf('}\n', html.indexOf('@media (max-height:760px){') + 30));
+    ok(!/pb-pct-ring|ring-txt|pb-title/.test(first.slice(0, first.indexOf('.pb-stats'))), 'the first short-window block no longer sets what the second overrides');
+  }
+
+  // (c13) The checksum list follows a rename for Windows, and names with a
+  //       line break are escaped.
+  {
+    const { verifyFolder } = require('../src/main/core/session');
+    const { FsPool } = require('../src/main/fs/afs');
+    const { L, R } = scratch();
+    const t = Date.now() - 3600e3;
+    write(L, 'Forum: Day 1/clip?.mov', 'clip', t);
+    const job = makeJob(L, R, { sync: { variant: 'mirror', writeChecksumList: true } });
+    await runPair(job);
+    ok(/  Forum: Day 1\/clip\?\.mov/.test(read(R, 'syncto-checksums.txt')), 'the list names the file');
+    job.sync.safeNames = 'destination';
+    await runPair(job);
+    const list = read(R, 'syncto-checksums.txt');
+    ok(/  Forum_ Day 1\/clip_\.mov/.test(list) && !/Forum: Day 1/.test(list), 'after the rename, under its new name only');
+    const pool = new FsPool();
+    const v = await verifyFolder(pool, R, { token: {} });
+    await pool.closeAll();
+    eq([v.missing, v.mismatched], [0, 0], 'and Verify Folder finds it intact');
+    const { formatChecksumList, parseChecksumList } = require('../src/main/core/hash');
+    const entries = [{ hash: 'ab', rel: 'd/Icon\r' }, { hash: 'cd', rel: 'a\\b' }, { hash: 'ef', rel: 'two\nlines' }, { hash: '01', rel: 'plain.txt' }];
+    const txt = formatChecksumList('xxh64', entries, {});
+    ok(txt.includes('\\ab  d/Icon\\r') && txt.includes('01  plain.txt'), 'a name with a line break is escaped as md5sum does');
+    eq(parseChecksumList(txt).entries, entries, 'and read back exactly');
+  }
+
+  // (c14) A temporary file left inside a folder renamed in the same run is
+  //       swept in that run.
+  {
+    const { L, R } = scratch();
+    const t = Date.now() - 3600e3;
+    write(L, 'Day: 1/a.mov', 'a', t); write(R, 'Day: 1/a.mov', 'a', t);
+    write(R, 'Day: 1/b.mov.syncto_tmp', 'half a copy');
+    await runPair(makeJob(L, R, { sync: { variant: 'mirror', safeNames: 'destination' } }));
+    eq(listAll(R).filter(f => !f.includes('.syncto.')), ['Day_ 1/', 'Day_ 1/a.mov'], 'no leftover under the new name');
+  }
+
+  // ── Lot D: speed, without touching how files are read or written ──────────
+  {
+    const sync = fs.readFileSync(path.join(root, 'src/main/core/sync.js'), 'utf8');
+    // (d1) One fingerprint engine per lane and pass.
+    eq((sync.match(/await createHasher\(/g) || []).length, 1, 'a fingerprint engine is created in one place only');
+    ok(/await this\._hasher\('copy', lane, algo\)/.test(sync) && /await this\._hasher\('verify', lane, item\.algo\)/.test(sync),
+       'the copy and the read-back reuse theirs, per lane');
+    ok(/hasher\.init\(\)/.test(fs.readFileSync(path.join(root, 'src/main/core/hash.js'), 'utf8')), 'which is reset at every file');
+    // (d7) No write-only list of results.
+    ok(!/this\.results/.test(sync), 'the run no longer keeps every result in memory');
+  }
+  // (d2) Unticking folders walks their contents only, with the same result.
+  {
+    const { L, R } = scratch();
+    for (const d of ['A', 'A/x', 'B', 'AB']) write(L, d + '/f.txt', d);
+    write(L, 'A/x/y/g.txt', 'g');
+    const s = new Session();
+    await s.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: {} });
+    const a = s.nodes.find(n => n.rel === 'A');
+    const got = s._expand([a.idx]).sort((x, y) => x - y);
+    const want = s.nodes.filter(n => n.rel === 'A' || n.rel.startsWith('A/')).map(n => n.idx).sort((x, y) => x - y);
+    eq(got, want, 'a folder and exactly what it holds ("AB" is not inside "A")');
+    ok(s.nodes.every((n, i) => n.idx === i) && s.nodes.every(n => n.parent == null || n.parent < 0 || s.nodes[n.parent].depth === n.depth - 1),
+       'the order this relies on: every row at its own index, parents first');
+    await s.close();
+  }
+  // (d3) The grid is served a window, identical to the old full list's slice.
+  {
+    const { dir } = scratch();
+    const L1 = path.join(dir, 'L1'), L2 = path.join(dir, 'L2'), R1 = path.join(dir, 'R1'), R2 = path.join(dir, 'R2');
+    for (let i = 0; i < 30; i++) { write(L1, `a${i}.txt`, 'a'); write(L2, `b${i}.txt`, 'b'); }
+    const job = makeJob('', '', { sync: { variant: 'mirror' } });
+    job.pairs = [{ left: L1, right: R1 }, { left: L2, right: R2 }];
+    const ms = new MultiSession();
+    await ms.compare(job, { token: {} });
+    const full = ms.rows(0, 1000, {});
+    const key = r => r.hdr ? 'H' + r.pair : String(r.idx);
+    let same = true;
+    for (const [o, l] of [[0, 5], [29, 4], [31, 3], [60, 10], [62, 50]]) {
+      const w = ms.rows(o, l, {});
+      if (JSON.stringify(w.rows.map(key)) !== JSON.stringify(full.rows.slice(o, o + l).map(key)) || w.total !== full.total) same = false;
+    }
+    ok(same && full.total === 62, 'any window, across pair headings, is the same rows as before');
+    await ms.close();
+  }
+  // (d4) During a run the list is filtered, not rebuilt.
+  {
+    const { L, R } = scratch();
+    for (let i = 0; i < 5; i++) write(L, `f${i}.txt`, 'x');
+    const s = new Session();
+    await s.compare(makeJob(L, R, { sync: { variant: 'mirror' } }), { token: {} });
+    const before = s.rows(0, 50, {}).total;
+    s.nodes[1].doneInRun = true; s._landed();
+    eq([before, s.rows(0, 50, {}).total], [5, 4], 'a row that landed leaves the list');
+    ok(/onRowDone: \(\) => this\._landed\(\)/.test(fs.readFileSync(path.join(root, 'src/main/core/session.js'), 'utf8')), 'which is how a run reports it');
+    await s.close();
+  }
+  // (d5) The database read at the comparison is reused when saving, unless
+  //      the file changed in between; and it is not copied item by item.
+  {
+    const { loadPairDb, savePairDb } = require('../src/main/core/db');
+    const { NativeFs } = require('../src/main/fs/native');
+    const { L, R } = scratch();
+    const side = p => ({ fs: new NativeFs(), path: p });
+    await savePairDb(side(L), side(R), 'p1', { items: { 'a.txt': { t: 'f', lm: 1, ls: 1, rm: 1, rs: 1 } } });
+    const loaded = await loadPairDb(side(L), side(R), 'p1');
+    ok(loaded.db.available && loaded.docs.left.doc && loaded.docs.left.digest, 'the documents read are kept');
+    ok(Object.getPrototypeOf(loaded.db.items) === null, 'the items are prototype-free without a copy');
+    // Another pair of the job writes in the same folders meanwhile.
+    await savePairDb(side(L), side(R), 'p2', { items: { 'b.txt': { t: 'f' } } });
+    await savePairDb(side(L), side(R), 'p1', { items: { 'a.txt': { t: 'f' } } }, loaded.docs);
+    const after = await loadPairDb(side(L), side(R), 'p2');
+    ok(after.db.available && after.db.items['b.txt'], "a file changed since is read again: the other pair's history survives");
+    const again = await loadPairDb(side(L), side(R), 'p1');
+    let parsed = 0;
+    const orig = JSON.parse;
+    JSON.parse = (...a) => { parsed++; return orig(...a); };
+    try { await savePairDb(side(L), side(R), 'p1', { items: {} }, again.docs); } finally { JSON.parse = orig; }
+    eq(parsed, 0, 'an unchanged file is not parsed a second time');
+  }
+  // (d6) Move detection with nothing new on either side returns at once.
+  {
+    const { detectMoves } = require('../src/main/core/direction');
+    const items = Object.create(null);
+    for (let i = 0; i < 1000; i++) items['f' + i] = { t: 'f', li: 'L' + i, ri: 'R' + i };
+    const nodes = [{ rel: 'x', type: 'file', active: true, left: { exists: true, id: 'L1' }, right: { exists: true, id: 'R1' } }];
+    eq(detectMoves(nodes, { available: true, items }), 0, 'no candidate, no move');
+  }
+}
+
+
 (async function main() {
   console.log('syncto engine tests');
   console.log('scratch: ' + ROOT);
@@ -6704,6 +7240,7 @@ async function testReview088() {
       testReview088,
       testLongNames088,
       testSafeNames089,
+      testAudit1013,
     ];
     const only = (process.env.SYNCTO_ONLY || '').split(',').map(x => x.trim()).filter(Boolean);
     // Each section on its own: an exception used to end the whole suite, so

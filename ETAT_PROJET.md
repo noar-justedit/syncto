@@ -6,9 +6,14 @@
 
 ## 1. État actuel
 
-- **Version du code : 0.8.9** (13/10/2026). En ligne sur GitHub : **à demander
-  à Noar** avant la note de release (0.8.7 au 11/10/2026 ; la 0.8.8 a pu être
-  publiée depuis). Releases publiées connues : 0.7.1 → 0.8.3, 0.8.5 et 0.8.7.
+- **Version du code : 0.9.0** (13/10/2026). En ligne sur GitHub : **0.8.8**
+  (vérifié le 13/10/2026 à la demande de Noar : tag `v0.8.8` et `version.json`
+  à 0.8.8 sur `main`, lus par `git ls-remote --tags` et un clone public).
+  Vérifié de nouveau pour la note 0.9.0 (13/10/2026, soir) : tag `v0.8.9`
+  présent et `package.json` à 0.8.9 sur `main`, `version.json` encore à 0.8.8
+  (le second passage de `push_github.command` après la Release n'était pas
+  fait). Note de release 0.9.0 écrite depuis 0.8.9.
+  Releases publiées : 0.7.1 → 0.8.3, 0.8.5, 0.8.7, 0.8.8 et 0.8.9 (tag).
   La 0.6.0, la **0.8.4** et la **0.8.6 n'ont jamais été publiées** : le
   contenu de 0.8.4 est sorti avec 0.8.5, celui de 0.8.6 avec 0.8.7.
 - **Contenu de 0.8.6** (voir `CHANGELOG.md`) :
@@ -28,7 +33,10 @@
   en auto-sync ; Electron 44 (macOS 13 minimum).
 - **Contenu de 0.8.9** : option « Windows-safe names » (Settings › Main :
   Off / Destination only / Both sides), voir section 3 et section 9.
-- **Tests : 1346 vérifications, toutes vertes** (1314 en 0.8.8, 1169 en 0.8.7).
+- **Contenu de 0.9.0** : corrections de l'audit du 13/10/2026, lots A à D
+  (perte de données, sécurité, noms Windows et longs, fenêtre, vitesse sans
+  toucher aux lectures et écritures), voir section 15.
+- **Tests : 1475 vérifications, toutes vertes** (1346 en 0.8.9, 1314 en 0.8.8).
 - Dépôt : https://github.com/noar-justedit/syncto (GPL-3.0), branche `main`.
 - Versions des outils : Electron 44.7.0 (Chromium 152, Node 24.21 intégré ;
   passage de 43 à 44 demandé par Noar le 10/10/2026, sorti en 0.8.8),
@@ -325,7 +333,7 @@ vérifie les promesses.
 
 ## 8. Tests
 
-`npm test` = `node test/run-tests.js`, 49 sections, environ 5 minutes. Vrais
+`npm test` = `node test/run-tests.js`, 52 sections, environ 5 minutes. Vrais
 fichiers, vrais verrous, second processus, vrai serveur SFTP avec latence, vrai
 dépôt git local pour le script de publication. Une exception dans une section
 est rapportée `UNCAUGHT in <nom>`, les autres tournent quand même.
@@ -336,7 +344,9 @@ est rapportée `UNCAUGHT in <nom>`, les autres tournent quand même.
   0.8.x, blocs `d1`…`d16`), 49 (`testReview088` : revue du 09/10/2026, blocs
   `e*` moteur, `s*` sécurité, `u*` interface, `v*` seconde passe, `x*`
   Electron 44), 50 (`testLongNames088` : noms trop longs, blocs `n1`…`n5`),
-  51 (`testSafeNames089` : noms compatibles Windows, blocs `w1`…`w8`).
+  51 (`testSafeNames089` : noms compatibles Windows, blocs `w1`…`w8`), 52
+  (`testAudit1013` : audit du 13/10/2026, blocs `a*` perte de données et
+  sécurité, `b*` noms, `c*` fenêtre, `d*` vitesse).
 - Un test de la section 44 est sensible au temps : s'il échoue isolément sur une
   machine chargée, relancer avant de chercher.
 - Règles d'écriture : tester le comportement, pas le commentaire ; tester le
@@ -455,6 +465,25 @@ est rapportée `UNCAUGHT in <nom>`, les autres tournent quand même.
     binaires actuels étiquetés « GB ») ; rouge de la fenêtre et du bouton
     auto-sync (exception assumée ou orange).
 
+- **Audit 13/10/2026, non corrigé (pas dans les lots demandés)** :
+  - Compare touche un chemin réseau Windows (`\\hôte\partage`) d'un job reçu
+    (connexion SMB, donc présentation du login Windows à cette machine) ;
+    seule l'ouverture du job l'évite. Piste : demander confirmation au premier
+    contact avec un chemin réseau d'un job venu d'ailleurs ;
+  - sous Windows, aucune protection système contre l'écriture à travers un
+    lien (pas d'`O_NOFOLLOW`) : seuls les noms fixes et les liens vus à la
+    comparaison sont nettoyés (créer un lien y demande des droits admin, et
+    les liens d'un partage ne sont pas suivis par défaut) ; même chose sur
+    SFTP pour un lien posé entre la comparaison et la copie ;
+  - avec les noms Windows actifs, la base garde l'historique sous le nom
+    nettoyé : un élément exclu par un filtre écrit avec son vrai nom perd son
+    historique (il sera recopié, jamais supprimé, si le filtre est retiré) ;
+  - une ligne « rename for Windows » reste cliquable comme les autres ; la
+    décocher annule le renommage (voulu) ;
+  - lot E (tampons de lecture de 4 Mo pour les petits fichiers, listage des
+    sous-dossiers en parallèle sur NAS) : en attente du test de Noar sur son
+    NAS, règle 8 d'AGENTS.md.
+
 ## 11. Prochaines étapes
 
 0. Sur un PC Windows : pendant un run, `.syncto.lock` est caché ; après,
@@ -487,6 +516,13 @@ est rapportée `UNCAUGHT in <nom>`, les autres tournent quand même.
    Noar ce que donne la couleur de dossier de macOS Tahoe sur le PC (elle est
    stockée en attributs étendus, pas dans un fichier `Icon\r`).
 
+8. 0.9.0 sur le vrai matériel : un run MIRROR et un 2 WAYS sur le NAS et sur
+   un disque local (rien de nouveau ne doit bloquer un cas normal) ; changer
+   de mode après une comparaison (SYNCHRONIZE doit se griser) ; pendant un run,
+   Tab + Entrée ne doivent plus rien changer ; douze paires dans une petite
+   fenêtre (les boutons restent visibles) ; Clear leftovers sur un verrou d'une
+   autre machine (compte à rebours). Puis décider du lot E (voir section 10).
+
 ## 12. Historique des versions
 
 | Version | Date | Tests | Contenu principal |
@@ -509,6 +545,7 @@ est rapportée `UNCAUGHT in <nom>`, les autres tournent quand même.
 | 0.8.7 | 07/10 | 1169 | bandeau de run : un titre par phase, anneau de phase + anneau du run |
 | 0.8.8 | 11/10 | 1314 | revue complète (moteur, sécurité, interface), noms longs, pas d'extinction en auto-sync, Electron 44 |
 | 0.8.9 | 13/10 | 1346 | noms compatibles Windows (destination seule ou deux côtés), fichier Icon du Mac ignoré |
+| 0.9.0 | 13/10 | 1475 | audit complet : plan figé à la comparaison, liens piégés, filtres et noms Windows, fenêtre, vitesse |
 
 Le détail est dans `CHANGELOG.md`.
 
@@ -559,3 +596,42 @@ leur tour. Tests : section 49.
   ERRORS rouge seulement > 0, mouvement réduit) ; mise en page en petite
   fenêtre ; nombres avec séparateurs, 123k dans l'Overview ; noms des modes ;
   « Total ETA ».
+
+## 15. Audit complet du 13/10/2026 (lots A à D corrigés, sortie en 0.9.0)
+
+Quatre audits en lecture seule (moteur, sécurité, fenêtre, vitesse), chaque
+constat reproduit (scripts du moteur sur de vrais dossiers, fenêtre rendue
+dans Chromium, mesures à 400 000 lignes). Noar a demandé les lots A à D ; le
+lot E attend son test sur le NAS. Tests : section 52 (`testAudit1013`), chaque
+correction vérifiée en la cassant.
+
+- **A, perte de données et sécurité** : VERIFY n'efface plus le mode ; le
+  moteur refuse un plan fait avec d'autres réglages (`planKeyOf`, même liste
+  dans la fenêtre et dans `session.js`) ; contrôles du plan `inert` pendant
+  comparaison et run (clavier compris) ; filtres testés sur toutes les
+  orthographes d'un élément (`passFileAny`/`passFolderAny`) ; jamais d'écriture
+  à travers un lien (`safewrite.js` pour les noms fixes, `O_NOFOLLOW` dans
+  `NativeFs.createWriteStream`, liens vus sous un nom `.syncto_tmp` retirés au
+  début du run) ; déplacement refusé sur un fichier apparu ; âge d'un verrou
+  mesuré à l'horloge du disque (`folderNow`) ; pas de variables
+  d'environnement dans un chemin réseau ; mot de passe expurgé même après un
+  espace.
+- **B, noms Windows et longs** : nom court retrouvé par son étiquette (8 hex
+  tirés du nom d'identité, nettoyé si l'option est active) et, original
+  disparu, par la base ; renommage déjà fait compté comme fait ; seules les
+  lignes qui participent au run sont renommées (`plannedRenames`) ; renommages
+  visibles (puce, grille, overview, résumé, auto-sync) ; arrêt remonté jusqu'à
+  la fenêtre avec sa raison (`stopReason`).
+- **C, fenêtre** : paires qui défilent, barres de défilement des panneaux,
+  appels au moteur qui échouent (`ipc()`), annulations d'auto-sync et de
+  CHECKING, infobulles, séparateurs de milliers, étiquettes bidirectionnelles,
+  vocabulaire, Ctrl hors Mac, couleurs de la charte, focus des fenêtres,
+  compte à rebours des verrous, liste de sommes de contrôle (renommages,
+  sauts de ligne échappés), fichiers temporaires balayés au début.
+- **D, vitesse** (lectures et écritures inchangées) : un moteur d'empreinte
+  par voie, sous-arbre lu par position, grille servie par fenêtre, liste
+  filtrée pendant le run, base ni copiée ni relue si inchangée (empreinte
+  SHA-1 des octets), détection de déplacements bornée aux candidats, plus de
+  liste de résultats. Sur des petits fichiers en Node, le gain mesuré ici est
+  faible et bruité (le gros gain annoncé vient du lot E).
+

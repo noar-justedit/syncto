@@ -4,6 +4,109 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.9.0] — 2026-10-13
+
+A full audit of 0.8.9 (engine, security, window, speed), and everything it
+confirmed: settings that could change the plan behind the confirmation,
+writes through planted links, filters that stopped protecting folders, and a
+window that hid what a run did.
+
+### Fixed
+
+#### Data and decisions
+
+- **Clicking VERIFY erased the synchronization mode.** It sits in the modes
+  row without being one; the job then ran, and was saved, as MIRROR.
+- **Changing the mode or a comparison setting after a comparison kept the
+  old plan.** Compare in MIRROR, click UPDATE: the confirmation said UPDATE
+  and the MIRROR plan ran, deletions included. The engine now refuses a plan
+  made with other settings (mode, comparison method, filters, move
+  detection, date repair, Windows-safe names, custom directions), and the
+  window drops it as soon as one of them changes.
+- **The keyboard could change the plan during a run** (swap a pair, change
+  the mode, add a pair, open Filter or auto-sync). The controls that shape
+  the plan are now out of reach during a comparison and a run, keyboard
+  included; the settings that shape it are greyed out.
+- **Windows-safe names: a filter written with an item's real name stopped
+  applying.** `/Archive: old/` matched nothing once the item was known as
+  `Archive_ old`, and MIRROR deleted the folder it protected. A filter now
+  matches either spelling.
+- **A detected move could overwrite a file that appeared at its new name
+  after the comparison.** Refused and reported, as a copy already was.
+- **A live lock could be taken over when the NAS clock runs behind.** A lock
+  is now judged old by the disk's own clock.
+- **2 WAYS: deleting a file whose name was too long for the destination
+  brought it back** under its short name. The short copy is deleted.
+- Two pairs writing to the same destination: the second one stopped,
+  copying nothing, when the first had already renamed a name for Windows.
+- Rows that were unticked, filtered out, in conflict or set to "do nothing"
+  were renamed for Windows anyway (on the source too, in "Both sides").
+- A name both too long and refused by Windows, created on the destination,
+  was not paired again with its copy at the source.
+- The checksum list kept a renamed file under its old name (Verify Folder
+  called it missing), and a name holding a line break (the Mac's `Icon` file)
+  broke its line.
+- A temporary file left inside a folder renamed in the same run stayed until
+  the next run.
+
+#### Security
+
+- **No more writes through a symbolic link planted under a name syncto
+  writes** (the database and its temporary copy, the checksum list, the
+  recycle-bin probe, a file's temporary copy). Someone able to write in a
+  synchronized folder could make a run overwrite any file of yours outside
+  it. On macOS and Linux a write never follows a link.
+- Environment variables are no longer expanded in a network path
+  (`\\host\share\%USERNAME%`): a job received from someone else could send
+  their values to that machine.
+- A server password written after a leading space (`␠sftp://user:pass@host`)
+  was saved in clear in the job and the preferences. It is moved to the
+  credential store like any other.
+
+#### Window
+
+- With many pairs, COMPARE, SYNCHRONIZE and CANCEL went below the bottom of
+  the window. The pairs now scroll in their card.
+- A run stopped on an error said "Completed with 1 error"; it now says it
+  stopped, and why (a name that could not be changed for Windows, or an
+  error with "Continue on error" off). The reason comes first in the notes.
+  With "Continue on error" off, the next pairs are not started.
+- Lists cut short (errors, notes) say how much is missing.
+- Renames for Windows are visible: in the list (blue, with the names they
+  replace), a "Windows names" chip, the overview and the summary. A
+  comparison planning only renames no longer says "Everything is in sync".
+- Cancelling auto-sync's comparison no longer goes on to a run that fails
+  and sends a "run failed" notification.
+- Cancelling the check after a run is no longer reported as a failure.
+- A failed call to the engine no longer leaves the window busy for good.
+- The Errors and Notes panels show their scroll bar.
+- Tooltips no longer stay on screen after their row is redrawn.
+- Thousands separators in every count, in one format.
+- Pair labels with right-to-left names keep source → destination.
+- Words: source/destination in the row tooltips, "Continue on error",
+  "Windows names"; shortcuts read Ctrl+ off a Mac.
+- Colours: connecting to a server is blue, excluding is not red, the size
+  bars of the overview are neutral; sentences in the text font.
+- A window that opens takes the keyboard focus and keeps it.
+- Clearing leftover locks shows the countdown.
+
+### Changed
+
+- **Faster with big folders** (measured at 400 000 rows): unticking 500
+  folders at once 15.8 s → 0.06 s; scrolling the list with "show identical"
+  28 ms → 4 ms a step; the database is no longer copied item by item
+  (0.4 s) nor parsed twice when unchanged (about 1.4 s per side); move
+  detection 0.8 s → 0.6 s; the list is filtered, not rebuilt, as files land.
+  How files are read and written is unchanged.
+- One fingerprint engine per lane instead of one per file.
+- Leftover temporary files are swept at the start of a run instead of the
+  end.
+
+### Removed
+
+- A bridge call between the window and the engine that had no handler, and
+  unused styles.
+
 ## [0.8.9] — 2026-10-13
 
 Windows-safe names: the names a Mac accepts and Windows refuses, renamed during

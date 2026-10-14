@@ -222,9 +222,6 @@ const MOVE_DATE_TOLERANCE_MS = 2000;
 function detectMoves(nodes, db) {
   if (!db || !db.available) return 0;
 
-  const byRel = new Map();
-  for (const n of nodes) byRel.set(n.rel, n);
-
   // One-side-only file nodes with a usable id, ambiguous ids purged.
   const collect = side => {
     const map = new Map(), dupes = new Set();
@@ -240,6 +237,8 @@ function detectMoves(nodes, db) {
   };
   const newLeft  = collect('left');    // candidates that appeared on the left
   const newRight = collect('right');
+  // (0.9.0) Nothing appeared on either side: nothing can be a move.
+  if (!newLeft.size && !newRight.size) return 0;
 
   // Database ids, ambiguous ones purged the same way.
   const dbByIdL = new Map(), dbByIdR = new Map();
@@ -248,16 +247,21 @@ function detectMoves(nodes, db) {
     for (const rel of Object.keys(db.items)) {
       const e = db.items[rel];
       if (e.t !== 'f') continue;
-      if (e.li) {
+      // (0.9.0) Only the ids a candidate carries can ever be looked up: the
+      // others no longer fill two maps of every file.
+      if (e.li && newLeft.has(e.li)) {
         if (dbByIdL.has(e.li) || dupL.has(e.li)) { dbByIdL.delete(e.li); dupL.add(e.li); }
         else dbByIdL.set(e.li, rel);
       }
-      if (e.ri) {
+      if (e.ri && newRight.has(e.ri)) {
         if (dbByIdR.has(e.ri) || dupR.has(e.ri)) { dbByIdR.delete(e.ri); dupR.add(e.ri); }
         else dbByIdR.set(e.ri, rel);
       }
     }
   }
+  if (!dbByIdL.size && !dbByIdR.size) return 0;
+  const byRel = new Map();
+  for (const n of nodes) byRel.set(n.rel, n);
 
   let pairs = 0;
 
@@ -378,6 +382,37 @@ function applyFolderRules(nodes) {
 }
 
 // ── Statistics ─────────────────────────────────────────────────────────────
+// (0.9.0) Which Windows-safe renames a run does. Every name to clean used to
+// be renamed, including rows the user had unticked, rows the soft filter
+// left out, conflicts and rows set to "do nothing": in "Both sides" that
+// renamed source files the user had excluded. A rename now belongs to a row
+// that takes part in the run, or to a folder holding one (its contents are
+// reached through its new name).
+// Returns [{ n, side, from }], parents before their contents.
+function plannedRenames(nodes) {
+  const N = nodes.length;
+  const need = { left: new Uint8Array(N), right: new Uint8Array(N) };
+  // Nodes are listed parent first, so walking backwards sees every child
+  // before its folder.
+  for (let i = N - 1; i >= 0; i--) {
+    const n = nodes[i];
+    const takesPart = n.active !== false && n.op !== OP.CONFLICT && n.op !== OP.DO_NOTHING;
+    const busy = takesPart && n.op !== OP.NONE;    // an operation reads or writes both sides
+    for (const side of ['left', 'right']) {
+      const fix = side === 'left' ? n.fixL : n.fixR;
+      if (busy || (takesPart && fix)) need[side][i] = 1;
+      if (need[side][i] && n.parent != null && n.parent >= 0) need[side][n.parent] = 1;
+    }
+  }
+  const out = [];
+  for (let i = 0; i < N; i++) {
+    const n = nodes[i];
+    if (n.fixL && need.left[i])  out.push({ n, side: 'left',  from: n.fixL });
+    if (n.fixR && need.right[i]) out.push({ n, side: 'right', from: n.fixR });
+  }
+  return out;
+}
+
 function computeStats(nodes) {
   const s = {
     rows: nodes.length,
@@ -393,13 +428,12 @@ function computeStats(nodes) {
     conflictList: [],
     catCounts: {},
   };
+  for (const { n, side, from } of plannedRenames(nodes)) {
+    if (side === 'left') s.renameLeft++; else s.renameRight++;
+    if (s.renameList.length < 25) s.renameList.push({ side, from, to: n.name });
+  }
   for (const n of nodes) {
     s.catCounts[n.cat] = (s.catCounts[n.cat] || 0) + 1;
-    for (const [side, fix] of [['left', n.fixL], ['right', n.fixR]]) {
-      if (!fix) continue;
-      if (side === 'left') s.renameLeft++; else s.renameRight++;
-      if (s.renameList.length < 25) s.renameList.push({ side, from: fix, to: n.name });
-    }
     if (!n.active) { s.excluded++; }
     switch (n.op) {
       case OP.CREATE_LEFT:    s.createLeft++;  s.bytesLeft  += sizeOf(n, 'right'); break;
@@ -433,7 +467,7 @@ function sizeOf(n, side) {
 }
 
 module.exports = {
-  applyDirections, computeStats, operationFor, applyFolderRules,
+  applyDirections, computeStats, operationFor, applyFolderRules, plannedRenames,
   detectMoves, dissolveMove,
   diffDefaults, changeDefaults, usesDatabase, stillInSync, sideChange,
 };
