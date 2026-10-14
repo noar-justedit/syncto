@@ -11,8 +11,8 @@ acknowledgement within a few days.
 syncto is a desktop tool that reads and writes folders you point it at. The
 areas worth scrutiny:
 
-- **SFTP credentials.** A password typed into a folder path
-  (`sftp://user:pass@host/…`) is moved into the operating system's credential
+- **Server credentials.** A password typed into a folder path
+  (`sftp://`, `ftpes://`, `ftps://` or `ftp://user:pass@host/…`) is moved into the operating system's credential
   store (macOS Keychain, Windows Credential Manager, libsecret) as soon as it is
   seen, and the path is rewritten without it. Nothing readable is written to the
   preferences or to a `.syncto` job file. Where there is no usable credential store, syncto says so and asks
@@ -24,6 +24,12 @@ areas worth scrutiny:
   connection window. There is no first-use prompt — the first key seen is trusted
   — so a first connection over a network you do not control is still a first
   connection over a network you do not control.
+- **FTP and FTPS.** Plain `ftp://` sends the password and the files in clear;
+  the connection window says so. FTPS certificates follow the same rule as SSH
+  keys: one no authority signed is trusted the first time and pinned, and a
+  changed certificate stops the connection before `USER` is sent. A server that
+  shows no certificate is refused. An SSH password is never offered to an FTP
+  server.
 - **What the other side sends.** A name a server returns that is really a path
   (`../../…`) is dropped before it reaches the comparison, the engine refuses any
   relative path that would resolve outside the chosen folders, and the same rule

@@ -34,7 +34,7 @@ in green, updates in orange, deletions in red, moves in blue.</sub>
 | **Filter** | per-job include/exclude patterns, name- or path-anchored |
 | **Reveal** | right-click any row or folder field → open it in Finder / Explorer, either side |
 | **Locking** | one machine at a time per folder, safe over any network share |
-| **Remote** | local disks, mounted network shares, and SFTP |
+| **Remote** | local disks, mounted network shares, SFTP, FTP and FTPS |
 
 ---
 
@@ -211,8 +211,8 @@ When you rename or move a file (or a whole folder of rushes), syncto recognizes
 it by its file id and simply renames it on the other side too — a 100 GB
 reorganization synchronizes in seconds, nothing is re-copied and nothing passes
 through the trash. Requirements: one previous run of the pair (the ids come
-from the sync database), local disks or mounted shares (SFTP exposes no file
-ids). When in doubt — the file changed as well as moved, ids are ambiguous
+from the sync database), local disks or mounted shares (SFTP and FTP expose no
+file ids). When in doubt — the file changed as well as moved, ids are ambiguous
 because of hard links — syncto falls back to a plain copy, which is always
 safe. Switchable off in the settings.
 
@@ -229,8 +229,9 @@ before either starts, turns blue and reads `VERIFYING · xxHash64` during the
 second, and the progress accounts for it — a run moves twice the data, and says
 so.
 
-**What that costs you:** roughly twice the time of a copy alone, and over SFTP
-twice the network traffic, since the read-back crosses the wire too. That is the
+**What that costs you:** roughly twice the time of a copy alone, and over a server
+twice the network traffic, since the read-back crosses the wire too, unless the
+server computes the checksum itself (see Servers). That is the
 price of the summary line at the end saying every file was read back and matched.
 
 Because verification happens after the copy, a file that fails it has already
@@ -255,7 +256,7 @@ silently:
 - **Trash** (default) — recoverable. Local volumes only.
 - **Permanent** — gone.
 
-Network shares and SFTP have no trash. There, syncto deletes permanently — and
+Network shares, SFTP and FTP have no trash. There, syncto deletes permanently — and
 says so in the confirmation, before the run, naming the folders concerned.
 
 ### Several machines, same folders
@@ -288,13 +289,15 @@ One rule to remember:
 Right-clicking any row (grid or overview) offers ready-made patterns; Space
 excludes the selection temporarily.
 
-### Servers (SFTP)
+### Servers (SFTP, FTP, FTPS)
 
 Click the **server button** next to *Browse* in either folder field. Enter the
-address, the port, the login, and a password or a private key; syncto connects,
-then lets you walk the server's folders and pick one — or create it. The field
-ends up holding `sftp://user@host/path`, which you can still type by hand if
-you prefer.
+protocol, the address, the port, the login, and a password (or a private key,
+for SFTP); syncto connects, then lets you walk the server's folders and pick
+one — or create it. The field ends up holding `sftp://user@host/path`, which
+you can still type by hand if you prefer. The other forms are
+`ftpes://user@host/path` (FTPS, explicit TLS, port 21), `ftps://user@host/path`
+(FTPS, implicit TLS, port 990) and `ftp://user@host/path` (plain FTP).
 
 Servers you use again are listed at the top of that window: one click fills
 everything in.
@@ -305,11 +308,23 @@ If a machine has no usable credential store, syncto says so and asks for the
 password each time rather than storing it in the clear. Only the *path* of a
 private key is stored, never the key.
 
-Everything else works the same, including checksum verification — it just reads
-the data back over the network, so a run over SFTP is considerably slower than
-on a local drive. SFTP has no trash and no inode information, so use permanent
-deletion there, and expect renamed files to be re-copied rather than detected
-as moves.
+Everything else works the same, including checksum verification. Where the
+server can compute a checksum itself (`sha256sum` over SSH, `HASH` over FTP),
+syncto asks it and compares with the one taken while writing, so nothing is
+read back over the network; where it cannot, the data is read back, which makes
+a run considerably slower than on a local drive. SFTP and FTP have no trash and
+no inode information, so use permanent deletion there, and expect renamed
+files to be re-copied rather than detected as moves.
+
+**FTP and FTPS in particular.** Plain `ftp://` sends the password and the files
+in clear: use it on a network you control. An FTPS certificate that no
+authority signed (a NAS, a server of your own) is trusted the first time and
+remembered; a different one afterwards is refused before the login is sent.
+FTP has no atomic exclusive create and no atomic rename, so the folder lock is
+best effort there: do not rely on it when several machines write the same
+folder. A file's date is kept only by servers that implement `MFMT`, and
+syncto says when one does not. Up to four connections are opened to one
+server.
 
 ### Windows-safe names
 
@@ -394,7 +409,7 @@ settings, compared and synchronized in one go.
 | `.syncto.lock` | root of each folder, while running | who is synchronizing right now. Removed at the end; reclaimed automatically after a crash. |
 | `syncto-checksums.txt` | root of each target | the checksum list, when **Write checksum** is on (merged run after run) |
 | `*.syncto_tmp` | next to a file being written | fail-safe copy. A leftover means a run was interrupted; the comparison ignores it and the next synchronization removes it, reporting how much space it reclaimed. |
-| `*.syncto_old` | next to a file being replaced, on SFTP | the previous version, parked for the instant it takes to rename its replacement into place. SFTP cannot replace a file atomically, and deleting the target first would lose it if the connection dropped. Swept like any leftover. |
+| `*.syncto_old` | next to a file being replaced, on SFTP and FTP | the previous version, parked for the instant it takes to rename its replacement into place. SFTP and FTP cannot replace a file atomically, and deleting the target first would lose it if the connection dropped. Swept like any leftover. |
 | `install-id` | `~/.syncto/` | identifies this installation to the directory lock, so two machines sharing a hostname cannot mistake each other's lock for their own. Delete it and a new one is generated. |
 
 ---
@@ -488,7 +503,6 @@ to the trash.
 
 - Real-time folder watching (the RealTimeSync equivalent)
 - Batch jobs from the command line
-- FTP (SFTP only)
 
 ---
 

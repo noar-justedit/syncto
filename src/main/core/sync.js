@@ -72,9 +72,13 @@ class RateMeter {
 // Reads the source once. When a hasher is supplied the source fingerprint is
 // produced by the same pass, so the secure level costs one extra read (the
 // verification read of the target), not two.
-function copyStream(srcFs, srcPath, dstFs, dstPath, hasher, onBytes, token) {
+// (0.9.1) `serverAlgo` names a second fingerprint (sha256, sha1 or md5) taken
+// from the same pass, to compare with what the SERVER says it holds: one
+// command instead of reading the whole file back over the link.
+function copyStream(srcFs, srcPath, dstFs, dstPath, hasher, onBytes, token, serverAlgo) {
   return new Promise((resolve, reject) => {
     if (hasher) hasher.init();
+    const sha = serverAlgo ? require('crypto').createHash(serverAlgo) : null;
     const rs = srcFs.createReadStream(srcPath);
     const ws = dstFs.createWriteStream(dstPath);
     let bytes = 0, settled = false, held = false;
@@ -120,6 +124,7 @@ function copyStream(srcFs, srcPath, dstFs, dstPath, hasher, onBytes, token) {
       }
       bytes += chunk.length;
       if (hasher) { try { hasher.update(chunk); } catch (e) { return fail(e); } }
+      if (sha) sha.update(chunk);
       if (onBytes) onBytes(chunk.length);
       const t = Date.now();
       if (t - lastTick >= 15000) {
@@ -137,7 +142,7 @@ function copyStream(srcFs, srcPath, dstFs, dstPath, hasher, onBytes, token) {
       if (settled) return;
       settled = true;
       if (pauseTimer) { clearInterval(pauseTimer); pauseTimer = null; }
-      resolve({ bytes, digest: hasher ? hasher.digest() : null });
+      resolve({ bytes, digest: hasher ? hasher.digest() : null, serverDigest: sha ? sha.digest('hex') : null });
     });
   });
 }
@@ -225,7 +230,7 @@ class SyncRunner {
     let remote = false;
     let avail = n;
     for (const which of [to, from]) {
-      if (this.side(which).kind !== 'sftp') continue;
+      if (this.side(which).kind === 'native') continue;
       remote = true;
       const set = (this.lanes && this.lanes[which]) || [];
       avail = Math.min(avail, Math.max(1, set.length));
@@ -402,6 +407,24 @@ class SyncRunner {
     }
   }
 
+  // (0.9.1) Which fingerprint the SERVER of this side can compute for us, if
+  // any (filo's way of checking an upload: sha256sum over SSH, HASH / XSHA256
+  // over FTP). Probed once per connection. null means: read the file back.
+  // Off with `serverChecksum: false` in the sync settings.
+  async serverAlgoFor(fsx) {
+    if (this.cfg.serverChecksum === false) return null;
+    if (!fsx || typeof fsx.hashAlgos !== 'function' || typeof fsx.serverHash !== 'function') return null;
+    if (!this._serverAlgos) this._serverAlgos = new WeakMap();
+    if (this._serverAlgos.has(fsx)) return this._serverAlgos.get(fsx);
+    let algo = null;
+    try {
+      const list = await fsx.hashAlgos();
+      algo = ['sha256', 'sha1', 'md5'].find(a => list.includes(a)) || null;
+    } catch (_) { algo = null; }
+    this._serverAlgos.set(fsx, algo);
+    return algo;
+  }
+
   // Whether a copy landing on this side will be read back and compared.
   //
   // On a server the read-back is the whole file crossing the link a second
@@ -412,7 +435,7 @@ class SyncRunner {
   verifies(side) {
     const s = this.side(side);
     if (!s) return true;
-    if (s.kind !== 'sftp') return true;
+    if (s.kind === 'native') return true;
     return this.cfg.verifyRemote !== false;
   }
 
@@ -976,6 +999,9 @@ class SyncRunner {
     if (!failSafe) { if (!this._wrote) this._wrote = new Set(); this._wrote.add(to + '\u0000' + n.rel); }
 
     const hasher = algo ? await this._hasher('copy', lane, algo) : null;
+    // Only where the file will be read back at all, and only on a server.
+    const serverAlgo = algo && this.side(to).kind !== 'native' && this.verifies(to)
+      ? await this.serverAlgoFor(dstFs) : null;
     let copied;
     try {
       this.phase = 'copy';
@@ -984,7 +1010,7 @@ class SyncRunner {
           this.done.bytes += b; this.done.workBytes += b;
           acc.bytes += b; acc.work += b;
           this.meter.add(b); this.emit(false);
-        }, this.token);
+        }, this.token, serverAlgo);
     } catch (err) {
       try { if (failSafe) await dstFs.unlink(tmp); } catch (_) {}
       throw err;
@@ -1062,6 +1088,7 @@ class SyncRunner {
         // filesystem, and made the manifest unusable with xxhsum -c.
         listRel: this.relOn(n, to),
         digest: copied.digest, size: srcStat.size, algo,
+        serverAlgo: serverAlgo || null, serverDigest: copied.serverDigest || null,
         // The date it must carry, checked again after the read-back.
         mtime: mtimeKept ? srcStat.mtime : null,
         flushed,
@@ -1547,10 +1574,28 @@ class SyncRunner {
             this.notes.push('The write cache could not be flushed on this volume, so the ' +
               'verification read may have been served from memory rather than from the medium.');
           }
-          const verifier = await this._hasher('verify', lane, item.algo);
-          const back = await hashStream(fsx, item.path, verifier,
-            b => { this.done.workBytes += b; this.meter.add(b); this.emit(false); }, this.token);
-          if (back !== item.digest) throw new Error(`Checksum mismatch (${item.algo}).`);
+          // (0.9.1) Asked of the server first: it reads its own copy and says
+          // what it holds, so nothing crosses the link a second time. A server
+          // that cannot (no shell on the account, no HASH command) says null
+          // and the file is read back as before.
+          let viaServer = false;
+          if (item.serverDigest && typeof fsx.serverHash === 'function') {
+            let theirs = null;
+            try { theirs = await fsx.serverHash(item.path, item.serverAlgo, item.size); } catch (_) { theirs = null; }
+            if (theirs) {
+              if (theirs !== item.serverDigest) throw new Error(`Checksum mismatch (${item.serverAlgo}, computed by the server).`);
+              viaServer = true;
+              this.serverChecked = (this.serverChecked || 0) + 1;
+              this.done.workBytes += item.size || 0;
+              this.emit(false);
+            }
+          }
+          if (!viaServer) {
+            const verifier = await this._hasher('verify', lane, item.algo);
+            const back = await hashStream(fsx, item.path, verifier,
+              b => { this.done.workBytes += b; this.meter.add(b); this.emit(false); }, this.token);
+            if (back !== item.digest) throw new Error(`Checksum mismatch (${item.algo}).`);
+          }
           item.ok = true;
           await this.keepDate(fsx, item);
           if (this.cfg.writeChecksumList) {
@@ -1573,6 +1618,10 @@ class SyncRunner {
         this.emit(false);
       }, true);
 
+      if (this.serverChecked) {
+        this.notes.push(`${this.serverChecked} file${this.serverChecked > 1 ? 's were' : ' was'} checked by the server itself ` +
+          `(it computed the checksum of what it holds), not read back over the link.`);
+      }
       if (this.redated) {
         this.notes.push(`The destination changed the date of ${this.redated} file${this.redated > 1 ? 's' : ''} ` +
           'after the copy (the write cache of a network share); syncto set the original date back.');

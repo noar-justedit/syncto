@@ -134,7 +134,8 @@ suffit, la suite n'a pas besoin du binaire.
   `d1`…`d16` ; revue du 09/10/2026 : section 49, `testReview088` ; noms trop
   longs : section 50, `testLongNames088` ; noms compatibles Windows : section
   51, `testSafeNames089` ; audit du 13/10/2026 : section 52, `testAudit1013` ;
-  une nouvelle version peut continuer là ou ouvrir la section 53).
+  FTP, FTPS et moteur de filo (0.9.1) : section 53, `testFtpEngine091` ;
+  une nouvelle version peut continuer là ou ouvrir la section 54).
 - **Vérifier un test en le cassant** : remettre l'ancien code, constater que le
   test passe au rouge, remettre en état.
 - Beaucoup de tests lisent `app.js` / `index.html` avec des expressions
@@ -162,7 +163,9 @@ suffit, la suite n'a pas besoin du binaire.
    (anglais) depuis celle-là. Modèle : titre, chapeau, « **N checks pass**, up
    from M at X.Y.Z », sections Fixed / Added / Changed / Removed,
    « Upgrading », plateformes, bloc de build. Elle est enregistrée dans
-   `docs/RELEASE-X.Y.Z.md`, donc dans le ZIP (demande de Noar, 13/10/2026).
+   `docs/RELEASE-X.Y.Z.md`, à côté des notes des versions précédentes, donc
+   dans le ZIP (demande de Noar, 13 et 14/10/2026). Vérifier dans le ZIP
+   fini qu'elle y est avant de le livrer.
 8. Fournir **`syncto_vX.Y.Z.zip`** : le dossier tel qu'il doit être sur GitHub,
    sans `node_modules/`, `dist/`, `.git/`, `.DS_Store`, droits d'exécution
    conservés sur `*.command` et `*.sh`.

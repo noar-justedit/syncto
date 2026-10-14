@@ -30,6 +30,10 @@
 
 const fs = require('fs');
 const { SftpFs } = require('./sftp');
+const { FtpFs } = require('./ftp');
+const { DEFAULT_PORT } = require('./afs');
+
+const SCHEME_OF = { sftp: 'sftp', ftp: 'ftp', ftps: 'ftpes', 'ftps-implicit': 'ftps' };
 
 // ssh2's errors are precise and unreadable: "All configured authentication
 // methods failed" tells a developer everything and a user nothing. Say what to
@@ -37,7 +41,10 @@ const { SftpFs } = require('./sftp');
 function readable(err, conn) {
   const msg = String((err && err.message) || err || '');
   const code = err && err.code;
-  const where = `${conn.host}:${conn.port || 22}`;
+  const protocol = conn.protocol || 'sftp';
+  const where = `${conn.host}:${conn.port || DEFAULT_PORT[protocol]}`;
+  // The FTP layer already words its errors for a person (fs/ftp/errors.js).
+  if (protocol !== 'sftp') return `${where}: ${msg}`;
 
   if (/authentication methods failed|auth/i.test(msg)) {
     return conn.keyPath
@@ -92,18 +99,21 @@ class RemoteBrowser {
   async connect(conn) {
     await this.close();
     const gen = this._gen;
+    const protocol = conn.protocol && DEFAULT_PORT[conn.protocol] ? conn.protocol : 'sftp';
     const opts = {
+      protocol,
+      transferMode: conn.transferMode === 'active' ? 'active' : 'passive',
       host      : String(conn.host || '').trim(),
-      port      : Number(conn.port) || 22,
+      port      : Number(conn.port) || DEFAULT_PORT[protocol],
       username  : String(conn.username || '').trim(),
       password  : conn.password || '',
-      privateKey: loadKey(conn.keyPath),
+      privateKey: protocol === 'sftp' ? loadKey(conn.keyPath) : null,
       passphrase: conn.passphrase || '',
     };
     if (!opts.host)     throw Object.assign(new Error('Enter the address of the server.'), { friendly: true });
     if (!opts.username) throw Object.assign(new Error('Enter the login to use on that server.'), { friendly: true });
 
-    const backend = new SftpFs(opts);
+    const backend = protocol === 'sftp' ? new SftpFs(opts) : new FtpFs(opts);
     try {
       await backend.connect();
     } catch (err) {
@@ -179,9 +189,10 @@ class RemoteBrowser {
   // The URL the folder field will hold. The password never goes in it — it
   // stays in the saved server entry, keyed by user@host.
   static urlFor(conn, folder) {
-    const port = Number(conn.port) || 22;
-    const host = port === 22 ? conn.host : `${conn.host}:${port}`;
-    return `sftp://${conn.username}@${host}${folder || '/'}`;
+    const protocol = conn.protocol && DEFAULT_PORT[conn.protocol] ? conn.protocol : 'sftp';
+    const port = Number(conn.port) || DEFAULT_PORT[protocol];
+    const host = port === DEFAULT_PORT[protocol] ? conn.host : `${conn.host}:${port}`;
+    return `${SCHEME_OF[protocol]}://${conn.username}@${host}${folder || '/'}`;
   }
 
   async close() {

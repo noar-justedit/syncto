@@ -4,6 +4,56 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.9.1] — 2026-10-14
+
+filo's transfer engine now drives syncto's servers. SFTP reads and writes
+faster on a slow link, and syncto speaks FTP and FTPS.
+
+### Added
+
+- **FTP, FTPS (explicit TLS) and FTPS (implicit TLS)** as server addresses:
+  `ftp://`, `ftpes://` (explicit, port 21) and `ftps://` (implicit, port
+  990). The server window has a Protocol list and, for FTP, a data mode
+  (passive, or active for a server that needs it). Saved servers keep both.
+  Built on `basic-ftp` (MIT), the protocol layer of
+  [filo](https://github.com/noar-justedit/filo).
+- **Server-side checksums.** While a file is copied to a server, syncto also
+  computes its SHA-256 (SHA-1 or MD5 when that is all the server offers). In
+  the verification pass the server is asked for the checksum of what it
+  holds (`sha256sum` over SSH, `HASH` over FTP) and the two are compared: the
+  file no longer crosses the network a second time. A server that cannot
+  answer (no shell on the account, no `HASH` command) is read back as
+  before. The run says how many files were checked by the server.
+- **FTPS certificates are pinned the way SSH host keys are.** A certificate
+  no authority signed is trusted the first time and remembered; a changed
+  certificate is refused before the login is sent. Forgetting a server
+  forgets its certificate.
+- Test section 53: real FTP and FTPS servers in the test process, with
+  options for the awkward ones (no MLSD, no MFMT, no HASH, a folder that
+  cannot be entered).
+
+### Changed
+
+- **SFTP uses filo's pipeline.** The read depth grows with the round trip
+  and the receive window follows it, so a long link no longer starves the
+  transfer. Keyboard-interactive login is accepted. The host-key policy, the
+  lock operations and the saved credentials are unchanged.
+- The password of an SSH server is never offered to an FTP server of the same
+  name; FTP entries are stored under their own key.
+- A server's dates may be coarser than a second (a FTP listing without MLSD
+  gives the minute): the comparison tolerance widens to match instead of
+  copying everything again.
+
+### Limits of FTP, by nature of the protocol
+
+- Locks are best effort: FTP has no atomic exclusive create and no atomic
+  rename, so two machines racing for one folder can both win.
+- No symbolic links, no file ids (renames are copies), no trash (deletion is
+  permanent).
+- A file's date is kept only on servers that implement MFMT; the run says so
+  when one does not.
+- Up to four connections to one server (one control, up to three transfers).
+
 ## [0.9.0] — 2026-10-13
 
 A full audit of 0.8.9 (engine, security, window, speed), and everything it

@@ -4910,6 +4910,7 @@ function testWindowTruth() {
     let state = null;
     let pairs = [];
     const completePairs = () => pairs;
+    const isServerAddress = v => /^\s*(?:sftp|ftpes|ftps|ftp):\/\//i.test(String(v == null ? '' : v));
     // eslint-disable-next-line no-eval
     const phrase = eval(`(${body.replace('function verificationPhrase()', 'function ()')})`);
     const call = (ps, verifyRemote) => {
@@ -6864,7 +6865,7 @@ async function testAudit1013() {
     eq(redactLocation(' sftp://alice:S3cret@nas.local/backup'), ' sftp://alice@nas.local/backup', 'leading space');
     eq(redactLocation('\tsftp://alice:S3cret@nas.local/backup'), '\tsftp://alice@nas.local/backup', 'leading tab');
     const cfg = fs.readFileSync(path.join(root, 'src/main/config.js'), 'utf8');
-    ok(/const m = \/\^\\s\*sftp:/.test(cfg), 'and the password is moved to the credential store in that case too');
+    ok(/\/\^\\s\*\(sftp\|ftpes\|ftps\|ftp\):/.test(cfg), 'and the password is moved to the credential store in that case too');
   }
   // ── Lot B: Windows-safe and long names ────────────────────────────────────
   {
@@ -7180,6 +7181,474 @@ async function testAudit1013() {
 }
 
 
+// ══ 53. FTP and FTPS, and filo's engine for SFTP (0.9.1) ═══════════════════
+// filo's transfer engine replaces syncto's SFTP layer (adaptive read depth, a
+// receive window that follows it, checksums computed by the server) and brings
+// FTP, FTPS explicit and FTPS implicit. Everything below talks to real servers
+// in this process (test/ftp-server.js, test/sftp-server.js): real sockets, real
+// passive data connections, a real certificate when openssl is there.
+// Run alone: SYNCTO_ONLY=testFtpEngine091 node test/run-tests.js
+async function testFtpEngine091() {
+  console.log('\n\n53. FTP, FTPS and filo\'s engine (0.9.1)');
+  const { startFtpServer, makeCert } = require('./ftp-server');
+  const { FtpFs } = require('../src/main/fs/ftp');
+  const { FsPool, parseLocation, redactLocation, expandMacros, isServerAddress, poolKey } = require('../src/main/fs/afs');
+  const { setCertPolicy } = require('../src/main/fs/ftp/client');
+  const { credentialMap, Prefs } = require('../src/main/config');
+  const { Readable } = require('stream');
+  const crypto = require('crypto');
+  const root = path.join(__dirname, '..');
+  const app  = fs.readFileSync(path.join(root, 'src/renderer/app.js'), 'utf8').replace(/\u0000/g, '');
+  const html = fs.readFileSync(path.join(root, 'src/renderer/index.html'), 'utf8');
+  const files = base => listAll(base).filter(f => !f.endsWith('/'));
+  const sha = f => crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
+  const mkServerDir = () => { const { dir } = scratch(); const r = path.join(dir, 'server'); fs.mkdirSync(r, { recursive: true }); return { dir, r }; };
+  const url = (srv, p, scheme) => `${scheme || 'ftp'}://${srv.user}:${srv.pass}@${srv.host}:${srv.port}${p || '/'}`;
+  const connect = async (srv, extra) => {
+    const f = new FtpFs(Object.assign({ protocol: 'ftp', host: srv.host, port: srv.port, username: srv.user, password: srv.pass }, extra || {}));
+    await f.connect();
+    return f;
+  };
+
+  // ── a. Addresses ──────────────────────────────────────────────────────────
+  {
+    const a = parseLocation('ftp://bob@host/x');
+    eq([a.kind, a.protocol, a.port], ['ftp', 'ftp', 21], 'ftp:// is plain FTP on 21');
+    const b = parseLocation('ftpes://bob@host/x');
+    eq([b.kind, b.protocol, b.port], ['ftp', 'ftps', 21], 'ftpes:// is explicit TLS on 21');
+    const c = parseLocation('ftps://bob@host:2121/x');
+    eq([c.kind, c.protocol, c.port, c.path], ['ftp', 'ftps-implicit', 2121, '/x'], 'ftps:// is implicit TLS, the port is kept');
+    eq(parseLocation('sftp://bob@host').port, 22, 'sftp:// is still 22');
+    eq(parseLocation('FTP://bob@host').kind, 'ftp', 'the scheme is case-insensitive');
+
+    eq(redactLocation('ftp://bob:pw@h/x'), 'ftp://bob@h/x', 'a password in an ftp:// address is taken out');
+    eq(redactLocation('  ftpes://bob:pw@h/x'), '  ftpes://bob@h/x', 'also with leading spaces, and in ftpes://');
+    eq(redactLocation('ftps://bob:pw@h/x'), 'ftps://bob@h/x', 'and in ftps://');
+    eq(redactLocation('/Volumes/a:b@c'), '/Volumes/a:b@c', 'a plain path is left alone');
+
+    ok(isServerAddress('ftp://h/x') && isServerAddress(' ftps://h') && isServerAddress('sftp://h') && !isServerAddress('/ftp://x'),
+       'an address on a server is told from a path');
+    // Environment variables are not expanded in a server address (0.8.8): same for FTP.
+    process.env.SYNCTO_TEST_SECRET = 'leak';
+    eq(expandMacros('ftp://bob@%SYNCTO_TEST_SECRET%.example/%SYNCTO_TEST_SECRET%'),
+       'ftp://bob@%SYNCTO_TEST_SECRET%.example/%SYNCTO_TEST_SECRET%', 'no environment variable in an ftp:// address');
+    delete process.env.SYNCTO_TEST_SECRET;
+
+    // Credentials: an SSH password is never offered to an FTP server.
+    const creds = { 'bob@host': { password: 'ssh-secret' }, 'ftp:bob@host:21': { password: 'ftp-secret', transferMode: 'active' } };
+    eq(parseLocation('ftp://bob@host/', creds).password, 'ftp-secret', 'an FTP address finds the FTP entry');
+    eq(parseLocation('ftp://bob@host/', creds).transferMode, 'active', 'with its data mode');
+    eq(parseLocation('ftp://bob@other/', creds).password, '', 'and nothing for another host');
+    eq(parseLocation('ftp://bob@host/', { 'bob@host': { password: 'ssh-secret' } }).password, '', 'the SSH password is not used for FTP');
+    eq(parseLocation('sftp://bob@host/', creds).password, 'ssh-secret', 'SFTP keeps its own entry');
+    ok(poolKey(parseLocation('ftp://b@h/')) !== poolKey(parseLocation('ftpes://b@h/')), 'FTP and FTPS to one host are two connections');
+  }
+
+  // ── b. The backend, through the contract the engine uses ──────────────────
+  {
+    const { r } = mkServerDir();
+    fs.mkdirSync(path.join(r, 'dir'));
+    fs.writeFileSync(path.join(r, 'dir', 'a.txt'), 'hello');
+    const big = Buffer.alloc(3 * 1024 * 1024 + 123);
+    for (let i = 0; i < big.length; i++) big[i] = (i * 31 + (i >> 8)) & 255;
+    fs.writeFileSync(path.join(r, 'big.bin'), big);
+    const srv = await startFtpServer({ root: r, hash: true });
+    const f = await connect(srv);
+    try {
+      eq(f.kind, 'ftp', 'the backend says it is a server');
+      eq(await f.realpath('.'), '/', 'the login folder is read');
+      const list = (await f.readdir('/')).map(e => [e.name, e.type]).sort();
+      eq(list, [['big.bin', 'file'], ['dir', 'folder']], 'a folder is listed with the types');
+      const st = await f.stat('/dir/a.txt');
+      eq([st.type, st.size], ['file', 5], 'stat of a file');
+      eq((await f.stat('/dir')).type, 'folder', 'stat of a folder');
+      eq(await f.stat('/nope'), null, 'a missing file is null');
+      eq(await f.stat('/nope/deeper/file'), null, 'and so is one under a missing folder');
+      eq((await f.stat('/')).type, 'folder', 'the root is a folder');
+
+      // Reading: every byte, in order; then from an offset.
+      const chunks = [];
+      for await (const c of f.createReadStream('/big.bin')) chunks.push(c);
+      ok(Buffer.concat(chunks).equals(big), 'a 3 MB file is read byte for byte');
+      const part = [];
+      for await (const c of f.createReadStream('/big.bin', 1000)) part.push(c);
+      ok(Buffer.concat(part).equals(big.subarray(1000)), 'and from an offset (resume)');
+      const none = [];
+      for await (const c of f.createReadStream('/dir/a.txt')) none.push(c);
+      eq(Buffer.concat(none).toString(), 'hello', 'a small file');
+
+      // Writing: through the stream the copy loop uses; finish means "stored".
+      const ws = f.createWriteStream('/dir/new.dat');
+      await new Promise((res, rej) => {
+        ws.on('finish', res); ws.on('error', rej);
+        for (let i = 0; i < big.length; i += 65536) ws.write(big.subarray(i, i + 65536));
+        ws.end();
+      });
+      ok(fs.readFileSync(path.join(r, 'dir', 'new.dat')).equals(big), 'a 3 MB file is written byte for byte');
+      eq(fs.statSync(path.join(r, 'dir', 'new.dat')).size, big.length, 'and the server holds all of it when the stream says finished');
+      const e0 = f.createWriteStream('/dir/empty.dat');
+      await new Promise((res, rej) => { e0.on('finish', res); e0.on('error', rej); e0.end(); });
+      eq(fs.statSync(path.join(r, 'dir', 'empty.dat')).size, 0, 'an empty file');
+
+      // A refused write is an error, not a silent success.
+      const bad = f.createWriteStream('/no/such/folder/x.dat');
+      const err = await new Promise(res => { bad.on('error', res); bad.on('finish', () => res(null)); bad.end(Buffer.alloc(10)); });
+      ok(err && err.message, 'a write into a folder that is not there fails');
+
+      // A read that fails midway is an error, never a stream that ends short.
+      let ended = false, errored = null;
+      const rs = f.createReadStream('/big.bin');
+      rs.on('error', e => { errored = e; });
+      rs.on('end', () => { ended = true; });
+      rs.once('data', () => { f.xfers.forEach(x => { try { x.remote.client.close(); } catch (_) {} }); });
+      rs.resume();
+      await new Promise(res => setTimeout(res, 600));
+      ok(errored && !ended, 'a connection cut while reading ends the stream with an error, not an early end');
+
+      await f.mkdir('/x/y/z');
+      ok(fs.existsSync(path.join(r, 'x', 'y', 'z')), 'mkdir makes every level');
+      await f.mkdir('/x/y/z');
+      ok(true, 'and is happy when it already exists');
+
+      // Replacing a file: rename over an existing name.
+      fs.writeFileSync(path.join(r, 'old.txt'), 'old');
+      fs.writeFileSync(path.join(r, 'new.tmp'), 'newer');
+      await f.rename('/new.tmp', '/old.txt');
+      eq(fs.readFileSync(path.join(r, 'old.txt'), 'utf8'), 'newer', 'rename replaces an existing file');
+
+      const when = Date.UTC(2024, 0, 2, 3, 4, 5);
+      await f.setMTime('/old.txt', when);
+      eq((await f.stat('/old.txt')).mtime, when, 'the date of a file is set (MFMT) and read back to the second');
+
+      // Locks: exclusive create refuses an existing file; append adds a byte.
+      await f.writeExclusive('/lockfile', '{"a":1}');
+      let code = null;
+      try { await f.writeExclusive('/lockfile', 'x'); } catch (e) { code = e.code; }
+      eq(code, 'EEXIST', 'an exclusive create on an existing file says EEXIST');
+      await f.appendByte('/lockfile', ' ');
+      eq(fs.readFileSync(path.join(r, 'lockfile'), 'utf8'), '{"a":1} ', 'a byte is appended');
+      let code2 = null;
+      try { await f.renameStrict('/old.txt', '/lockfile'); } catch (e) { code2 = e.code; }
+      eq(code2, 'EEXIST', 'renameStrict refuses an existing target');
+
+      // The server's checksum.
+      eq(await f.hashAlgos(), ['sha256', 'sha1', 'md5'], 'the checksums the server offers');
+      eq(await f.serverHash('/big.bin', 'sha256', big.length), sha(path.join(r, 'big.bin')), 'the server checksum is the right one');
+
+      // Links and permissions do not exist here, and say so.
+      let nl = null;
+      try { await f.readlink('/x'); } catch (e) { nl = e.code; }
+      eq(nl, 'ENOTSUP', 'a link cannot be read');
+
+      // The control connection stays free while a transfer runs: this is what
+      // keeps a folder's lock alive during a copy that lasts minutes.
+      const slow = f.createWriteStream('/slow.dat');
+      let wrote = 0;
+      const writing = new Promise((res, rej) => {
+        slow.on('finish', res); slow.on('error', rej);
+        const tick = () => {
+          if (wrote >= 8) return slow.end();
+          slow.write(Buffer.alloc(1024, 1)); wrote++;
+          setTimeout(tick, 60);
+        };
+        tick();
+      });
+      await new Promise(res => setTimeout(res, 120));
+      const t0 = Date.now();
+      await f.appendByte('/lockfile', ' ');
+      await f.stat('/lockfile');
+      ok(Date.now() - t0 < 300 && wrote < 8, 'a stat and an append are answered while an upload is still running');
+      await writing;
+      eq(fs.statSync(path.join(r, 'slow.dat')).size, 8 * 1024, 'and the upload completes');
+    } finally { await f.close(); await srv.close(); }
+  }
+
+  // ── c. A plain unreadable folder is an error, not an absence ──────────────
+  {
+    const { r } = mkServerDir();
+    fs.mkdirSync(path.join(r, 'locked'));
+    fs.writeFileSync(path.join(r, 'locked', 'secret.txt'), 'x');
+    const srv = await startFtpServer({ root: r, noEnter: ['/locked'] });
+    const f = await connect(srv);
+    try {
+      // A root that does not exist is an absence; the engine then creates it.
+      eq(await f.stat('/missing/child.txt'), null, 'an absent folder: its children are absent');
+      // A folder the account cannot enter makes everything under it look absent
+      // to the server. That must be an error: "absent" would let a mirror copy
+      // over, or delete, files that are in fact there.
+      let msg = '';
+      try { await f.stat('/locked/secret.txt'); } catch (e) { msg = e.message; }
+      ok(/cannot be entered/.test(msg), `a folder that cannot be entered is an error, not an absence (${msg})`);
+    } finally { await f.close(); await srv.close(); }
+  }
+
+  // ── d. A whole run, local → FTP and back ──────────────────────────────────
+  {
+    const { dir, r } = mkServerDir();
+    const L = path.join(dir, 'src');
+    const t0 = Math.floor((Date.now() - 86400000 * 3) / 1000) * 1000;   // FTP dates are whole seconds
+    write(L, 'a.txt', 'alpha', t0);
+    write(L, 'sub/b.txt', 'bravo bravo', t0 + 5000);
+    write(L, 'sub/deep/c.bin', Buffer.alloc(300000, 7), t0 + 9000);
+    write(L, 'empty.txt', '', t0);
+    const srv = await startFtpServer({ root: r, hash: true });
+    try {
+      const job = makeJob(L, url(srv, '/backup'), { sync: { variant: 'mirror', lockFolders: false } });
+      const { cmp, run } = await runPair(job);
+      eq(run.counters.files, 4, 'four files were copied to the FTP server');
+      eq(run.counters.errors || 0, 0, 'without an error');
+      eq(files(r).filter(f2 => !/\.syncto\.db$/.test(f2)), ['backup/a.txt', 'backup/empty.txt', 'backup/sub/b.txt', 'backup/sub/deep/c.bin'], 'the tree is on the server');
+      eq(read(path.join(r, 'backup'), 'sub/b.txt'), 'bravo bravo', 'with the right content');
+      eq(fs.statSync(path.join(r, 'backup', 'sub/b.txt')).mtimeMs, t0 + 5000, 'and the right date (MFMT)');
+      ok(!srv.log.some(l => /^RETR .*\.syncto_tmp/.test(l)) && !srv.log.some(l => /^RETR /.test(l)),
+         'nothing was read back: the server computed the checksum itself');
+      ok(srv.log.some(l => /^HASH /.test(l)), 'the checksum was asked of the server');
+      ok((run.notes || []).some(n => /checked by the server/.test(n)), 'and the run says so');
+      ok(!files(r).some(f2 => /syncto_tmp|syncto_old/.test(f2)), 'no scratch file is left on the server');
+
+      // Nothing to do the second time.
+      const again = await runPair(job);
+      eq(again.cmp.stats ? again.cmp.stats.toCopy || 0 : 0, 0, 'a second comparison finds nothing to copy');
+      eq(again.run.counters.files, 0, 'and a second run copies nothing');
+
+      // One file changes: only it moves.
+      write(L, 'a.txt', 'alpha changed!', Date.now());
+      const third = await runPair(job);
+      eq(third.run.counters.files, 1, 'one changed file, one copy');
+      eq(read(path.join(r, 'backup'), 'a.txt'), 'alpha changed!', 'and it arrived');
+
+      // And back down: a fresh folder from the server.
+      const D = path.join(dir, 'down');
+      fs.mkdirSync(D);
+      const back = await runPair(makeJob(url(srv, '/backup'), D, { sync: { variant: 'mirror', lockFolders: false } }));
+      eq(back.run.counters.files, 4, 'four files came down');
+      eq(read(D, 'sub/deep/c.bin') === null, false, 'the deep file is there');
+      eq(fs.statSync(path.join(D, 'sub/b.txt')).mtimeMs, t0 + 5000, 'with the date the server holds');
+    } finally { await srv.close(); }
+  }
+
+  // ── e. Without a server checksum the file is read back ────────────────────
+  {
+    const { dir, r } = mkServerDir();
+    const L = path.join(dir, 'src');
+    write(L, 'x.bin', Buffer.alloc(200000, 3), Date.now() - 1e7);
+    const srv = await startFtpServer({ root: r, hash: false });
+    try {
+      const { run } = await runPair(makeJob(L, url(srv, '/'), { sync: { variant: 'mirror', lockFolders: false } }));
+      eq(run.counters.files, 1, 'the file was copied');
+      ok(srv.log.some(l => /^RETR /.test(l)), 'a server with no HASH command: the file is read back over the link');
+      ok(!srv.log.some(l => /^HASH /.test(l)), 'and no HASH was tried');
+      eq(run.counters.errors || 0, 0, 'without an error');
+    } finally { await srv.close(); }
+
+    // A corrupted copy is caught either way: the server says something else.
+    const { dir: d2, r: r2 } = mkServerDir();
+    const L2 = path.join(d2, 'src');
+    write(L2, 'y.bin', Buffer.alloc(100000, 5), Date.now() - 1e7);
+    const srv2 = await startFtpServer({ root: r2, hash: true });
+    const realStor = fs.createWriteStream;
+    try {
+      // The server stores a different byte: its checksum differs from ours.
+      fs.createWriteStream = function (p, o2) {
+        const w = realStor.call(fs, p, o2);
+        const origWrite = w.write.bind(w);
+        w.write = (chunk, ...a) => { if (Buffer.isBuffer(chunk) && chunk.length > 10) { chunk = Buffer.from(chunk); chunk[5] ^= 0xff; } return origWrite(chunk, ...a); };
+        return w;
+      };
+      const { run } = await runPair(makeJob(L2, url(srv2, '/'), { sync: { variant: 'mirror', lockFolders: false } }));
+      ok((run.counters.errors || 0) >= 1, 'bytes altered on the way: the server checksum does not match, and the run reports it');
+    } finally { fs.createWriteStream = realStor; await srv2.close(); }
+  }
+
+  // ── f. Dates: no MFMT, and listings to the minute ─────────────────────────
+  {
+    const { dir, r } = mkServerDir();
+    const L = path.join(dir, 'src');
+    const t0 = Date.now() - 86400000 * 2;
+    write(L, 'one.txt', 'one', t0);
+    write(L, 'two.txt', 'two', t0 + 4000);
+    const srv = await startFtpServer({ root: r, mlsd: false, mfmt: false, hash: false });
+    try {
+      const job = makeJob(L, url(srv, '/'), { sync: { variant: 'mirror', lockFolders: false } });
+      const first = await runPair(job);
+      eq(first.run.counters.files, 2, 'a server with no MLSD and no MFMT still receives the files');
+      ok((first.run.notes || []).concat((first.run.errors || []).map(e => e.message || '')).some(n => /modification date|MFMT|preserve the date/i.test(n)),
+         'and the run says the dates could not be kept');
+      const f = await connect(srv);
+      const listed = await f.readdir('/');
+      ok(listed.every(e => e.mtime > 0), 'a LIST listing gives usable dates');
+      eq(f.timeResolutionSec > 2, true, 'and the comparison knows they are only good to the minute');
+      await f.close();
+      // The second run must not copy again just because the dates differ.
+      const second = await runPair(job);
+      eq(second.run.counters.files, 0, 'with the dates not kept, a second run copies nothing (the history says nothing changed)');
+    } finally { await srv.close(); }
+  }
+
+  // ── g. Locks on an FTP folder, and several connections ────────────────────
+  {
+    const { dir, r } = mkServerDir();
+    const L = path.join(dir, 'src');
+    for (let i = 0; i < 6; i++) write(L, `clip${i}.mov`, Buffer.alloc(50000 + i, i), Date.now() - 1e7);
+    const srv = await startFtpServer({ root: r, hash: true });
+    try {
+      const job = makeJob(L, url(srv, '/locked'), { sync: { variant: 'mirror', lockFolders: true, transferLanes: 3 } });
+      const { run } = await runPair(job);
+      eq(run.counters.files, 6, 'six files copied on three lanes while the folder was locked');
+      ok(!files(r).some(f2 => /\.syncto_lock/.test(f2)), 'the lock is gone at the end');
+      ok(srv.state.maxOpen <= 12, `connections stayed reasonable (${srv.state.maxOpen})`);
+    } finally { await srv.close(); }
+
+    // Two folders of the SAME server: the read and the write go on different connections.
+    const { dir: d3, r: r3 } = mkServerDir();
+    fs.mkdirSync(path.join(r3, 'from')); fs.mkdirSync(path.join(r3, 'to'));
+    fs.writeFileSync(path.join(r3, 'from', 'm.bin'), Buffer.alloc(400000, 9));
+    const srv3 = await startFtpServer({ root: r3, hash: true });
+    try {
+      const job = makeJob(url(srv3, '/from'), url(srv3, '/to'), { sync: { variant: 'mirror', lockFolders: false } });
+      const { run } = await runPair(job);
+      eq(run.counters.files, 1, 'a copy from one folder of a server to another folder of the same server');
+      eq(fs.statSync(path.join(r3, 'to', 'm.bin')).size, 400000, 'arrived whole');
+    } finally { await srv3.close(); }
+  }
+
+  // ── h. Logins ─────────────────────────────────────────────────────────────
+  {
+    const { r } = mkServerDir();
+    const srv = await startFtpServer({ root: r });
+    try {
+      const bad = new FtpFs({ protocol: 'ftp', host: srv.host, port: srv.port, username: srv.user, password: 'wrong' });
+      let msg = '';
+      try { await bad.connect(); } catch (e) { msg = e.message; }
+      ok(/refused the login/i.test(msg), `a wrong password is said plainly (${msg})`);
+      await bad.close();
+      const none = new FtpFs({ protocol: 'ftp', host: '127.0.0.1', port: 1, username: 'u', password: 'p' });
+      let m2 = '';
+      try { await none.connect(); } catch (e) { m2 = e.message; }
+      ok(/refused the connection|did not answer/i.test(m2), `nothing listening: ${m2}`);
+      // The pool does not cache a failed attempt.
+      const pool = new FsPool();
+      let failed1 = false;
+      try { await pool.open(parseLocation(`ftp://u:wrong@${srv.host}:${srv.port}/`)); } catch (_) { failed1 = true; }
+      ok(failed1, 'the pool reports the failure');
+      const good = await pool.open(parseLocation(`ftp://${srv.user}:${srv.pass}@${srv.host}:${srv.port}/`));
+      eq(good.kind, 'ftp', 'and the next attempt, with the right password, connects');
+      await pool.closeAll();
+    } finally { await srv.close(); }
+  }
+
+  // ── i. FTPS, explicit and implicit ────────────────────────────────────────
+  {
+    const { dir } = mkServerDir();
+    const certDir = path.join(dir, 'cert'); fs.mkdirSync(certDir);
+    const cert = makeCert(certDir);
+    if (!cert) {
+      process.stdout.write(' (FTPS skipped: no openssl)');
+    } else {
+      const pins = new Map();
+      setCertPolicy({ known: (h, p) => pins.get(`${h}:${p}`) || null, remember: (h, p, fp) => pins.set(`${h}:${p}`, fp) });
+      try {
+        for (const [protocol, implicit] of [['ftps', false], ['ftps-implicit', true]]) {
+          const { r } = mkServerDir();
+          fs.writeFileSync(path.join(r, 'hello.txt'), 'secret hello');
+          const srv = await startFtpServer({ root: r, tls: cert, implicit, hash: true });
+          const f = await connect(srv, { protocol });
+          try {
+            ok(pins.get(`${srv.host}:${srv.port}`) === srv.fingerprint, `${protocol}: a self-signed certificate is pinned the first time`);
+            const got = [];
+            for await (const c of f.createReadStream('/hello.txt')) got.push(c);
+            eq(Buffer.concat(got).toString(), 'secret hello', `${protocol}: a file is read over the encrypted data connection`);
+            const ws = f.createWriteStream('/up.txt');
+            await new Promise((res, rej) => { ws.on('finish', res); ws.on('error', rej); ws.end('uploaded'); });
+            eq(read(r, 'up.txt'), 'uploaded', `${protocol}: and written`);
+            eq((await f.readdir('/')).length, 2, `${protocol}: and listed`);
+          } finally { await f.close(); }
+          // Same server again: the pinned certificate matches.
+          const f2 = await connect(srv, { protocol });
+          ok(true, `${protocol}: a second connection to the same certificate is accepted`);
+          await f2.close();
+          await srv.close();
+
+          // Another certificate on the same address: refused before the login.
+          const other = makeCert(path.join(dir, 'cert'));
+          const srv2 = await startFtpServer({ root: r, tls: other, implicit, port: srv.port });
+          pins.set(`${srv2.host}:${srv2.port}`, srv.fingerprint);
+          const f3 = new FtpFs({ protocol, host: srv2.host, port: srv2.port, username: srv2.user, password: srv2.pass });
+          let m3 = '';
+          try { await f3.connect(); } catch (e) { m3 = e.message; }
+          ok(/certificate of .* has changed/i.test(m3), `${protocol}: a different certificate is refused (${m3.split('\n')[0]})`);
+          ok(!srv2.log.some(l => /^(USER|PASS)/.test(l)), `${protocol}: and nothing was sent`);
+          await f3.close();
+          await srv2.close();
+          pins.clear();
+        }
+      } finally { setCertPolicy(null); }
+    }
+  }
+
+  // ── j. Saved servers and passwords ────────────────────────────────────────
+  {
+    const { dir } = scratch();
+    const prefs = new Prefs(path.join(dir, 'prefs'));
+    prefs.load();
+    const saved = prefs.saveServer({ name: 'Old NAS', host: 'nas.local', protocol: 'ftps', port: 21, username: 'bob', password: 'ftp-pw', transferMode: 'active', savePassword: true });
+    eq(saved.server.protocol, 'ftps', 'a saved server keeps its protocol');
+    eq(saved.server.transferMode, 'active', 'and its data mode');
+    const map = credentialMap(prefs.data.servers);
+    eq(Object.keys(map), ['ftp:bob@nas.local:21'], 'an FTP entry is keyed with its protocol and port');
+    eq(map['ftp:bob@nas.local:21'].transferMode, 'active', 'with the data mode');
+    // Typing a password into a folder field: moved out of the path.
+    const data = { servers: [], job: { pairs: [{ left: '/Users/x/a', right: 'ftpes://carl:topsecret@host.example/backup' }] } };
+    prefs.save({ job: data.job });
+    const onDisk = fs.readFileSync(prefs.file, 'utf8');
+    ok(!onDisk.includes('topsecret'), 'a password typed in an ftpes:// address is not written to the preferences');
+    ok(/ftpes:\/\/carl@host\.example\/backup/.test(onDisk), 'the address is kept without it');
+    const entry = prefs.data.servers.find(s => s.username === 'carl');
+    ok(entry && entry.protocol === 'ftps' && entry.port === 21, 'and a server entry is made for it with the right protocol and port');
+    // Forgetting a server forgets its certificate.
+    prefs.rememberCert('nas.local', 21, 'SHA256:AA');
+    eq(prefs.knownCert('nas.local', 21), 'SHA256:AA', 'a certificate is remembered');
+    prefs.removeServer(saved.server.id);
+    eq(prefs.knownCert('nas.local', 21), null, 'and forgotten with its server');
+  }
+
+  // ── k. The window ─────────────────────────────────────────────────────────
+  {
+    ok(/<select id="srv-proto"/.test(html) && /value="ftps-implicit"/.test(html) && /value="ftp">FTP, not encrypted/.test(html),
+       'the server window offers the four protocols');
+    ok(/id="srv-moderow"/.test(html) && /id="srv-mode"/.test(html), 'and the data mode for FTP');
+    ok(/const SERVER_ADDRESS = \/\^\\s\*\(\?:sftp\|ftpes\|ftps\|ftp\):\\\/\\\/\/i/.test(app), 'the window recognizes the four address forms');
+    ok(!/startsWith\('sftp:\/\/'\)/.test(app), 'no check for sftp:// alone is left in the window');
+    ok(/SRV_DEFAULT_PORT = \{ sftp: 22, ftps: 21, 'ftps-implicit': 990, ftp: 21 \}/.test(app), 'the port follows the protocol');
+    ok(/protocol: \$\('srv-proto'\)\.value/.test(app), 'the protocol is sent with the connection');
+    ok(/Plain FTP sends the password and every file in clear/.test(app), 'plain FTP says what it means');
+  }
+
+  // ── l. SFTP got filo's engine, and kept its behaviour ─────────────────────
+  {
+    const pipe = require('../src/main/fs/sftp-pipe');
+    ok(typeof pipe.MAX_READ_DEPTH === 'number' && pipe.MAX_READ_DEPTH >= 512, 'the read depth can grow with the round trip');
+    const { SftpFs } = require('../src/main/fs/sftp');
+    for (const m of ['_installWindow', '_wantWindow', '_topUp', '_chunk', 'hashAlgos', 'serverHash', '_exec']) {
+      ok(typeof SftpFs.prototype[m] === 'function', `SftpFs has ${m}`);
+    }
+    // An account that cannot run commands: no server checksum, the file is read back.
+    const { startSftpServer } = require('./sftp-server');
+    const { dir } = scratch();
+    const remote = path.join(dir, 'server'); fs.mkdirSync(remote, { recursive: true });
+    const L = path.join(dir, 'src');
+    write(L, 'k.bin', Buffer.alloc(150000, 4), Date.now() - 1e7);
+    const srv = await startSftpServer({ root: remote });
+    try {
+      const job = makeJob(L, `sftp://${srv.username}:${srv.password}@${srv.host}:${srv.port}/`, { sync: { variant: 'mirror', lockFolders: false } });
+      const { run } = await runPair(job);
+      eq(run.counters.files, 1, 'SFTP still copies');
+      eq(run.counters.errors || 0, 0, 'and verifies by reading back when the server runs no commands');
+    } finally { await srv.close(); }
+  }
+}
+
+
 (async function main() {
   console.log('syncto engine tests');
   console.log('scratch: ' + ROOT);
@@ -7241,6 +7710,7 @@ async function testAudit1013() {
       testLongNames088,
       testSafeNames089,
       testAudit1013,
+      testFtpEngine091,
     ];
     const only = (process.env.SYNCTO_ONLY || '').split(',').map(x => x.trim()).filter(Boolean);
     // Each section on its own: an exception used to end the whole suite, so

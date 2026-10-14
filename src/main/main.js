@@ -96,6 +96,7 @@ const { Prefs, defaultJob, loadJob, saveJob, jobNameFromPath, JOB_EXT, credentia
         pushRecent: addRecent, removeRecent } = require('./config');
 const { RemoteBrowser } = require('./fs/browse');
 const { setHostKeyPolicy } = require('./fs/sftp');
+const { setCertPolicy } = require('./fs/ftp/client');
 const secrets = require('./secrets');
 const power  = require('./power');
 const notify = require('./notify');
@@ -289,6 +290,11 @@ app.whenReady().then(() => {
   setHostKeyPolicy({
     known   : (host, port) => prefs.knownHostKey(host, port),
     remember: (host, port, fp) => prefs.rememberHostKey(host, port, fp),
+  });
+  // (0.9.1) The same for the certificate of an FTPS server.
+  setCertPolicy({
+    known   : (host, port) => prefs.knownCert(host, port),
+    remember: (host, port, fp) => prefs.rememberCert(host, port, fp),
   });
 
   // The diagnostic journal went in 0.8.3. What an older version left in

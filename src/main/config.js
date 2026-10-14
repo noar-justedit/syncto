@@ -27,7 +27,11 @@
 const fs   = require('fs');
 const path = require('path');
 const secrets = require('./secrets');
-const { redactLocation } = require('./fs/afs');
+const { redactLocation, DEFAULT_PORT, PROTOCOL_OF } = require('./fs/afs');
+
+// The protocol a saved server uses. Entries written before FTP existed have none: SFTP.
+const PROTOCOLS = ['sftp', 'ftp', 'ftps', 'ftps-implicit'];
+const protocolOf = s => (s && PROTOCOLS.includes(s.protocol) ? s.protocol : 'sftp');
 
 const JOB_EXT    = '.syncto';
 const JOB_FORMAT = 'syncto-job';
@@ -180,6 +184,17 @@ function credentialMap(servers) {
   const out = {};
   for (const s of (servers || [])) {
     if (!s || !s.host || !s.username) continue;
+    const protocol = protocolOf(s);
+    // (0.9.1) An FTP server's entry is keyed "ftp:user@host:port", always with
+    // the port, and no SSH key travels with it.
+    if (protocol !== 'sftp') {
+      out[`ftp:${s.username}@${s.host}:${Number(s.port) || DEFAULT_PORT[protocol]}`] = {
+        username  : s.username,
+        password  : secrets.decrypt(s.passwordEnc),
+        transferMode: s.transferMode === 'active' ? 'active' : 'passive',
+      };
+      continue;
+    }
     let privateKey = null;
     if (s.keyPath) {
       try { privateKey = fs.readFileSync(s.keyPath); } catch (_) { privateKey = null; }
@@ -408,7 +423,9 @@ class Prefs {
   // gets a flag saying a password is remembered, and that is all it needs.
   listServers() {
     return (this.data.servers || []).map(s => ({
-      id: s.id, name: s.name, host: s.host, port: s.port || 22,
+      id: s.id, name: s.name, host: s.host,
+      protocol: protocolOf(s), port: s.port || DEFAULT_PORT[protocolOf(s)],
+      transferMode: s.transferMode === 'active' ? 'active' : 'passive',
       username: s.username, keyPath: s.keyPath || '',
       // Readable, not merely present. Preferences copied from another machine
       // carry blobs this account cannot decrypt; showing them as "remembered"
@@ -424,7 +441,8 @@ class Prefs {
     const s = (this.data.servers || []).find(x => x.id === id);
     if (!s) return null;
     return {
-      host: s.host, port: s.port || 22, username: s.username,
+      host: s.host, protocol: protocolOf(s), port: s.port || DEFAULT_PORT[protocolOf(s)], username: s.username,
+      transferMode: s.transferMode === 'active' ? 'active' : 'passive',
       keyPath: s.keyPath || '',
       password: secrets.decrypt(s.passwordEnc),
       passphrase: secrets.decrypt(s.passphraseEnc),
@@ -440,8 +458,11 @@ class Prefs {
     if (!Array.isArray(this.data.servers)) this.data.servers = [];
     const list = this.data.servers;
     const key = `${conn.username}@${conn.host}`;
+    const protocol = protocolOf(conn);
+    const port = Number(conn.port) || DEFAULT_PORT[protocol];
     let entry = list.find(s => s.id === conn.id) ||
-                list.find(s => `${s.username}@${s.host}` === key && (s.port || 22) === (Number(conn.port) || 22));
+                list.find(s => `${s.username}@${s.host}` === key && protocolOf(s) === protocol &&
+                               (s.port || DEFAULT_PORT[protocolOf(s)]) === port);
     if (!entry) {
       entry = { id: `srv-${Date.now().toString(36)}-${list.length + 1}` };
       list.push(entry);
@@ -455,9 +476,11 @@ class Prefs {
 
     entry.name     = String(conn.name || conn.host || '').trim() || conn.host;
     entry.host     = conn.host;
-    entry.port     = Number(conn.port) || 22;
+    entry.protocol = protocol;
+    entry.port     = port;
     entry.username = conn.username;
-    entry.keyPath  = conn.keyPath || '';
+    entry.keyPath  = protocol === 'sftp' ? (conn.keyPath || '') : '';
+    entry.transferMode = protocol !== 'sftp' && conn.transferMode === 'active' ? 'active' : 'passive';
 
     const wants = conn.savePassword !== false;
     entry.savePassword = wants;
@@ -485,7 +508,7 @@ class Prefs {
     // Forgetting a server forgets its identity too: that is the one deliberate
     // act by which a person accepts a key that changed (a reinstalled NAS),
     // and it is the only way out of the refusal, so it has to be here.
-    if (gone && gone.host) this.forgetHostKey(gone.host, gone.port || 22);
+    if (gone && gone.host) this.forgetHostKey(gone.host, gone.port || DEFAULT_PORT[protocolOf(gone)], protocolOf(gone));
     this.save();
     return this.listServers();
   }
@@ -493,18 +516,27 @@ class Prefs {
   // ── The identity of a server ─────────────────────────────────────────────
   // First connection: whatever key answers is written down. Every connection
   // after: a different key stops the connection before a password is sent.
+  // (0.9.1) The same book holds the certificates of FTPS servers, under
+  // "ftps:host:port" so an SSH key and a certificate never mix.
   knownHostKey(host, port) {
     const m = this.data.knownHosts || {};
     return m[`${host}:${Number(port) || 22}`] || null;
   }
 
+  knownCert(host, port) {
+    const m = this.data.knownHosts || {};
+    return m[`ftps:${host}:${Number(port) || 21}`] || null;
+  }
+
   // The window asks this to show what it will trust.
   hostKeyFor(host, port) { return this.knownHostKey(host, port); }
 
-  rememberHostKey(host, port, fp) {
+  rememberHostKey(host, port, fp) { this._remember(`${host}:${Number(port) || 22}`, host, fp); }
+  rememberCert(host, port, fp) { this._remember(`ftps:${host}:${Number(port) || 21}`, host, fp); }
+
+  _remember(key, host, fp) {
     if (!host || !fp) return;
     if (!this.data.knownHosts || typeof this.data.knownHosts !== 'object') this.data.knownHosts = {};
-    const key = `${host}:${Number(port) || 22}`;
     if (this.data.knownHosts[key] === fp) return;   // nothing to write
     this.data.knownHosts[key] = fp;
     this.save();
@@ -513,9 +545,11 @@ class Prefs {
   // Emptied rather than deleted: preferences are saved by laying THIS copy's
   // changes over the file as it is now (two syncto windows must not undo each
   // other), and a merge of objects cannot express "this key is gone".
-  forgetHostKey(host, port) {
+  forgetHostKey(host, port, protocol) {
     if (!this.data.knownHosts || typeof this.data.knownHosts !== 'object') return;
-    this.data.knownHosts[`${host}:${Number(port) || 22}`] = '';
+    const p = protocol || 'sftp';
+    if (p === 'sftp') this.data.knownHosts[`${host}:${Number(port) || 22}`] = '';
+    else this.data.knownHosts[`ftps:${host}:${Number(port) || DEFAULT_PORT[p]}`] = '';
   }
 
   // ── ntfy ─────────────────────────────────────────────────────────────────
@@ -555,15 +589,17 @@ class Prefs {
 // credential store, keyed by user@host, so the job keeps working.
 function captureUrlPassword(data, phrase) {
   // (0.9.0) Leading spaces allowed, as parseLocation allows them.
-  const m = /^\s*sftp:\/\/([^@/:]+):([^@/]*)@([^/:]+)(?::(\d+))?/i.exec(String(phrase || ''));
-  if (!m || !m[2]) return phrase;
-  const [, username, password, host, port] = m;
+  const m = /^\s*(sftp|ftpes|ftps|ftp):\/\/([^@/:]+):([^@/]*)@([^/:]+)(?::(\d+))?/i.exec(String(phrase || ''));
+  if (!m || !m[3]) return phrase;
+  const [, scheme, username, password, host, port] = m;
+  const protocol = PROTOCOL_OF[scheme.toLowerCase()];
   if (!Array.isArray(data.servers)) data.servers = [];
-  const p = Number(port) || 22;
-  let entry = data.servers.find(s => s.username === username && s.host === host && (s.port || 22) === p);
+  const p = Number(port) || DEFAULT_PORT[protocol];
+  let entry = data.servers.find(s => s.username === username && s.host === host &&
+                                     protocolOf(s) === protocol && (s.port || DEFAULT_PORT[protocolOf(s)]) === p);
   if (!entry) {
     entry = { id: `srv-${Date.now().toString(36)}-${data.servers.length + 1}`,
-              name: host, host, port: p, username, keyPath: '' };
+              name: host, host, protocol, port: p, username, keyPath: '' };
     data.servers.push(entry);
   }
   const enc = secrets.encrypt(password);

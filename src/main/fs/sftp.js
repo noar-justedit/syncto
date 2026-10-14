@@ -41,7 +41,7 @@ const READ_BLOCK = 512 * 1024;   // SFTP throughput is bounded by the window, no
 // the whole run hanging for ever, with no error and an unresponsive Abort.
 const OP_TIMEOUT_MS = 45000;
 
-const { PipelinedReader, PipelinedWriter } = require('./sftp-pipe');
+const { PipelinedReader, PipelinedWriter, XFER_CHUNK } = require('./sftp-pipe');
 const { scratchPath } = require('./longname');
 const crypto = require('crypto');
 
@@ -69,6 +69,18 @@ function normalize(p) {
   if (!s.startsWith('/')) s = '/' + s;
   return posix.normalize(s).replace(/\/+$/, '') || '/';
 }
+
+// Single quotes for a POSIX shell: everything inside is literal except the
+// single quote itself, which is closed, escaped, and reopened.
+function shellQuote(x) { return "'" + String(x).replace(/'/g, "'\\''") + "'"; }
+
+// Commands tried, in order, to get a checksum out of the server. The first one
+// that answers is kept for the rest of the connection.
+const HASH_COMMANDS = [
+  { algo: 'sha256', cmd: p => `sha256sum -b -- ${shellQuote(p)}`, len: 64 },
+  { algo: 'sha256', cmd: p => `shasum -a 256 -b -- ${shellQuote(p)}`, len: 64 },
+  { algo: 'md5',    cmd: p => `md5sum -b -- ${shellQuote(p)}`, len: 32 },
+];
 
 class SftpFs {
   // opts: { host, port, username, password, privateKey, passphrase, root }
@@ -102,6 +114,7 @@ class SftpFs {
   _die(err) {
     if (this.dead) return;
     this.dead = err instanceof Error ? err : new Error(String(err || 'The SFTP connection was lost.'));
+    this.dead.network = true;
     for (const s of this._streams) { try { s.destroy(this.dead); } catch (_) {} }
     this._streams.clear();
     try { if (this.conn) this.conn.end(); } catch (_) {}
@@ -177,6 +190,13 @@ class SftpFs {
       };
       if (this.opts.privateKey) cfg.privateKey = this.opts.privateKey;
       if (this.opts.passphrase) cfg.passphrase = this.opts.passphrase;
+      // (0.9.1, from filo) Keyboard-interactive with the same password: many
+      // servers (and every Synology) offer only that, and answer
+      // "Authentication failed" to a plain password otherwise.
+      if (this.opts.password) {
+        cfg.tryKeyboard = true;
+        conn.on('keyboard-interactive', (_n, _i, _l, prompts, finish) => finish(prompts.map(() => this.opts.password)));
+      }
 
       // A connection that never became usable still holds a live socket and a
       // keepalive timer. Ten attempts against a misconfigured server used to
@@ -210,6 +230,7 @@ class SftpFs {
           if (settled) { try { conn.end(); } catch (_) {} return; }
           settled = true;
           this.conn = conn; this.sftp = sftp; this.dead = null;
+          this._installWindow(sftp);
           // Remembered only once the connection is genuinely usable, so a
           // half-open attempt never writes an identity down.
           if (seenKey && hostKeyPolicy && hostKeyPolicy.remember) {
@@ -339,19 +360,124 @@ class SftpFs {
     }));
   }
 
+  // ── A receive window that follows the read depth (0.9.1, from filo) ─────
+  // ssh2 keeps the window it grants the server at 2 MB, fixed: the server may
+  // not have more than 2 MB unacknowledged on the way, so a deeper read
+  // pipeline would just wait. The window is the RECEIVER's to grant, so it is
+  // topped up here to what the active reader needs (up to 32 MB); ssh2's own
+  // top-up only acts below 1 MB, which then never happens.
+  _installWindow(sftp) {
+    this._windowTarget = 0;
+    const origPush = sftp.push.bind(sftp);
+    sftp.push = (data) => {
+      const r = origPush(data);
+      try { this._topUp(sftp); } catch (_) {}
+      return r;
+    };
+  }
+
+  _wantWindow(bytes) {
+    // At most 32 MB: larger, ssh2 slowed down instead (64 MB: 137 MB/s against
+    // 378 with 32 MB on filo's test machine).
+    this._windowTarget = Math.min(32 * 1024 * 1024, Math.max(this._windowTarget || 0, bytes));
+    if (this.sftp) { try { this._topUp(this.sftp); } catch (_) {} }
+  }
+
+  _topUp(sftp) {
+    const target = this._windowTarget;
+    if (!target || !sftp.incoming || !sftp.outgoing || sftp.outgoing.state === 'closed') return;
+    if (sftp.incoming.window > target / 2) return;
+    const amt = target - sftp.incoming.window;
+    if (amt <= 0) return;
+    sftp.incoming.window += amt;
+    sftp._protocol.channelWindowAdjust(sftp.outgoing.id, amt);
+  }
+
+  // The size of one request. Reading: 32 KB at most, whatever the server
+  // allows (filo measured 254 KB requests 3 to 4 times SLOWER than 32 KB on a
+  // 20 GB file from a DS920+; the adaptive depth below still reaches 32 MB in
+  // flight). Writing: as large as the server takes.
+  _chunk(kind) {
+    const s = this.sftp;
+    const max = Number(s && (kind === 'read' ? s._maxReadLen : s._maxWriteLen)) || XFER_CHUNK;
+    return Math.max(4096, Math.min(max, kind === 'read' ? XFER_CHUNK : 256 * 1024));
+  }
+
   // Streams bypass the queue on purpose: they hold a channel for their whole
   // lifetime, and the sync engine never runs two transfers on one connection.
   // Both keep many requests in flight — see fs/sftp-pipe.js. ssh2's own
   // streams issue one and wait, which turns the round trip into the speed
   // limit: 1.5 MB/s at 22 ms, 0.3 MB/s at 100 ms, the same code both times.
-  createReadStream(p) {
+  // `start` / `end` read or write a range of a file (resuming).
+  createReadStream(p, start, end) {
     if (this.dead) throw this.dead;
-    return this._track(new PipelinedReader(this, normalize(p)));
+    return this._track(new PipelinedReader(this, normalize(p), { start, end, chunkSize: this._chunk('read') }));
   }
 
-  createWriteStream(p) {
+  createWriteStream(p, start, opts) {
     if (this.dead) throw this.dead;
-    return this._track(new PipelinedWriter(this, normalize(p)));
+    return this._track(new PipelinedWriter(this, normalize(p), Object.assign({ start, chunkSize: this._chunk('write') }, opts || {})));
+  }
+
+  // ── Checksums computed by the server (0.9.1, from filo) ─────────────────
+  // A command run over the same SSH connection: one answer instead of reading
+  // the whole file back over the link. Accounts restricted to SFTP (chroot,
+  // "internal-sftp", most hosting) refuse to run anything; that is remembered
+  // and the engine falls back to reading the file back.
+  _exec(cmd, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      if (!this.conn || this.dead) return reject(new Error('not connected'));
+      let out = '', errOut = '', done = false;
+      let chan = null;
+      const timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        try { if (chan) chan.close(); } catch (_) {}     // do not leave the command running on the server
+        reject(new Error('timeout'));
+      }, timeoutMs);
+      this.conn.exec(cmd, (err, stream) => {
+        if (err) { done = true; clearTimeout(timer); return reject(err); }
+        chan = stream;
+        if (done) { try { stream.close(); } catch (_) {} return; }
+        stream.on('data', d => { if (out.length < 4096) out += d; });
+        stream.stderr.on('data', d => { if (errOut.length < 4096) errOut += d; });
+        stream.on('close', code => {
+          if (done) return;
+          done = true; clearTimeout(timer);
+          if (code === 0) resolve(out); else reject(new Error(errOut.trim() || `exit ${code}`));
+        });
+      });
+    });
+  }
+
+  async hashAlgos() {
+    if (this._hashCmd === undefined) {
+      this._hashCmd = null;
+      for (const h of HASH_COMMANDS) {
+        try {
+          // Hash of nothing: proves the command exists without touching a file.
+          const out = await this._exec(h.cmd('/dev/null'), 8000);
+          if (new RegExp(`^[0-9a-f]{${h.len}}\\b`, 'i').test(out.trim())) { this._hashCmd = h; break; }
+        } catch (_) { /* next */ }
+      }
+    }
+    return this._hashCmd ? [this._hashCmd.algo] : [];
+  }
+
+  // A large file takes the server a while to read: one minute per 4 GB of
+  // allowance, which a spinning NAS at 70 MB/s still meets.
+  async serverHash(p, algo, size) {
+    await this.hashAlgos();
+    const h = this._hashCmd;
+    if (!h || h.algo !== algo) return null;
+    // The quoting is right for sh, bash, zsh and dash, not for every shell
+    // (fish reads \' inside single quotes). A name with a quote, a backslash
+    // or a control character is checked by reading it back instead.
+    if (/['\\\x00-\x1f\x7f]/.test(String(p))) return null;
+    const timeout = 60000 + Math.ceil((Number(size) || 0) / (4 * 1024 ** 3)) * 60000;
+    const out = await this._exec(h.cmd(normalize(p)), timeout);
+    const m = new RegExp(`^([0-9a-f]{${h.len}})\\b`, 'i').exec(out.trim());
+    return m ? m[1].toLowerCase() : null;
   }
 
   // SSH_FXF_EXCL: the SFTP protocol has the exclusive-create flag natively.

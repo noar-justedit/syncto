@@ -2004,6 +2004,16 @@ body.lassoing .tooltip-float{display:none !important;}
       </div>
 
       <div class="set-row">
+        <label for="srv-proto">Protocol</label>
+        <select id="srv-proto" aria-label="Protocol">
+          <option value="sftp">SFTP (SSH)</option>
+          <option value="ftps">FTPS, explicit TLS</option>
+          <option value="ftps-implicit">FTPS, implicit TLS</option>
+          <option value="ftp">FTP, not encrypted</option>
+        </select>
+      </div>
+      <div class="srv-hint" id="srv-proto-hint" style="display:none"></div>
+      <div class="set-row">
         <label for="srv-host">Address</label>
         <div class="srv-row2">
           <input class="ipx" id="srv-host" placeholder="192.168.1.50  or  nas.local" spellcheck="false">
@@ -2018,15 +2028,22 @@ body.lassoing .tooltip-float{display:none !important;}
         <label for="srv-pass">Password</label>
         <input id="srv-pass" type="password" placeholder="••••••••" autocomplete="off">
       </div>
-      <div class="set-row">
+      <div class="set-row" id="srv-keyrow">
         <label for="srv-key">Private key</label>
         <div class="srv-keyrow">
           <input id="srv-key" placeholder="optional — instead of a password" spellcheck="false">
           <button class="br-btn" id="srv-key-browse">Choose…</button>
         </div>
       </div>
-      <div class="srv-hint">Leave the key empty to use the password. With a key, the password box
+      <div class="srv-hint" id="srv-keyhint">Leave the key empty to use the password. With a key, the password box
         holds its passphrase if it has one.</div>
+      <div class="set-row" id="srv-moderow" style="display:none">
+        <label for="srv-mode">Data mode</label>
+        <select id="srv-mode" aria-label="FTP data mode">
+          <option value="passive">Passive (works behind a router)</option>
+          <option value="active">Active (the server connects back)</option>
+        </select>
+      </div>
 
       <div class="set-row">
         <label for="srv-name">Name</label>

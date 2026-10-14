@@ -17,7 +17,7 @@ you want to reproduce; don't translate their C++.
 
 ```bash
 npm install
-npm test          # 140+ engine tests against real folders in a temp directory
+npm test          # 1500+ engine checks against real folders in a temp directory
 ./build.sh --dev  # run the app
 ```
 
@@ -40,7 +40,7 @@ closest existing section.
 | `src/main/core/db.js` | the last-synchronized-state database |
 | `src/main/core/lock.js` | directory locking across machines |
 | `src/main/core/session.js` | one pair (`Session`) and the multi-pair layer (`MultiSession`) |
-| `src/main/fs/` | filesystem abstraction: `native.js`, `sftp.js` |
+| `src/main/fs/` | filesystem abstraction: `native.js`, `sftp.js`, `ftp.js` (and `ftp/`, filo's FTP client) |
 | `src/renderer/` | the interface — one HTML file, one JS file, no framework |
 
 The layering matters: the engine knows nothing about Electron, which is what

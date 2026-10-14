@@ -21,13 +21,13 @@
 // sends back edits by index. That keeps a 200 000-file comparison responsive.
 
 const fs = require('fs');
-const { Comparer, CAT, OP, CHECKSUM_FILE } = require('./compare');
+const { Comparer, CAT, OP, CHECKSUM_FILE, DEFAULT_TOLERANCE_SEC } = require('./compare');
 const { PathFilter } = require('./filter');
 const { applyDirections, computeStats, operationFor, applyFolderRules,
         detectMoves, dissolveMove, usesDatabase, plannedRenames } = require('./direction');
 const { loadPairDb, savePairDb, buildSession, pairIdFor, readSideSession } = require('./db');
 const { SyncRunner } = require('./sync');
-const { FsPool, parseLocation, redactLocation } = require('../fs/afs');
+const { FsPool, parseLocation, redactLocation, isServerAddress } = require('../fs/afs');
 const { NativeFs } = require('../fs/native');
 const { formatChecksumList, parseChecksumList, createHasher, hashStream } = require('./hash');
 const { isSafeRel } = require('./relpath');
@@ -76,7 +76,7 @@ function previousPairId(was, left, right) {
     const loc = parseLocation(phrase);
     if (!String(phrase || '').trim() || !loc.path) return '';
     if (loc.kind !== side.kind) return '';      // a disk became a server, or the reverse
-    return loc.kind === 'sftp' ? SftpFs.prototype.resolve(loc.path) : side.fs.resolve(loc.path);
+    return loc.kind !== 'native' ? SftpFs.prototype.resolve(loc.path) : side.fs.resolve(loc.path);
   };
   const wl = resolve(was.left, left), wr = resolve(was.right, right);
   if (!wl || !wr) return null;
@@ -147,6 +147,14 @@ class Session {
 
     // (0.8.9) The comparison needs the Windows-safe names setting (a sync one).
     const cmp = Object.assign({}, job.compare, { safeNames: job.sync && job.sync.safeNames });
+    // (0.9.1) An FTP server without MLSD lists dates to the minute: two files
+    // that are the same would differ by up to 59 s. The tolerance of this
+    // comparison (not the saved setting) is widened to what that side can say.
+    const coarse = Math.max(this.left.fs.timeResolutionSec || 0, this.right.fs.timeResolutionSec || 0);
+    if (coarse) {
+      const wanted = cmp.timeTolerance == null ? DEFAULT_TOLERANCE_SEC : Number(cmp.timeTolerance) || 0;
+      if (wanted < coarse) cmp.timeTolerance = coarse;
+    }
 
     // The database is read for two reasons: Two way and Update decide their
     // directions with it, and move detection needs the file ids it remembers.
@@ -662,7 +670,7 @@ class Session {
     for (const which of ['left', 'right']) {
       const side = this[which];
       const loc = which === 'left' ? this.leftLoc : this.rightLoc;
-      if (!side || side.kind !== 'sftp' || !loc) continue;
+      if (!side || side.kind === 'native' || !loc) continue;
       for (let i = 1; i < want; i++) {
         try {
           out[which].push(await this.pool.openLane(loc, i));
@@ -1623,7 +1631,7 @@ function offlineVolumesOf(pairs) {
   pairs.forEach((p, i) => {
     for (const side of ['left', 'right']) {
       const raw = String(p[side] || '').trim();
-      if (!raw || /^sftp:\/\//i.test(raw)) continue;
+      if (!raw || isServerAddress(raw)) continue;
       let abs = raw;
       try { abs = fsx.resolve(raw); } catch (_) {}
       let there = false;
@@ -1689,7 +1697,7 @@ async function checkJobPaths(job, opts) {
     // job file received from someone else must not be able to trigger that
     // just by being opened.
     const platform = (opts && opts.platform) || process.platform;
-    const remote = p => /^sftp:\/\//i.test(p) || isUncPath(p, platform);
+    const remote = p => isServerAddress(p) || isUncPath(p, platform);
 
     for (const side of ['left', 'right']) {
       const here  = side === 'left' ? left : right;

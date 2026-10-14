@@ -34,6 +34,21 @@
 
 const { NativeFs } = require('./native');
 const { SftpFs }   = require('./sftp');
+const { FtpFs }    = require('./ftp');
+
+// The addresses a folder field may hold, besides a plain path.
+//   sftp://   SFTP over SSH, port 22
+//   ftp://    plain FTP, port 21 (nothing is encrypted)
+//   ftpes://  FTP with explicit TLS (AUTH TLS), port 21
+//   ftps://   FTP with implicit TLS, port 990 (FileZilla reads it so)
+const REMOTE_SCHEME = '(?:sftp|ftpes|ftps|ftp):\\/\\/';
+const PROTOCOL_OF = { sftp: 'sftp', ftp: 'ftp', ftpes: 'ftps', ftps: 'ftps-implicit' };
+const DEFAULT_PORT = { sftp: 22, ftp: 21, ftps: 21, 'ftps-implicit': 990 };
+// 'sftp' → the SSH backend, everything else → the FTP backend.
+const kindOf = protocol => (protocol === 'sftp' ? 'sftp' : 'ftp');
+// A "server": anything that is not a disk. The engine opens extra connections
+// for it, treats its dates as coarse, and gives it no trash.
+const isServerKind = kind => kind === 'sftp' || kind === 'ftp';
 
 // ── Macro expansion ────────────────────────────────────────────────────────
 // Same spirit as FreeFileSync: %Date%, %Time%, %TimeStamp%, %Year%, %Month%,
@@ -77,7 +92,7 @@ function expandMacros(phrase, now) {
   // machine with the values in the path (and the login presented with it).
   // A path that only BECOMES a network path once expanded (%LOGONSERVER%\x)
   // is not expanded either.
-  const REMOTE = /^\s*(sftp:\/\/|\\\\|\/\/)/i;
+  const REMOTE = new RegExp('^\\s*(' + REMOTE_SCHEME + '|\\\\\\\\|//)', 'i');
   const src = String(phrase || '');
   const expand = withEnv => src.replace(/%([A-Za-z_][A-Za-z0-9_]*)%/g, (full, name) => {
     const k = name.toLowerCase();
@@ -92,34 +107,63 @@ function expandMacros(phrase, now) {
 
 // ── Location parsing ───────────────────────────────────────────────────────
 // Returns { kind:'native', path } or
-//         { kind:'sftp', host, port, username, password, privateKey, path }
+//         { kind:'sftp'|'ftp', protocol, host, port, username, password, ... path }
 function parseLocation(phrase, credentials) {
   const raw = expandMacros(String(phrase || '').trim());
-  const m = /^sftp:\/\/(?:([^@/:]+)(?::([^@/]*))?@)?([^/:]+)(?::(\d+))?(\/.*)?$/i.exec(raw);
+  const m = new RegExp('^(sftp|ftpes|ftps|ftp):\\/\\/(?:([^@/:]+)(?::([^@/]*))?@)?([^/:]+)(?::(\\d+))?(\\/.*)?$', 'i').exec(raw);
   if (m) {
-    const host = m[3];
-    const port = m[4] ? parseInt(m[4], 10) : 22;
+    const protocol = PROTOCOL_OF[m[1].toLowerCase()];
+    const kind = kindOf(protocol);
+    const host = m[4];
+    const port = m[5] ? parseInt(m[5], 10) : DEFAULT_PORT[protocol];
     // Look for the entry that names this port first: two servers on the same
     // host and login but different ports have different passwords, and the
     // port-less key can only hold one of them.
     // (0.8.8) The port-less entry is the one saved for port 22, and only
     // port 22 may use it: falling back for any port sent the admin password of
     // nas:22 to whatever listened on nas:2222 when a shared job asked for it.
-    const cred = (credentials && (credentials[`${m[1] || ''}@${host}:${port}`] ||
-                                  (port === 22 ? credentials[`${m[1] || ''}@${host}`] : null))) || {};
-    return {
-      kind      : 'sftp',
-      username  : m[1] || cred.username || '',
-      password  : m[2] || cred.password || '',
-      privateKey: cred.privateKey || null,
-      passphrase: cred.passphrase || '',
+    // (0.9.1) An FTP server's entries are keyed "ftp:user@host:port", always
+    // with the port: an SSH password is never offered to an FTP server.
+    let cred = {};
+    if (credentials) {
+      if (kind === 'sftp') {
+        cred = credentials[`${m[2] || ''}@${host}:${port}`] ||
+               (port === 22 ? credentials[`${m[2] || ''}@${host}`] : null) || {};
+      } else {
+        cred = credentials[`ftp:${m[2] || ''}@${host}:${port}`] || {};
+      }
+    }
+    const loc = {
+      kind,
+      protocol,
+      username  : m[2] || cred.username || '',
+      password  : m[3] || cred.password || '',
+      privateKey: kind === 'sftp' ? (cred.privateKey || null) : null,
+      passphrase: kind === 'sftp' ? (cred.passphrase || '') : '',
       host,
       port,
-      path      : m[5] || '/',
+      path      : m[6] || '/',
       phrase    : raw,
     };
+    if (kind === 'ftp') loc.transferMode = cred.transferMode === 'active' ? 'active' : 'passive';
+    return loc;
   }
   return { kind: 'native', path: raw, phrase: raw };
+}
+
+// The key a pooled connection is kept under.
+function poolKey(loc) {
+  return loc.kind === 'sftp'
+    ? `${loc.username}@${loc.host}:${loc.port}`
+    : `${loc.protocol}:${loc.username}@${loc.host}:${loc.port}`;
+}
+
+// Is this folder field an address on a server (as opposed to a path)?
+const SERVER_ADDRESS = new RegExp('^\\s*' + REMOTE_SCHEME, 'i');
+function isServerAddress(phrase) { return SERVER_ADDRESS.test(String(phrase == null ? '' : phrase)); }
+
+function makeBackend(loc) {
+  return loc.kind === 'sftp' ? new SftpFs(loc) : new FtpFs(loc);
 }
 
 // Builds the backend for a location. Native backends are shared (stateless);
@@ -135,7 +179,7 @@ class FsPool {
     if (loc.kind === 'native') {
       return { fs: this.native, path: this.native.resolve(loc.path), kind: 'native' };
     }
-    const key = `${loc.username}@${loc.host}:${loc.port}`;
+    const key = poolKey(loc);
     let backend = this.sftp.get(key);
     // A backend whose connection died is not reusable — every call on it would
     // fail with the error that killed it. And a backend must not be cached
@@ -146,7 +190,7 @@ class FsPool {
       this.sftp.delete(key);
       backend = null;
     }
-    if (!backend) backend = new SftpFs(loc);
+    if (!backend) backend = makeBackend(loc);
     try {
       await backend.connect();
     } catch (err) {
@@ -155,7 +199,7 @@ class FsPool {
       throw err;
     }
     this.sftp.set(key, backend);
-    return { fs: backend, path: backend.resolve(loc.path), kind: 'sftp' };
+    return { fs: backend, path: backend.resolve(loc.path), kind: loc.kind };
   }
 
   // An extra connection to the same server, for a run that copies several
@@ -164,14 +208,14 @@ class FsPool {
   // back without waiting for the session to end.
   async openLane(loc, i) {
     if (loc.kind === 'native' || !i) return this.open(loc);
-    const key = `${loc.username}@${loc.host}:${loc.port}#${i}`;
+    const key = `${poolKey(loc)}#${i}`;
     let backend = this.sftp.get(key);
     if (backend && backend.dead) {
       try { await backend.close(); } catch (_) {}
       this.sftp.delete(key);
       backend = null;
     }
-    if (!backend) backend = new SftpFs(loc);
+    if (!backend) backend = makeBackend(loc);
     try {
       await backend.connect();
     } catch (err) {
@@ -180,7 +224,7 @@ class FsPool {
       throw err;
     }
     this.sftp.set(key, backend);
-    return { fs: backend, path: backend.resolve(loc.path), kind: 'sftp' };
+    return { fs: backend, path: backend.resolve(loc.path), kind: loc.kind };
   }
 
   async closeLanes() {
@@ -208,7 +252,8 @@ function redactLocation(phrase) {
   const s = String(phrase == null ? '' : phrase);
   // (0.9.0) Leading spaces allowed, as parseLocation allows them: " sftp://u:p@h"
   // connected (it trims) but was not redacted, and the password was saved.
-  return s.replace(/^(\s*sftp:\/\/)([^@/:]+):([^@/]*)@/i, '$1$2@');
+  return s.replace(new RegExp('^(\\s*' + REMOTE_SCHEME + ')([^@/:]+):([^@/]*)@', 'i'), '$1$2@');
 }
 
-module.exports = { FsPool, parseLocation, expandMacros, redactLocation };
+module.exports = { FsPool, parseLocation, expandMacros, redactLocation, isServerKind, isServerAddress, kindOf, poolKey,
+                   PROTOCOL_OF, DEFAULT_PORT, REMOTE_SCHEME };

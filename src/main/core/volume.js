@@ -33,7 +33,7 @@ const path = require('path');
 function volumeRoot(p, platform) {
   const plat = platform || process.platform;
   const s = String(p || '');
-  if (!s || /^sftp:\/\//i.test(s)) return null;
+  if (!s || /^(?:sftp|ftpes|ftps|ftp):\/\//i.test(s)) return null;
   if (plat === 'win32') {
     const unc = s.match(/^(\\\\[^\\\/]+[\\\/][^\\\/]+)/);
     if (unc) return unc[1] + '\\';

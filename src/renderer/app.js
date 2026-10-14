@@ -125,11 +125,16 @@ const ICON_SERVER = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" 
 const ICON_TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>';
 const ICON_SWAP  = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 3 4 4-4 4"/><path d="M20 7H4"/><path d="m8 21-4-4 4-4"/><path d="M4 17h16"/></svg>';
 
+// (0.9.1) A folder field holding a server address: SFTP, or one of the three
+// FTP forms (ftp:// plain, ftpes:// explicit TLS, ftps:// implicit TLS).
+const SERVER_ADDRESS = /^\s*(?:sftp|ftpes|ftps|ftp):\/\//i;
+function isServerAddress(v) { return SERVER_ADDRESS.test(String(v == null ? '' : v)); }
+
 // Lights (or unlights) the server button that belongs to one folder field.
 function lightServerButton(input) {
   const field = input.closest('.pr-field');
   const btn = field && field.querySelector('.srv-btn');
-  if (btn) btn.classList.toggle('on', input.value.trim().startsWith('sftp://'));
+  if (btn) btn.classList.toggle('on', isServerAddress(input.value));
 }
 
 function renderPairRows() {
@@ -137,7 +142,7 @@ function renderPairRows() {
   const only = j.pairs.length === 1;
   $('pairrows').innerHTML = j.pairs.map((p, i) => {
     const id = n => i === 0 ? ` id="${n}"` : '';
-    const on = v => v.startsWith('sftp://') ? ' on' : '';
+    const on = v => isServerAddress(v) ? ' on' : '';
     return `<div class="prow" data-i="${i}">
       <button class="pr-rm" data-tip="${only ? 'A job needs at least one pair' : 'Remove this pair'}"
               aria-label="Remove pair ${i + 1}"${only ? ' disabled' : ''}>${ICON_TRASH}</button>
@@ -145,13 +150,13 @@ function renderPairRows() {
       <div class="pr-field">
         <input class="pr-left"${id('left-path')} value="${esc(p.left)}" placeholder="Source folder" spellcheck="false">
         <button class="br-btn pr-browse-l">Browse</button>
-        <button class="srv-btn pr-server-l${on(p.left)}"${id('left-server')} data-tip="Connect to a server (SFTP)" aria-label="Connect to a server">${ICON_SERVER}</button>
+        <button class="srv-btn pr-server-l${on(p.left)}"${id('left-server')} data-tip="Connect to a server (SFTP, FTP, FTPS)" aria-label="Connect to a server">${ICON_SERVER}</button>
       </div>
       <button class="pr-swap" data-tip="Swap this pair's source and destination" aria-label="Swap pair ${i + 1}">${ICON_SWAP}</button>
       <div class="pr-field">
         <input class="pr-right"${id('right-path')} value="${esc(p.right)}" placeholder="Destination folder" spellcheck="false">
         <button class="br-btn pr-browse-r">Browse</button>
-        <button class="srv-btn pr-server-r${on(p.right)}"${id('right-server')} data-tip="Connect to a server (SFTP)" aria-label="Connect to a server">${ICON_SERVER}</button>
+        <button class="srv-btn pr-server-r${on(p.right)}"${id('right-server')} data-tip="Connect to a server (SFTP, FTP, FTPS)" aria-label="Connect to a server">${ICON_SERVER}</button>
       </div>
     </div>`;
   }).join('');
@@ -810,7 +815,7 @@ $('gridbody').addEventListener('contextmenu', async e => {
 function openPathCtx(x, y, folder) {
   closeCtx();
   if (!folder) return;
-  const remote = /^sftp:\/\//i.test(folder);
+  const remote = isServerAddress(folder);
   const m = document.createElement('div');
   m.id = 'ctx-menu';
   m.className = 'ctx';
@@ -1371,11 +1376,11 @@ const VARIANT_LABEL = { twoWay: '2 WAYS', mirror: 'MIRROR', update: 'UPDATE', cu
 // can be turned off for servers, so promising "verified copy" whatever the
 // pairs are is a promise the summary then takes back two hours later.
 function verificationPhrase() {
-  const servers = completePairs().some(p => /^sftp:/i.test(p.left) || /^sftp:/i.test(p.right));
+  const servers = completePairs().some(p => isServerAddress(p.left) || isServerAddress(p.right));
   const off = state.job.sync.verifyRemote === false;
   if (!servers) return 'verified copy (xxHash64)';
   if (!off) return 'verified copy (xxHash64)';
-  const bothRemote = completePairs().every(p => /^sftp:/i.test(p.left) && /^sftp:/i.test(p.right));
+  const bothRemote = completePairs().every(p => isServerAddress(p.left) && isServerAddress(p.right));
   return bothRemote ? 'copied, NOT read back (server)'
                     : 'verified on disk, NOT read back on the server';
 }
@@ -3485,6 +3490,12 @@ async function openServerDialog(target) {
   srvShowStep(1);
   srvStatus('idle', 'Not connected');
   $('srv-pass').value = '';
+  $('srv-proto').value = 'sftp';
+  $('srv-proto').dataset.prev = 'sftp';
+  $('srv-port').value = SRV_DEFAULT_PORT.sftp;
+  $('srv-mode').value = 'passive';
+  srvProtoChanged('sftp');
+  srv.savedId = null;
   $('ov-server').classList.add('open');
 
   const res = await API.serverListSaved();
@@ -3494,7 +3505,7 @@ async function openServerDialog(target) {
     <div class="srow" data-id="${esc(s.id)}" data-tip="${esc(s.username)}@${esc(s.host)}:${s.port}">
       ${ICON_SERVER}
       <span class="s-name">${esc(s.name)}</span>
-      <span class="host">${esc(s.username)}@${esc(s.host)}</span>
+      <span class="host">${s.protocol && s.protocol !== 'sftp' ? esc(SRV_PROTO_TAG[s.protocol] || s.protocol) + ' · ' : ''}${esc(s.username)}@${esc(s.host)}</span>
       <button class="s-forget" data-forget="${esc(s.id)}" data-tip="Forget this server" aria-label="Forget">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
       </button>
@@ -3515,13 +3526,41 @@ async function openServerDialog(target) {
   setTimeout(() => $('srv-host').focus(), 60);
 }
 
+// (0.9.1) The server window speaks four protocols. The port follows the
+// protocol as long as the user has not typed one of their own.
+const SRV_DEFAULT_PORT = { sftp: 22, ftps: 21, 'ftps-implicit': 990, ftp: 21 };
+const SRV_PROTO_TAG = { ftp: 'FTP', ftps: 'FTPS', 'ftps-implicit': 'FTPS implicit' };
+const SRV_PROTO_HINT = {
+  ftp: 'Plain FTP sends the password and every file in clear on the network. Use it only on a network you control.',
+  ftps: 'The connection is encrypted. A server certificate that no authority signed is trusted the first time it is seen, and refused if it ever changes.',
+  'ftps-implicit': 'The connection is encrypted from the first byte (port 990). A certificate that no authority signed is trusted the first time it is seen, and refused if it ever changes.',
+};
+function srvProtoChanged(prev) {
+  const p = $('srv-proto').value;
+  const ftp = p !== 'sftp';
+  // Same reflex as the port: a number the user typed is theirs.
+  const cur = Number($('srv-port').value);
+  if (!cur || cur === SRV_DEFAULT_PORT[prev]) $('srv-port').value = SRV_DEFAULT_PORT[p];
+  $('srv-keyrow').style.display = ftp ? 'none' : '';
+  $('srv-keyhint').style.display = ftp ? 'none' : '';
+  $('srv-moderow').style.display = ftp ? '' : 'none';
+  const hint = $('srv-proto-hint');
+  hint.style.display = SRV_PROTO_HINT[p] ? '' : 'none';
+  hint.textContent = SRV_PROTO_HINT[p] || '';
+  if (ftp) $('srv-key').value = '';
+  $('srv-proto').dataset.prev = p;
+  srv.savedId = null;
+}
+
 function srvFormConn() {
   return {
     savedId : srv.savedId,
     // See srvForgetSaved: once the address or the login has been edited, this
     // is no longer that saved entry.
     host    : $('srv-host').value.trim(),
-    port    : Number($('srv-port').value) || 22,
+    protocol: $('srv-proto').value,
+    transferMode: $('srv-mode').value,
+    port    : Number($('srv-port').value) || SRV_DEFAULT_PORT[$('srv-proto').value] || 22,
     username: $('srv-user').value.trim(),
     password: $('srv-pass').value,
     keyPath : $('srv-key').value.trim(),
@@ -3557,7 +3596,8 @@ async function srvConnect() {
   }
 
   // Only now is the entry worth keeping: it is a server that actually answers.
-  srv.conn = { host: conn.host, port: conn.port, username: conn.username };
+  srv.conn = { host: conn.host, port: conn.port, username: conn.username,
+               protocol: conn.protocol, transferMode: conn.transferMode };
   if (conn.savePassword || conn.keyPath || srv.savedId) {
     const saved = await API.serverSave(conn);
     if (saved.ok && saved.server) srv.savedId = saved.server.id;
@@ -3689,6 +3729,8 @@ function bindServerDialog() {
   for (const id of ['srv-host', 'srv-port', 'srv-user']) {
     $(id).addEventListener('input', () => { srv.savedId = null; });
   }
+  $('srv-proto').addEventListener('change', () => srvProtoChanged($('srv-proto').dataset.prev || 'sftp'));
+  $('srv-mode').addEventListener('change', () => { srv.savedId = null; });
 
   $('srv-cancel').addEventListener('click', closeServerDialog);
   $('srv-back').addEventListener('click', () => { srvShowStep(1); $('srv-title').textContent = 'Connect to a server'; });
@@ -3701,7 +3743,7 @@ function bindServerDialog() {
     if (p) $('srv-key').value = p;
   });
 
-  // The default port follows nothing but SFTP here, so it is only ever a hint.
+  // The default port follows the protocol (srvProtoChanged).
   $('srv-host').addEventListener('keydown', e => { if (e.key === 'Enter') srvConnect(); });
   $('srv-user').addEventListener('keydown', e => { if (e.key === 'Enter') srvConnect(); });
   $('srv-pass').addEventListener('keydown', e => { if (e.key === 'Enter') srvConnect(); });
@@ -3719,6 +3761,9 @@ function bindServerDialog() {
     const res = await API.serverListSaved();
     const s = (res.servers || []).find(x => x.id === row.dataset.id);
     if (!s) return;
+    $('srv-proto').value = s.protocol || 'sftp';
+    $('srv-mode').value = s.transferMode || 'passive';
+    srvProtoChanged($('srv-proto').dataset.prev || 'sftp');
     srv.savedId = s.id;
     $('srv-host').value = s.host;
     $('srv-port').value = s.port;

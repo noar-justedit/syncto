@@ -6,7 +6,7 @@
 
 ## 1. État actuel
 
-- **Version du code : 0.9.0** (13/10/2026). En ligne sur GitHub : **0.8.8**
+- **Version du code : 0.9.1** (14/10/2026). En ligne sur GitHub : **0.8.8**
   (vérifié le 13/10/2026 à la demande de Noar : tag `v0.8.8` et `version.json`
   à 0.8.8 sur `main`, lus par `git ls-remote --tags` et un clone public).
   Vérifié de nouveau pour la note 0.9.0 (13/10/2026, soir) : tag `v0.8.9`
@@ -36,7 +36,12 @@
 - **Contenu de 0.9.0** : corrections de l'audit du 13/10/2026, lots A à D
   (perte de données, sécurité, noms Windows et longs, fenêtre, vitesse sans
   toucher aux lectures et écritures), voir section 15.
-- **Tests : 1475 vérifications, toutes vertes** (1346 en 0.8.9, 1314 en 0.8.8).
+- **Contenu de 0.9.1** : le moteur de transfert de filo (couche protocole en JS
+  seulement, pas son moteur Rust) remplace la couche SFTP, et apporte FTP,
+  FTPS explicite et FTPS implicite ; checksum calculé par le serveur pour la
+  relecture. Demandé par Noar le 14/10/2026, voir section 16. Version 0.9.1
+  choisie par Noar (0.10.0 avait été proposée).
+- **Tests : 1597 vérifications, toutes vertes** (1475 en 0.9.0, 1346 en 0.8.9).
 - Dépôt : https://github.com/noar-justedit/syncto (GPL-3.0), branche `main`.
 - Versions des outils : Electron 44.7.0 (Chromium 152, Node 24.21 intégré ;
   passage de 43 à 44 demandé par Noar le 10/10/2026, sorti en 0.8.8),
@@ -52,7 +57,8 @@ syncto compare et synchronise des dossiers, sur le modèle de FreeFileSync. Une
 fenêtre, des **paires** de dossiers (source → destination), un **mode**, puis
 **COMPARE** (lecture seule) et **SYNCHRONIZE**. Chaque côté peut être un disque
 local, un volume monté (NAS en SMB) ou un serveur **SFTP**
-(`sftp://user@host:port/chemin`). Public : DIT, cadreurs, monteurs. Il partage
+(`sftp://user@host:port/chemin`), **FTP** ou **FTPS** (`ftp://`, `ftpes://`,
+`ftps://`). Public : DIT, cadreurs, monteurs. Il partage
 le langage d'interface des autres applications de Noar (ingesto, presto,
 projecto, renamo…).
 
@@ -165,9 +171,10 @@ Trois couches :
 | `src/main/core/volume.js` | volume non monté (/Volumes, lettre, UNC, /media, /mnt) |
 | `src/main/core/relpath.js` | chemins relatifs sûrs (rien ne sort du dossier choisi) |
 | `src/main/core/filter.js` / `versioning.js` / `hash.js` | filtres ; corbeille / révisions / suppression ; xxHash64 (hash-wasm) |
-| `src/main/fs/native.js` / `sftp.js` / `sftp-pipe.js` | disque local ou monté ; SFTP ; flux SFTP pipelinés (64 requêtes en vol) |
+| `src/main/fs/native.js` / `sftp.js` / `sftp-pipe.js` | disque local ou monté ; SFTP ; flux SFTP pipelinés (profondeur de lecture adaptative, fenêtre de réception qui la suit : moteur de filo) |
+| `src/main/fs/ftp.js` / `ftp/` | FTP, FTPS explicite et implicite : `FtpFs` (même contrat que `SftpFs`) sur `FtpRemote` (`ftp/client.js`, filo) ; connexion de contrôle + jusqu'à 3 connexions de transfert, jamais bloquée par un transfert (verrou) |
 | `test/run-tests.js` | la suite, sans framework (`ok()`, `eq()`), table `SECTIONS` dans `main()` |
-| `test/sftp-server.js` / `lock-holder.js` | vrai serveur SFTP avec latence ; second processus pour les verrous |
+| `test/sftp-server.js` / `ftp-server.js` / `lock-holder.js` | vrai serveur SFTP avec latence ; vrai serveur FTP/FTPS (MLSD, MFMT, HASH, TLS, dossier interdit en option) ; second processus pour les verrous |
 | `scripts/` | builds, notarisation (`notarize-lib.sh`), captures (Linux), icônes, `ffs-convert.js`, `push_github.command` |
 
 Dépendances d'exécution : `ssh2`, `hash-wasm` seulement. Rien à compiler, mais
@@ -231,8 +238,19 @@ exclut et met `npmRebuild: false`, sinon le build Windows depuis le Mac échoue.
 - SFTP : clé du serveur vérifiée (`knownHosts`), noms contenant `/` ou `\`
   refusés. `ssh2` a une fenêtre de 2 Mo en dur → une connexion plafonne à
   2 Mo ÷ latence, d'où plusieurs connexions (« voies »). Les flux ssh2 ne
-  pipelinent pas : `sftp-pipe.js` garde 64 requêtes en vol et remet les blocs
-  en ordre.
+  pipelinent pas : `sftp-pipe.js` (moteur de filo depuis 0.9.1) garde un nombre
+  de requêtes en vol qui grandit avec la latence, règle la fenêtre de
+  réception en conséquence et remet les blocs en ordre.
+- FTP/FTPS (0.9.1) : `kind = 'ftp'`, `protocol` ∈ {ftp, ftps, ftps-implicit}.
+  Tout ce qui n'est pas `native` est un « serveur » (voies, relecture
+  débrayable, pas de corbeille). Identifiants rangés sous `ftp:user@host:port`
+  (jamais le mot de passe SSH). Certificat FTPS : approuvé à la première
+  vue s'il n'est signé par personne, épinglé dans `knownHosts['ftps:host:port']`,
+  refusé avant `USER` s'il change. `stat` renvoie `null` seulement si le
+  dossier parent peut être ouvert (CWD) : sinon erreur, jamais « absent »
+  (un miroir supprimerait ou recopierait à tort). Une écriture n'est finie
+  qu'à la réponse 226. Dates : MFMT pour écrire ; sans MLSD, la liste est à la
+  minute et la tolérance de comparaison passe à 61 s (`timeResolutionSec`).
 
 ### Profil (sur la machine)
 `app.getPath('userData')/preferences.json` : job ouvert, récents, serveurs,
@@ -333,7 +351,7 @@ vérifie les promesses.
 
 ## 8. Tests
 
-`npm test` = `node test/run-tests.js`, 52 sections, environ 5 minutes. Vrais
+`npm test` = `node test/run-tests.js`, 53 sections, environ 5 minutes. Vrais
 fichiers, vrais verrous, second processus, vrai serveur SFTP avec latence, vrai
 dépôt git local pour le script de publication. Une exception dans une section
 est rapportée `UNCAUGHT in <nom>`, les autres tournent quand même.
@@ -346,7 +364,10 @@ est rapportée `UNCAUGHT in <nom>`, les autres tournent quand même.
   Electron 44), 50 (`testLongNames088` : noms trop longs, blocs `n1`…`n5`),
   51 (`testSafeNames089` : noms compatibles Windows, blocs `w1`…`w8`), 52
   (`testAudit1013` : audit du 13/10/2026, blocs `a*` perte de données et
-  sécurité, `b*` noms, `c*` fenêtre, `d*` vitesse).
+  sécurité, `b*` noms, `c*` fenêtre, `d*` vitesse), 53 (`testFtpEngine091` :
+  FTP, FTPS et moteur de filo, blocs `a` à `l` : adresses, contrat, dossier
+  interdit, run complet, relecture, dates, verrous, identifiants, FTPS,
+  serveurs enregistrés, fenêtre, SFTP).
 - Un test de la section 44 est sensible au temps : s'il échoue isolément sur une
   machine chargée, relancer avant de chercher.
 - Règles d'écriture : tester le comportement, pas le commentaire ; tester le
@@ -420,6 +441,19 @@ est rapportée `UNCAUGHT in <nom>`, les autres tournent quand même.
 - Vérifier qu'une édition a bien atterri avant de conclure.
 
 ## 10. Problèmes connus
+
+- **FTP / FTPS (0.9.1), limites du protocole** : verrou au mieux (pas de
+  création exclusive ni de renommage atomique : deux machines qui se
+  disputent un dossier peuvent gagner toutes les deux) ; ni liens, ni
+  identifiants (un renommage est une copie), ni corbeille ; la date n'est
+  conservée que si le serveur gère MFMT. **Pas encore essayé sur un vrai
+  serveur** (NAS, FileZilla Server, vsftpd, IIS) : les tests parlent à un
+  serveur FTP écrit pour eux. Un serveur qui limite le nombre de connexions
+  par compte à moins de 4 peut refuser les voies.
+- **Relecture par le serveur (0.9.1)** : désactivable seulement par la
+  configuration (`serverChecksum: false`), pas par la fenêtre. Un serveur dont
+  la commande `sha256sum` / `HASH` mentirait ne serait pas détecté ; la
+  relecture complète reste possible en le désactivant.
 
 - **Dossier partagé chiffré Synology (noms limités à 143)** : un nom entre 144
   et 255 n'y est pas raccourci, la copie échoue (ENOENT sous Windows). Non
@@ -546,6 +580,7 @@ est rapportée `UNCAUGHT in <nom>`, les autres tournent quand même.
 | 0.8.8 | 11/10 | 1314 | revue complète (moteur, sécurité, interface), noms longs, pas d'extinction en auto-sync, Electron 44 |
 | 0.8.9 | 13/10 | 1346 | noms compatibles Windows (destination seule ou deux côtés), fichier Icon du Mac ignoré |
 | 0.9.0 | 13/10 | 1475 | audit complet : plan figé à la comparaison, liens piégés, filtres et noms Windows, fenêtre, vitesse |
+| 0.9.1 | 14/10 | 1597 | moteur de filo (SFTP plus rapide), FTP et FTPS, checksum calculé par le serveur |
 
 Le détail est dans `CHANGELOG.md`.
 
@@ -635,3 +670,27 @@ correction vérifiée en la cassant.
   liste de résultats. Sur des petits fichiers en Node, le gain mesuré ici est
   faible et bruité (le gros gain annoncé vient du lot E).
 
+## 16. FTP, FTPS et moteur de filo (0.9.1)
+
+Demande de Noar (14/10/2026) : intégrer le moteur FTP / SFTP de son appli
+**filo** (https://github.com/noar-justedit/filo) à syncto, à la place de
+l'ancien moteur SFTP. Choix de Noar : couche protocole en JS seulement (pas le
+moteur Rust de filo, donc pas de changement des scripts de build), FTP et FTPS
+ajoutés comme types d'adresse, version 0.9.1.
+
+- Repris de filo : `sftp-pipe.js`, les améliorations de `SftpFs`
+  (lecture à profondeur adaptative, fenêtre de réception, keyboard-interactive,
+  `serverHash` par exec SSH), le client FTP (`src/main/fs/ftp/`, basic-ftp
+  6.2.3, MIT). Gardés de syncto : le contrat des backends, la politique de clé
+  d'hôte, le coffre à mots de passe, les verrous.
+- Nouveau : `FtpFs`, `afs.js` (`parseLocation`, `poolKey`, `makeBackend`,
+  `isServerAddress`), serveurs enregistrés avec `protocol` et `transferMode`,
+  épinglage des certificats FTPS (`config.js` : `knownCert`, `rememberCert`),
+  fenêtre « serveur » (protocole, mode de données, indications), relecture par
+  le serveur (`sync.js` : `copyStream` hache la source, la passe de
+  vérification interroge le serveur puis retombe sur la relecture).
+- Tests : section 53, chaque garde cassé à la main (dossier interdit lu comme
+  absent, écriture finie avant le 226, certificat changé accepté, empreinte
+  du serveur ignorée, schéma `ftp://` oublié dans l'expansion des variables).
+- Lot E de l'audit et question des scripts de capture Linux : toujours en
+  attente de Noar.
