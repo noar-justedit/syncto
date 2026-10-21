@@ -3407,6 +3407,21 @@ async function loadNtfyUi() {
   $('st-ntfy-en').checked      = n.enabled;
   $('st-ntfy-server').value    = n.server;
   $('st-ntfy-topic').value     = n.topic;
+  renderNtfyBtn();
+}
+
+// (0.9.2) The title-bar bell reads the same two fields as the settings, so the
+// two can never disagree: on = ntfy enabled in Settings.
+const NTFY_ICON_ON  = '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>';
+const NTFY_ICON_OFF = '<path d="M8.7 3A6 6 0 0 1 18 8a21.3 21.3 0 0 0 .6 5"/><path d="M17 17H3s3-2 3-9a4.67 4.67 0 0 1 .3-1.7"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/><path d="m2 2 20 20"/>';
+function renderNtfyBtn() {
+  const on = $('st-ntfy-en').checked;
+  const b = $('btn-ntfy');
+  b.classList.toggle('on', on);
+  b.classList.toggle('off', !on);
+  b.querySelector('svg').innerHTML = on ? NTFY_ICON_ON : NTFY_ICON_OFF;
+  b.dataset.tip = on ? 'ntfy notifications: on (click to turn off)' : 'ntfy notifications: off (click to turn on)';
+  b.setAttribute('aria-pressed', on ? 'true' : 'false');
 }
 
 function ntfyPatchFromUi() {
@@ -3426,8 +3441,23 @@ function bindAfterAndNtfy() {
   $('after-now').addEventListener('click', fireAfterAction);
 
   for (const id of ['st-ntfy-en', 'st-ntfy-server', 'st-ntfy-topic']) {
-    $(id).addEventListener('change', () => API.ntfySave(ntfyPatchFromUi()));
+    $(id).addEventListener('change', () => { API.ntfySave(ntfyPatchFromUi()); renderNtfyBtn(); });
   }
+
+  // One click turns ntfy on or off. With no topic there is nowhere to send
+  // anything: the click opens Settings on the topic field instead.
+  $('btn-ntfy').addEventListener('click', async () => {
+    const on = $('st-ntfy-en').checked;
+    if (!on && !$('st-ntfy-topic').value.trim()) {
+      $('btn-settings').click();
+      $('st-ntfy-topic').focus();
+      $('status-note').textContent = 'ntfy needs a topic first: enter one in Settings.';
+      return;
+    }
+    $('st-ntfy-en').checked = !on;
+    renderNtfyBtn();
+    await API.ntfySave(ntfyPatchFromUi());
+  });
 
   $('st-ntfy-test').addEventListener('click', async () => {
     const res = $('st-ntfy-res');

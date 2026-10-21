@@ -7649,6 +7649,65 @@ async function testFtpEngine091() {
 }
 
 
+// ══ 54. The ntfy button in the title bar (0.9.2) ═══════════════════════════
+// One click turns the phone notifications on or off. Order, left to right:
+// ntfy, Settings, end action (Noar, 21/10/2026: the same row as filo).
+// Run alone: SYNCTO_ONLY=testNtfyButton092 node test/run-tests.js
+async function testNtfyButton092() {
+  console.log('\n\n54. The ntfy button in the title bar (0.9.2)');
+  const root = path.join(__dirname, '..');
+  const app  = fs.readFileSync(path.join(root, 'src/renderer/app.js'), 'utf8').replace(/\u0000/g, '');
+  const html = fs.readFileSync(path.join(root, 'src/renderer/index.html'), 'utf8');
+
+  // a. Where it sits.
+  {
+    const bar = html.slice(html.indexOf('<div class="t-actions">'), html.indexOf('<div id="wincontrols">'));
+    const at = id => bar.indexOf(`id="${id}"`);
+    ok(at('btn-ntfy') > 0 && at('btn-settings') > 0 && at('btn-after') > 0, 'the three buttons are in the title bar');
+    ok(at('btn-ntfy') < at('btn-settings') && at('btn-settings') < at('btn-after'),
+       'in the order ntfy, Settings, end action');
+    ok(/id="btn-ntfy"[^>]*aria-label="ntfy notifications"/.test(bar), 'the button has a name for screen readers');
+  }
+
+  // b. What it shows: the real function is lifted out and run on a fake page.
+  {
+    const body = app.slice(app.indexOf('function renderNtfyBtn()'));
+    const src = body.slice(0, body.indexOf('\n}\n') + 3);
+    const mkEl = () => {
+      const el = { cls: new Set(), dataset: {}, attrs: {}, svg: { innerHTML: '' } };
+      el.classList = { toggle: (c, on) => { if (on) el.cls.add(c); else el.cls.delete(c); } };
+      el.querySelector = () => el.svg;
+      el.setAttribute = (k, v) => { el.attrs[k] = v; };
+      return el;
+    };
+    const btn = mkEl(), chk = { checked: false };
+    const $ = id => (id === 'btn-ntfy' ? btn : chk);
+    const NTFY_ICON_ON = 'BELL', NTFY_ICON_OFF = 'BELL-OFF';
+    // eslint-disable-next-line no-eval
+    const render = eval(`(${src.replace('function renderNtfyBtn()', 'function ()')})`);
+    chk.checked = true; render();
+    ok(btn.cls.has('on') && !btn.cls.has('off') && btn.svg.innerHTML === 'BELL' && btn.attrs['aria-pressed'] === 'true', 'enabled: green bell, pressed');
+    ok(/turn off/.test(btn.dataset.tip), 'and the tip says what a click does');
+    chk.checked = false; render();
+    ok(btn.cls.has('off') && !btn.cls.has('on') && btn.svg.innerHTML === 'BELL-OFF' && btn.attrs['aria-pressed'] === 'false', 'disabled: struck-through bell');
+    ok(/turn on/.test(btn.dataset.tip), 'and the tip says what a click does');
+  }
+
+  // c. What a click does, and that the two controls never disagree.
+  {
+    ok(/\$\('btn-ntfy'\)\.addEventListener\('click'/.test(app), 'the button is wired');
+    const click = app.slice(app.indexOf("$('btn-ntfy').addEventListener('click'"));
+    const handler = click.slice(0, click.indexOf('\n  });') + 6);
+    ok(/!on && !\$\('st-ntfy-topic'\)\.value\.trim\(\)/.test(handler) && /\$\('btn-settings'\)\.click\(\)/.test(handler),
+       'turning it on with no topic opens Settings on the topic instead');
+    ok(/\$\('st-ntfy-en'\)\.checked = !on/.test(handler) && /API\.ntfySave\(ntfyPatchFromUi\(\)\)/.test(handler),
+       'otherwise it flips the setting and saves it');
+    ok(/API\.ntfySave\(ntfyPatchFromUi\(\)\); renderNtfyBtn\(\);/.test(app), 'a change made in Settings moves the bell');
+    ok(/\$\('st-ntfy-topic'\)\.value     = n\.topic;\n  renderNtfyBtn\(\);/.test(app), 'and so does loading the saved setting at start');
+  }
+}
+
+
 (async function main() {
   console.log('syncto engine tests');
   console.log('scratch: ' + ROOT);
@@ -7711,6 +7770,7 @@ async function testFtpEngine091() {
       testSafeNames089,
       testAudit1013,
       testFtpEngine091,
+      testNtfyButton092,
     ];
     const only = (process.env.SYNCTO_ONLY || '').split(',').map(x => x.trim()).filter(Boolean);
     // Each section on its own: an exception used to end the whole suite, so

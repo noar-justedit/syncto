@@ -4,6 +4,16 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.9.2] — 2026-10-21
+
+### Added
+
+- **A ntfy button in the title bar.** One click turns the phone notifications
+  on (green bell) or off (struck-through bell). With no topic set yet, the
+  click opens Settings on the topic field. The title bar now reads, left to
+  right: ntfy, Settings, end action (it was end action, Settings). The bell and
+  the switch in Settings always agree.
+
 ## [0.9.1] — 2026-10-14
 
 filo's transfer engine now drives syncto's servers. SFTP reads and writes

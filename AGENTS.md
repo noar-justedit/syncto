@@ -135,7 +135,8 @@ suffit, la suite n'a pas besoin du binaire.
   longs : section 50, `testLongNames088` ; noms compatibles Windows : section
   51, `testSafeNames089` ; audit du 13/10/2026 : section 52, `testAudit1013` ;
   FTP, FTPS et moteur de filo (0.9.1) : section 53, `testFtpEngine091` ;
-  une nouvelle version peut continuer là ou ouvrir la section 54).
+  bouton ntfy (0.9.2) : section 54, `testNtfyButton092` ;
+  une nouvelle version peut continuer là ou ouvrir la section 55).
 - **Vérifier un test en le cassant** : remettre l'ancien code, constater que le
   test passe au rouge, remettre en état.
 - Beaucoup de tests lisent `app.js` / `index.html` avec des expressions

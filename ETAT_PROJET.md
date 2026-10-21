@@ -6,7 +6,7 @@
 
 ## 1. État actuel
 
-- **Version du code : 0.9.1** (14/10/2026). En ligne sur GitHub : **0.8.8**
+- **Version du code : 0.9.2** (21/10/2026). En ligne sur GitHub : **0.8.8**
   (vérifié le 13/10/2026 à la demande de Noar : tag `v0.8.8` et `version.json`
   à 0.8.8 sur `main`, lus par `git ls-remote --tags` et un clone public).
   Vérifié de nouveau pour la note 0.9.0 (13/10/2026, soir) : tag `v0.8.9`
@@ -41,7 +41,10 @@
   FTPS explicite et FTPS implicite ; checksum calculé par le serveur pour la
   relecture. Demandé par Noar le 14/10/2026, voir section 16. Version 0.9.1
   choisie par Noar (0.10.0 avait été proposée).
-- **Tests : 1597 vérifications, toutes vertes** (1475 en 0.9.0, 1346 en 0.8.9).
+- **Contenu de 0.9.2** : bouton ntfy dans la barre du haut (cloche verte =
+  activé, cloche barrée = coupé), ordre ntfy, Settings, end action, comme filo ;
+  voir section 16. Demandé par Noar le 21/10/2026, version 0.9.2 confirmée.
+- **Tests : 1609 vérifications, toutes vertes** (1597 en 0.9.1, 1475 en 0.9.0).
 - Dépôt : https://github.com/noar-justedit/syncto (GPL-3.0), branche `main`.
 - Versions des outils : Electron 44.7.0 (Chromium 152, Node 24.21 intégré ;
   passage de 43 à 44 demandé par Noar le 10/10/2026, sorti en 0.8.8),
@@ -351,7 +354,7 @@ vérifie les promesses.
 
 ## 8. Tests
 
-`npm test` = `node test/run-tests.js`, 53 sections, environ 5 minutes. Vrais
+`npm test` = `node test/run-tests.js`, 54 sections, environ 5 minutes. Vrais
 fichiers, vrais verrous, second processus, vrai serveur SFTP avec latence, vrai
 dépôt git local pour le script de publication. Une exception dans une section
 est rapportée `UNCAUGHT in <nom>`, les autres tournent quand même.
@@ -367,7 +370,8 @@ est rapportée `UNCAUGHT in <nom>`, les autres tournent quand même.
   sécurité, `b*` noms, `c*` fenêtre, `d*` vitesse), 53 (`testFtpEngine091` :
   FTP, FTPS et moteur de filo, blocs `a` à `l` : adresses, contrat, dossier
   interdit, run complet, relecture, dates, verrous, identifiants, FTPS,
-  serveurs enregistrés, fenêtre, SFTP).
+  serveurs enregistrés, fenêtre, SFTP), 54 (`testNtfyButton092` : bouton ntfy,
+  blocs `a` place, `b` aspect, `c` clic).
 - Un test de la section 44 est sensible au temps : s'il échoue isolément sur une
   machine chargée, relancer avant de chercher.
 - Règles d'écriture : tester le comportement, pas le commentaire ; tester le
@@ -581,6 +585,7 @@ est rapportée `UNCAUGHT in <nom>`, les autres tournent quand même.
 | 0.8.9 | 13/10 | 1346 | noms compatibles Windows (destination seule ou deux côtés), fichier Icon du Mac ignoré |
 | 0.9.0 | 13/10 | 1475 | audit complet : plan figé à la comparaison, liens piégés, filtres et noms Windows, fenêtre, vitesse |
 | 0.9.1 | 14/10 | 1597 | moteur de filo (SFTP plus rapide), FTP et FTPS, checksum calculé par le serveur |
+| 0.9.2 | 21/10 | 1609 | bouton ntfy dans la barre du haut (ntfy, Settings, end action) |
 
 Le détail est dans `CHANGELOG.md`.
 
@@ -694,3 +699,12 @@ ajoutés comme types d'adresse, version 0.9.1.
   du serveur ignorée, schéma `ftp://` oublié dans l'expansion des variables).
 - Lot E de l'audit et question des scripts de capture Linux : toujours en
   attente de Noar.
+
+### 0.9.2 : le bouton ntfy
+
+Demande de Noar (21/10/2026), avec une capture de filo pour modèle : cloche
+verte quand ntfy est actif, cloche barrée grise sinon, puis Settings, puis
+End action. Un clic bascule le réglage et l'enregistre ; sans topic, il ouvre
+Settings sur le champ topic. La cloche lit la même case que Settings
+(`st-ntfy-en`) : elles ne peuvent pas se contredire (`renderNtfyBtn`).
+Test : section 54, chaque garde cassé à la main.

@@ -364,6 +364,11 @@ long it took, and the first error if there was one. Set a server (the public
 one or your own), a topic, and scan the QR code to install the app. A problem
 raises the priority so the phone actually rings.
 
+The **bell** in the title bar, left of Settings, turns these notifications on
+(green bell) or off (struck-through bell) with one click. With no topic set yet,
+it opens Settings on the topic field instead. The title bar reads, left to
+right: bell, Settings, end action.
+
 On the public server the topic *is* the password: anyone who knows it can read
 your notifications, so make it long. Servers that require an access token are
 not supported.
