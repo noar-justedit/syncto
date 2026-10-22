@@ -14,7 +14,7 @@ Licensed under the **GNU General Public License v3.0** (see [`LICENSE`](./LICENS
 
 ## Screenshots
 
-![syncto 0.8.5 — a Mirror compared and ready to synchronize](docs/screenshots/screenshot.png)
+![syncto — a Mirror compared and ready to synchronize](docs/screenshots/screenshot.png)
 
 <sub>The main window in 0.8.5: a Mirror between two folders, compared. Creations
 in green, updates in orange, deletions in red, moves in blue.</sub>
@@ -155,8 +155,10 @@ Install Node.js (Step 1), then double-click `scripts/dev.command`.
 
 ### Publishing to GitHub (maintainer)
 Double-click `scripts/push_github.command` in the folder to publish. It makes
-the repository's `main` branch exactly identical to the folder — additions,
-changes and removals, executable bits included — after listing the changes and
+the repository's `main` branch identical to the folder — additions, changes and
+removals, executable bits included — except for the maintainer's working files
+(`CLAUDE.md`, `AGENTS.md`, `ETAT_PROJET.md`, `test/` and `docs/`, whose
+`screenshots/` stays), which are never sent — after listing the changes and
 waiting for `y`. It refuses unless `version.json` and `package.json` agree on a
 version higher than the one on GitHub, never forces a push, and holds
 `version.json` back until the GitHub Release `vX.Y.Z` exists, because that file
@@ -170,9 +172,10 @@ git's prompt with your GitHub user name and a personal access token (not your
 password); macOS keeps it in the keychain.
 
 ### For developers and AI assistants
-`AGENTS.md` holds the working rules, `ETAT_PROJET.md` the state of the project
-(architecture, decisions and their reasons, known issues, where the version
-number lives). Both are in French.
+The project's working rules and its state (architecture, decisions and their
+reasons, known issues, where the version number lives) are kept by the
+maintainer in `AGENTS.md` and `ETAT_PROJET.md`, in French. They are not
+published here.
 
 ---
 
@@ -447,39 +450,14 @@ Creates real folders in a temporary directory and runs the whole engine against
 them: filters, comparison categories, the four variants, the two-way database,
 checksum verification, versioning, fail-safe copy and the folder rules.
 
+The suite (`test/`) is kept with the maintainer's working files and is not
+published in this repository.
+
 It also reads the build scripts and checks every option they pass to Apple's
 `notarytool` and `stapler` against the documented ones. That is a strange thing
 for an engine test suite to do, and it earns its place: an invented flag makes
 notarytool reject the command line before it ever reaches Apple, which looks
 exactly like a wrong password, and no amount of mocking `xcrun` will catch it.
-
----
-
-## Regenerating the screenshots
-
-```bash
-bash scripts/shots-linux.sh          # Linux, or a container: needs Xvfb,
-                                     # dbus and gnome-keyring
-```
-
-It builds a demo dataset under `/Volumes`, seeds a profile, launches the real
-application and drives it through the DevTools protocol, writing
-`docs/screenshots/*.png`. Nothing is mocked up: the verification frame is a real
-verification pass, and the "another machine is running" frame is a second
-process genuinely holding the lock, under its own user, install id and machine
-name.
-
-Worth knowing before running it:
-
-- **The keyring must be unlocked inside the session bus**, otherwise
-  `safeStorage` reports itself unavailable and the connection window gets
-  photographed saying "this machine has no usable credential store" — true of a
-  build container, false of every Mac. The script handles it; a manual run of
-  `scripts/shots.js` does not.
-- **These pictures are a test.** Regenerating them for 0.5.4 is what surfaced
-  the unstyled fields in the connection window and two labels left over from the
-  three-copy-mode era. A frame forces you to read a whole screen at once;
-  a code review reads one function at a time.
 
 ---
 

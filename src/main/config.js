@@ -528,9 +528,6 @@ class Prefs {
     return m[`ftps:${host}:${Number(port) || 21}`] || null;
   }
 
-  // The window asks this to show what it will trust.
-  hostKeyFor(host, port) { return this.knownHostKey(host, port); }
-
   rememberHostKey(host, port, fp) { this._remember(`${host}:${Number(port) || 22}`, host, fp); }
   rememberCert(host, port, fp) { this._remember(`ftps:${host}:${Number(port) || 21}`, host, fp); }
 

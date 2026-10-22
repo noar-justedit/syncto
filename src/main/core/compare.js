@@ -75,6 +75,8 @@ const OLD_EXT    = '.syncto_old';
 const DB_NAME    = '.syncto.db';      // gzipped JSON, one per base folder
 const LOCK_NAME  = '.syncto.lock';
 const DEFAULT_TOLERANCE_SEC = 2;
+// (0.9.3) Folder listings asked for ahead of the walk, at most (see _readdir).
+const PREFETCH_MAX = 8;
 
 const CHECKSUM_FILE = 'syncto-checksums.txt';
 
@@ -270,7 +272,10 @@ class Comparer {
     // boundary happened to land on, and the running total across pairs starts
     // the next pair from a stale number.
     this._emit('');
-    await this._walk({ c: '', l: '', r: '', lt: '', rt: '' }, -1, 0, !!lRoot, !!rRoot);
+    this._pre = new Map();
+    try {
+      await this._walk({ c: '', l: '', r: '', lt: '', rt: '' }, -1, 0, !!lRoot, !!rRoot);
+    } finally { this._pre = null; }
     this._emit('');
     return {
       nodes: this.nodes, errors: this.errors, stats: this.stats,
@@ -278,6 +283,38 @@ class Comparer {
       locks: this.locks,
       cancelled: !!this.token.cancelled,
     };
+  }
+
+  // (0.9.3) The listing of a folder, read ahead. The walk is depth first and
+  // one folder at a time, so on a NAS every folder cost one full round trip
+  // before the next one was even asked for. While a folder is being walked, the
+  // listings of its next sub-folders are already on their way (at most
+  // PREFETCH_MAX at once, held until their turn). What is walked, in which
+  // order, and what an unreadable folder does are unchanged: a read-ahead
+  // that failed raises its error only when its folder is reached, in _list.
+  _readdir(side, base, dir) {
+    const key = side + '\u0000' + dir;
+    const ahead = this._pre && this._pre.get(key);
+    if (ahead) { this._pre.delete(key); return ahead; }
+    return base.fs.readdir(dir);
+  }
+
+  _aheadKey(side, relDir) {
+    const base = side === 'left' ? this.left : this.right;
+    return side + '\u0000' + (relDir ? base.fs.join(base.path, ...relDir.split('/')) : base.path);
+  }
+
+  _prefetch(side, relDir) {
+    if (!this._pre || this._pre.size >= PREFETCH_MAX || this.token.cancelled) return false;
+    const base = side === 'left' ? this.left : this.right;
+    const dir  = relDir ? base.fs.join(base.path, ...relDir.split('/')) : base.path;
+    const key = side + '\u0000' + dir;
+    if (this._pre.has(key)) return true;
+    let p;
+    try { p = Promise.resolve(base.fs.readdir(dir)); } catch (_) { return true; }
+    p.catch(() => {});        // the error belongs to the walk, not to the read-ahead
+    this._pre.set(key, p);
+    return true;
   }
 
   // Returns a Map, or null when the directory could not be read. Null is NOT
@@ -288,7 +325,7 @@ class Comparer {
     const base = side === 'left' ? this.left : this.right;
     const dir  = relDir ? base.fs.join(base.path, ...relDir.split('/')) : base.path;
     try {
-      const list = await base.fs.readdir(dir);
+      const list = await this._readdir(side, base, dir);
       // Lock files live at the ROOT of a base folder and nowhere else. The
       // listing is already in hand, so noticing a leftover costs nothing — and
       // the walk hides these names from the user, which is exactly why nobody
@@ -461,8 +498,32 @@ class Comparer {
     const keys = new Set([...L.keys(), ...R.keys()].filter(k => !clash.has(k)));
     const sorted = [...keys].sort();
 
+    // (0.9.3) The sub-folders this loop will probably walk: their listings are
+    // asked for ahead of time (see _readdir). A folder a filter then skips was
+    // listed for nothing, which costs one read and changes no result.
+    const ahead = [];
+    const aheadOf = new Map();       // item key -> the read-ahead keys it owns
     for (const key of sorted) {
+      const l = L.get(key), r = R.get(key);
+      if (!l && !r) continue;
+      if ((l || r).type !== 'folder' || (l && r && l.type !== r.type)) continue;
+      const own = [];
+      if (l) { const rel = rels.l ? rels.l + '/' + l.name : l.name; ahead.push(['left', rel]);  own.push(this._aheadKey('left', rel)); }
+      if (r) { const rel = rels.r ? rels.r + '/' + r.name : r.name; ahead.push(['right', rel]); own.push(this._aheadKey('right', rel)); }
+      aheadOf.set(key, own);
+    }
+    let aheadAt = 0;
+    const readAhead = () => { while (aheadAt < ahead.length && this._prefetch(ahead[aheadAt][0], ahead[aheadAt][1])) aheadAt++; };
+    // A read-ahead for a folder that was not walked (a filter, a clash) would
+    // hold its slot for ever: it is dropped once its turn has passed.
+    let passed = null;
+    const dropPassed = () => { if (passed && this._pre) for (const k of passed) this._pre.delete(k); passed = null; };
+
+    for (const key of sorted) {
+      dropPassed();
+      passed = aheadOf.get(key) || null;
       if (this.token.cancelled) return;
+      readAhead();
       const l = L.get(key) || null;
       const r = R.get(key) || null;
       // The long name is the item's identity, whichever side holds the short one.
@@ -516,6 +577,7 @@ class Comparer {
       this.stats.scanned++;
       if (this.nodes.length % 200 === 0) this._emit(rel);
     }
+    dropPassed();
   }
 
   _makeNode(idx, rels, name, type, parentIdx, depth, l, r, typeClash) {

@@ -13,7 +13,10 @@
 #      touched, and needs no .git of its own);
 #   3. refuses unless that version is strictly higher than the one on GitHub;
 #   4. makes the clone identical to this folder (node_modules, dist, .git and
-#      .DS_Store excepted);
+#      .DS_Store excepted), then takes out what is for the maintainer and not
+#      for users: CLAUDE.md, AGENTS.md, ETAT_PROJET.md, test/ and docs/ (except
+#      docs/screenshots, which the README shows). Those stay in the ZIP and in
+#      this folder; on GitHub they are removed if they were there;
 #   5. holds version.json back while the GitHub Release vX.Y.Z does not exist:
 #      that file is what makes every installed copy announce an update, and it
 #      must not point at a release with no binaries yet. Publish the Release,
@@ -97,6 +100,13 @@ for e in "$SRC"/* "$SRC"/.[!.]* "$SRC"/..?*; do
   cp -Rp "$e" "$TMP/repo/" || fail "Copying the folder into the clone failed."
 done
 find "$TMP/repo" -path "$TMP/repo/.git" -prune -o -name .DS_Store -type f -exec rm -f {} +
+# Not published (0.9.3): working files for the maintainer and the AI. The ZIP
+# keeps them so any AI can resume the project; GitHub does not need them.
+for n in CLAUDE.md AGENTS.md ETAT_PROJET.md test; do rm -rf "${TMP:?}/repo/$n"; done
+if [ -d "$TMP/repo/docs" ]; then
+  find "$TMP/repo/docs" -mindepth 1 -maxdepth 1 ! -name screenshots -exec rm -rf {} +
+  rmdir "$TMP/repo/docs" 2>/dev/null
+fi
 # Scripts stay executable on GitHub, whatever the unzip tool did to them here.
 find . -path ./.git -prune -o -type f \( -name '*.command' -o -name '*.sh' \) -exec chmod +x {} +
 

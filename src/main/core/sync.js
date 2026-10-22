@@ -75,12 +75,16 @@ class RateMeter {
 // (0.9.1) `serverAlgo` names a second fingerprint (sha256, sha1 or md5) taken
 // from the same pass, to compare with what the SERVER says it holds: one
 // command instead of reading the whole file back over the link.
-function copyStream(srcFs, srcPath, dstFs, dstPath, hasher, onBytes, token, serverAlgo) {
+function copyStream(srcFs, srcPath, dstFs, dstPath, hasher, onBytes, token, serverAlgo, size) {
   return new Promise((resolve, reject) => {
     if (hasher) hasher.init();
     const sha = serverAlgo ? require('crypto').createHash(serverAlgo) : null;
-    const rs = srcFs.createReadStream(srcPath);
-    const ws = dstFs.createWriteStream(dstPath);
+    // (0.9.3) A local file is read with a buffer the size of the file when it is
+    // small (see fitBlock). Only for the local disk: a server's stream takes
+    // other arguments.
+    const hint = (fsx) => (fsx.kind === 'native' && size != null ? { size } : undefined);
+    const rs = srcFs.createReadStream(srcPath, hint(srcFs));
+    const ws = dstFs.createWriteStream(dstPath, hint(dstFs));
     let bytes = 0, settled = false, held = false;
 
     const fail = err => {
@@ -1010,7 +1014,7 @@ class SyncRunner {
           this.done.bytes += b; this.done.workBytes += b;
           acc.bytes += b; acc.work += b;
           this.meter.add(b); this.emit(false);
-        }, this.token, serverAlgo);
+        }, this.token, serverAlgo, srcStat.size);
     } catch (err) {
       try { if (failSafe) await dstFs.unlink(tmp); } catch (_) {}
       throw err;
@@ -1593,7 +1597,7 @@ class SyncRunner {
           if (!viaServer) {
             const verifier = await this._hasher('verify', lane, item.algo);
             const back = await hashStream(fsx, item.path, verifier,
-              b => { this.done.workBytes += b; this.meter.add(b); this.emit(false); }, this.token);
+              b => { this.done.workBytes += b; this.meter.add(b); this.emit(false); }, this.token, item.size);
             if (back !== item.digest) throw new Error(`Checksum mismatch (${item.algo}).`);
           }
           item.ok = true;

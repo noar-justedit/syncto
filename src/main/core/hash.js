@@ -58,10 +58,11 @@ const COPY_ALGO = 'xxh64';
 function algoFor() { return COPY_ALGO; }
 
 // Streams a file through a hasher. Returns the lowercase hex digest.
-function hashStream(fsx, filePath, hasher, onBytes, token) {
+function hashStream(fsx, filePath, hasher, onBytes, token, size) {
   return new Promise((resolve, reject) => {
     hasher.init();
-    const rs = fsx.createReadStream(filePath);
+    // (0.9.3) A buffer the size of a small local file (see fitBlock in native.js).
+    const rs = fsx.createReadStream(filePath, fsx.kind === 'native' && size != null ? { size } : undefined);
     let aborted = false;
     // PAUSE has to work inside a file here too. The copy pass has had this
     // gate since 0.6.4; the read-back never did, so pausing during the

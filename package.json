@@ -1,6 +1,6 @@
 {
   "name": "syncto",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "desktopName": "syncto.desktop",
   "description": "Folder comparison and synchronization for video professionals",
   "main": "src/main/main.js",
@@ -22,8 +22,7 @@
     "build:mac-universal": "electron-builder --config electron-builder.yml --mac",
     "build:win": "electron-builder --config electron-builder.yml --win --x64",
     "build:linux": "bash scripts/build-linux.sh",
-    "pack": "electron-builder --config electron-builder.yml --dir",
-    "shots": "bash scripts/shots-linux.sh"
+    "pack": "electron-builder --config electron-builder.yml --dir"
   },
   "devDependencies": {
     "electron": "^44.7.0",

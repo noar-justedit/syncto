@@ -17,7 +17,7 @@ you want to reproduce; don't translate their C++.
 
 ```bash
 npm install
-npm test          # 1500+ engine checks against real folders in a temp directory
+npm test          # 1600+ engine checks against real folders in a temp directory
 ./build.sh --dev  # run the app
 ```
 
@@ -29,6 +29,10 @@ broke something people rely on.
 `test/run-tests.js` and is deliberately dependency-free: no framework, just
 `ok()` and `eq()` against a scratch directory. Add your case next to the
 closest existing section.
+
+> The `test/` folder is part of the maintainer's working files and is not
+> published in this repository (since 0.9.3). To run or extend the suite, ask
+> the maintainer for it; a pull request without a test will be completed by him.
 
 ## Where things live
 

@@ -4,6 +4,39 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.9.3] — 2026-10-22
+
+### Changed
+
+- **Faster on small files** (audit of 13/10/2026, lot E). A local file smaller
+  than 4 MiB is read and written with a buffer the size of the file instead of
+  a 4 MiB one: 3000 files of 2 to 150 KB copied 25 to 60 % faster in our
+  measurement. Large files are unchanged. Servers are unchanged.
+- **Faster comparison of folders with many sub-folders, on a slow link or a
+  NAS.** While a folder is walked, the listings of its next sub-folders are
+  already requested (eight at most). The comparison order, its results and the
+  way an unreadable folder is reported are unchanged. With 40 ms per listing, 40
+  folders took 470 ms instead of about 1640 ms. On a local disk there is no
+  gain.
+- **`scripts/push_github.command` no longer sends the maintainer's working
+  files to GitHub**: `CLAUDE.md`, `AGENTS.md`, `ETAT_PROJET.md`, the `test/`
+  folder and the `docs/` folder (its `screenshots/` stays, the README shows
+  it). They remain in the project ZIP, so any AI can still resume the work.
+  Where they were already on GitHub, the next push removes them (the history
+  keeps them).
+- README and CONTRIBUTING no longer point readers at files that are not in the
+  repository.
+
+### Removed
+
+- The Linux screenshot scripts (`scripts/shots.js`, `shot-seed.js`,
+  `shot-steps.js`, `shot-steps-lock.js`, `shots-linux.sh`, `shot-dataset.sh`),
+  the `"shots"` npm script and the README section on regenerating the
+  screenshots. They only worked in a Linux container, and one of them deleted
+  folders under `/Volumes/`.
+- Unused code: `certSummary` and `canResumeUpload` in the FTP client, and
+  `hostKeyFor` in the preferences.
+
 ## [0.9.2] — 2026-10-21
 
 ### Added

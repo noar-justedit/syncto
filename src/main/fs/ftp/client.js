@@ -98,17 +98,6 @@ function guardDataTls(ctx, controlFp) {
   });
 }
 
-function certSummary(cert) {
-  if (!cert) return {};
-  const name = o => (o && (o.CN || o.O)) || '';
-  return {
-    subject: name(cert.subject),
-    issuer: name(cert.issuer),
-    validFrom: cert.valid_from || '',
-    validTo: cert.valid_to || '',
-  };
-}
-
 // Months as LIST prints them, for the dates MLSD would have given exactly.
 const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
 
@@ -186,7 +175,6 @@ class FtpRemote {
   get port() { return Number(this.opts.port) || (this.protocol === 'ftps-implicit' ? 990 : 21); }
   get secure() { return this.protocol !== 'ftp'; }
   get alive() { return !!(this.client && !this.client.closed && !this.dead); }
-  get canResumeUpload() { return true; }   // APPE; a server that refuses it fails the item, and the queue restarts it from zero
 
   _q(fn) {
     const guarded = () => {
