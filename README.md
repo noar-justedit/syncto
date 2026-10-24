@@ -326,8 +326,11 @@ remembered; a different one afterwards is refused before the login is sent.
 FTP has no atomic exclusive create and no atomic rename, so the folder lock is
 best effort there: do not rely on it when several machines write the same
 folder. A file's date is kept only by servers that implement `MFMT`, and
-syncto says when one does not. Up to four connections are opened to one
-server.
+syncto says when one does not; such a server gets the files again in MIRROR
+when their dates differ. Each lane uses two connections (control and
+transfer); syncto counts before a run how many the server allows and uses that
+many lanes, down to a single connection. A certificate signed by an authority
+is remembered as such: a home-made certificate in its place is refused.
 
 ### Windows-safe names
 

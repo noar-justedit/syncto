@@ -55,7 +55,7 @@ function isSafeRel(rel) {
 // error list, where the point is to be able to see WHICH entry was refused.
 function assertSafeRel(rel, what) {
   if (isSafeRel(rel)) return String(rel == null ? '' : rel);
-  throw new Error(`${what || 'Path'} refused — it points outside the folder: ${JSON.stringify(String(rel))}`);
+  throw new Error(`${what || 'Path'} refused: it points outside the folder: ${JSON.stringify(String(rel))}`);
 }
 
 // A name, as opposed to a path: one segment, nothing else. Used on what a

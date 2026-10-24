@@ -4,16 +4,87 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
-## [0.9.3] — 2026-10-22
+## [0.9.3] — 2026-10-24
+
+A full review of 0.9.1 to 0.9.3 (bugs, security, window, speed) on top of what
+0.9.3 already held, and what Noar chose from it.
+
+### Security
+
+- **A password saved for an FTPS server was offered in clear to an `ftp://`
+  address naming the same host and port** (a job received from someone else
+  was enough). Saved FTP passwords are now kept per protocol.
+- **A server whose certificate an authority signed could be replaced by an
+  impostor with a home-made one**: it counted as a first visit, was trusted and
+  pinned, and received the password. Such a server is now remembered as
+  "signed by an authority", and a home-made certificate in its place is refused
+  before anything is sent.
+- Forgetting a plain FTP server erased the certificate pinned for the FTPS
+  server on the same host and port.
+- **A server announcing a small file and sending without end filled the
+  destination disk** before the size check at the end. The copy now stops as
+  soon as more than the announced size arrives.
+- A password holding `@` or `/` typed in an address was cut at that character:
+  the rest, or all of it, was written in clear in the preferences and the job.
+- A password inside a received job replaced the one saved for that server.
+- Saving a job wrote through a symbolic link planted as `job.syncto.tmp`.
+- The engine now answers syncto's own window only, the window may change its
+  job and layout in the preferences but not the servers or the remembered keys,
+  and no browser permission (camera, location…) is ever granted.
+- The packaged app is built with Electron fuses: it can no longer be run as a
+  plain Node.js, be handed code through `NODE_OPTIONS` or `--inspect`, or load
+  its code from anywhere but its own archive.
+- `scripts/push_github.command` never sends `node_modules` (at any depth) nor
+  anything that looks like a secret (`.env`, `.npmrc`, `*.p12`, `*.pfx`,
+  `*.pem`, `*.key`, `*.cer`, provisioning profiles, keychains), and lists what
+  it kept back.
+
+### Fixed
+
+- **FTP servers without MLSD (vsftpd, older IIS): a file could be neither
+  replaced nor deleted there**, every time refused as "changed since the
+  comparison". A server that cannot keep dates (no MFMT) now gets the files
+  again in MIRROR when their dates differ, instead of an error.
+- **FTP: a connection the server closed for inactivity was never reopened.**
+  Reading the comparison for a few minutes before SYNCHRONIZE, or a long
+  transfer, made every later file fail and left `.syncto_tmp` files on the
+  server. It is now reopened, and idle connections are kept alive.
+- **FTP: a server computing a checksum for over 60 s stopped the run** (the
+  folder lock could not be refreshed meanwhile). The checksum is now asked on a
+  transfer connection.
+- **FTP: a server limiting the connections per account failed files** (with 4
+  lanes, 8 connections were needed; at 4 nothing was copied). The lanes are now
+  counted before the run, and a server allowing one connection works too.
+- **Cancelling a copy from an SFTP server killed the connection**: the
+  database was not written and the lock stayed on the server.
+- FTP: a "busy, try later" answer to a stat counted as "absent", and a delete
+  was reported done while the file stayed.
+- FTP without MLSD: files over six months old (listed with a date and no time)
+  and files on the other side of a daylight-saving change were copied again at
+  every run. The exact date is asked when it is all that tells them apart.
+- The server window: Cancel and Connect ran off the bottom of the window with a
+  few saved servers; the address, login, key and name of the last server stayed
+  in the fields.
+- Browse on a pair left the server button lit and SYNCHRONIZE offered after
+  replacing a server address.
+- The summary and the phone notification said "read back (xxHash64)" for files
+  the server had checked itself; they now say which.
+- The bell could be green with no topic set.
+- A long overview (thousands of folders) froze the window for about a second
+  at every refresh; past 600 rows only the visible ones are drawn.
 
 ### Changed
+
+- The Settings section "S-FTP" is now "Servers" (it applies to FTP too).
+- No long dash ("—") in messages, labels and tooltips any more.
 
 - **Faster on small files** (audit of 13/10/2026, lot E). A local file smaller
   than 4 MiB is read and written with a buffer the size of the file instead of
   a 4 MiB one: 3000 files of 2 to 150 KB copied 25 to 60 % faster in our
   measurement. Large files are unchanged. Servers are unchanged.
-- **Faster comparison of folders with many sub-folders, on a slow link or a
-  NAS.** While a folder is walked, the listings of its next sub-folders are
+- **Faster comparison of folders with many sub-folders, on a mounted NAS
+  share.** (An `ftp://` or `sftp://` address gains nothing: its listings go one
+  at a time on one connection.) While a folder is walked, the listings of its next sub-folders are
   already requested (eight at most). The comparison order, its results and the
   way an unreadable folder is reported are unchanged. With 40 ms per listing, 40
   folders took 470 ms instead of about 1640 ms. On a local disk there is no
@@ -95,7 +166,7 @@ faster on a slow link, and syncto speaks FTP and FTPS.
   permanent).
 - A file's date is kept only on servers that implement MFMT; the run says so
   when one does not.
-- Up to four connections to one server (one control, up to three transfers).
+- Up to eight connections to one server with four lanes (a control and a transfer connection per lane); 0.9.3 adapts to servers that allow fewer.
 
 ## [0.9.0] — 2026-10-13
 

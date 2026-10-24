@@ -280,6 +280,13 @@ function buildMenu() {
 
 // ── Lifecycle ──────────────────────────────────────────────────────────────
 app.whenReady().then(() => {
+  // (0.9.3) The page asks for no permission (camera, microphone, location,
+  // notifications…); Electron grants them by default. None is granted.
+  try {
+    const { session: ses } = require('electron');
+    ses.defaultSession.setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
+    ses.defaultSession.setPermissionCheckHandler(() => false);
+  } catch (_) {}
   prefs = new Prefs(app.getPath('userData'));
   prefs.load();
 
@@ -333,6 +340,42 @@ async function trashItem(fsx, absPath) {
 }
 
 // ── IPC: basics ────────────────────────────────────────────────────────────
+// (0.9.3) Every channel answers syncto's own page, and nothing else: the main
+// frame of the main window, showing src/renderer/index.html. The page is
+// sandboxed and cannot navigate away (see createWindow), so this is a second
+// lock on the same door, for the day a flaw lets something else in.
+const OWN_PAGE_FILE = path.join(__dirname, '..', 'renderer', 'index.html');
+function fromOwnPage(event) {
+  try {
+    if (!win || win.isDestroyed() || !event || event.sender !== win.webContents) return false;
+    const f = event.senderFrame;
+    if (!f || f !== event.sender.mainFrame || !String(f.url).startsWith('file:')) return false;
+    const a = path.normalize(require('url').fileURLToPath(f.url.split('#')[0].split('?')[0]));
+    const b = path.normalize(OWN_PAGE_FILE);
+    return process.platform === 'win32' || process.platform === 'darwin' ? a.toLowerCase() === b.toLowerCase() : a === b;
+  } catch (_) { return false; }
+}
+{
+  const rawHandle = ipcMain.handle.bind(ipcMain);
+  ipcMain.handle = (channel, fn) => rawHandle(channel, (event, ...args) => {
+    if (!fromOwnPage(event)) throw new Error('Refused: this request did not come from the syncto window.');
+    return fn(event, ...args);
+  });
+  const rawOn = ipcMain.on.bind(ipcMain);
+  ipcMain.on = (channel, fn) => rawOn(channel, (event, ...args) => { if (fromOwnPage(event)) fn(event, ...args); });
+}
+
+// (0.9.3) What the window may change in the preferences: the job it shows, its
+// own layout, and the update notice it dismissed. Servers, passwords and
+// remembered keys go through their own channels, never this one.
+const RENDERER_PREF_KEYS = ['job', 'ui', 'updateDismissedVersion'];
+function rendererPrefsPatch(p) {
+  const out = {};
+  if (!p || typeof p !== 'object' || Array.isArray(p)) return out;
+  for (const k of RENDERER_PREF_KEYS) if (Object.prototype.hasOwnProperty.call(p, k)) out[k] = p[k];
+  return out;
+}
+
 ipcMain.handle('get-version', () => appVersion());
 // NOT prefs.data: it carries servers[].passwordEnc. Those blobs are
 // decryptable by anything running as this user, so handing them to the window
@@ -352,7 +395,7 @@ ipcMain.handle('take-migration-notes', () => {
   if (notes.length) { prefs.data.migrationNotes = []; prefs.save(); }
   return notes;
 });
-ipcMain.handle('save-prefs',  (_, p) => prefs.save(p));
+ipcMain.handle('save-prefs',  (_, p) => prefs.save(rendererPrefsPatch(p)));
 
 // `startIn` opens the picker where the folder used to be. Relinking a renamed
 // folder is the case that needs it: the parent is still there, and the folder

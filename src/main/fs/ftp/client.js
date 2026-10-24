@@ -50,6 +50,8 @@ const { enterActiveMode } = require('./active');
 const { makePassive } = require('./passive');
 
 let certPolicy = null;
+// (0.9.3) What is remembered for a server whose certificate an authority signed.
+const CA_SIGNED = 'authority';
 // { known(host, port) → fingerprint | null, remember(host, port, fingerprint) }
 function setCertPolicy(p) { certPolicy = p || null; }
 
@@ -160,6 +162,16 @@ const HASH_NAMES = { sha256: 'SHA-256', sha1: 'SHA-1', md5: 'MD5', crc32: 'CRC32
 const X_COMMANDS = { sha256: 'XSHA256', sha1: 'XSHA1', md5: 'XMD5', crc32: 'XCRC' };
 const HEX_LEN = { sha256: 64, sha1: 40, md5: 32, crc32: 8 };
 
+// (0.9.3) A 4xx answer ("450 file busy", "421 too many users") says "try again
+// later", not "there is nothing here". Taken for an absence, a file the server
+// was busy with counted as deleted while it stayed on the server.
+function transient(res, what) {
+  if (res && res.code >= 400 && res.code < 500) {
+    throw new RemoteError(`The server could not answer for now (${what}: ${String(res.message || res.code).trim().replace(/[.\s]+$/, '')}). Try again.`,
+      { network: true });
+  }
+}
+
 class FtpRemote {
   // opts: { protocol, host, port, user, password, transferMode, log }
   constructor(opts) {
@@ -178,6 +190,7 @@ class FtpRemote {
 
   _q(fn) {
     const guarded = () => {
+      this.lastUse = Date.now();
       if (this.dead) return Promise.reject(this.dead);
       if (!this.client || this.client.closed) return Promise.reject(Object.assign(new Error('The FTP connection is not open.'), { network: true }));
       return Promise.resolve().then(fn).catch(e => {
@@ -189,9 +202,12 @@ class FtpRemote {
       });
     };
     const run = this._chain.then(guarded, guarded);
-    this._chain = run.then(() => {}, () => {});
+    this._chain = run.then(() => { this.lastUse = Date.now(); }, () => { this.lastUse = Date.now(); });
     return run;
   }
+
+  // (0.9.3) Keeps a silent connection open (FtpFs._keepAlive).
+  noop() { return this._q(() => this.client.send('NOOP')); }
 
   async connect() {
     if (this.alive) return;
@@ -225,7 +241,7 @@ class FtpRemote {
         step('secure');
         try { await client.useTLS(tlsOptions); }
         catch (e) {
-          throw new RemoteError('This server does not accept FTPS (explicit TLS). Try FTPS implicit, SFTP, or — if you accept that the password travels in clear — plain FTP.', { code: 'NO_TLS', fatal: true });
+          throw new RemoteError('This server does not accept FTPS (explicit TLS). Try FTPS implicit, SFTP, or plain FTP if you accept that the password travels in clear.', { code: 'NO_TLS', fatal: true });
         }
       }
       if (this.secure) {
@@ -258,6 +274,19 @@ class FtpRemote {
     const cert = socket && socket.getPeerCertificate ? socket.getPeerCertificate() : null;
     const fp = certFingerprint(cert);
     const known = certPolicy && certPolicy.known ? certPolicy.known(host, port) : null;
+    // (0.9.3) A server whose certificate an authority signed is remembered as
+    // such ("authority"), not by fingerprint (it is renewed every few weeks).
+    // From then on a certificate nobody signed is refused like a changed one:
+    // before, it counted as a first visit and an impostor was pinned.
+    if (known === CA_SIGNED) {
+      if (socket && socket.authorized) return;
+      throw new RemoteError(
+        `The certificate of ${host} has changed since the last connection: it was signed by a certificate authority, ` +
+        `this one is not.\nNow:   ${fp || 'none'}\n` +
+        'Either the server was given a home-made certificate, or something is answering in its place. Nothing was sent. ' +
+        'If the change is expected, forget this server in the connection window and connect again.',
+        { code: 'HOST_KEY_CHANGED', fatal: true, hostKeyChanged: true });
+    }
     if (known) {
       if (known === fp) return;
       throw new RemoteError(
@@ -269,7 +298,7 @@ class FtpRemote {
     if (!fp) throw new RemoteError(`The server ${host} showed no certificate.`, { code: 'NO_CERT', fatal: true });
     // Remembered only for a certificate nobody vouches for: a CA-signed one
     // can be renewed every ninety days without anybody being alarmed.
-    if (!socket.authorized && certPolicy && certPolicy.remember) certPolicy.remember(host, port, fp);
+    if (certPolicy && certPolicy.remember) certPolicy.remember(host, port, socket.authorized ? CA_SIGNED : fp);
   }
 
   async close() {
@@ -327,7 +356,15 @@ class FtpRemote {
       if (out.some(e => e._naive)) {
         let off = null;
         try { off = await this._tzOffset(d, out); } catch (_) {}
-        for (const e of out) { if (e._naive && off) e.mtime -= off; delete e._naive; delete e._hasTime; }
+        // (0.9.3) How far the date can be trusted: to the minute, or only to the
+        // day ("Jan 05  2025": no time for files over six months old). The
+        // comparison asks MDTM (exact, UTC) when such a date is all that tells
+        // two files apart.
+        for (const e of out) {
+          if (e._naive && off) e.mtime -= off;
+          if (e._naive && e.type === 'file') e.approx = e._hasTime ? 'minute' : 'day';
+          delete e._naive; delete e._hasTime;
+        }
       }
       return out;
     });
@@ -358,17 +395,21 @@ class FtpRemote {
           }
         }
         if (res.code >= 500) return null;
+        transient(res, 'MLST');
       }
       const sz = await this.client.sendIgnoringError('SIZE ' + full);
+      transient(sz, 'SIZE');
       if (sz.code === 213) {
         const size = Number(String(sz.message).replace(/^213\s*/, '').trim()) || 0;
         let mtime = 0;
         const md = await this.client.sendIgnoringError('MDTM ' + full);
+        transient(md, 'MDTM');
         if (md.code === 213) mtime = parseFtpTimestamp(String(md.message).replace(/^213\s*/, ''));
         return { name: posix.basename(full), type: 'file', size, mtime };
       }
       // Could still be a folder: CWD into it and back.
       const cwd = await this.client.sendIgnoringError('CWD ' + full);
+      transient(cwd, 'CWD');
       if (cwd.code >= 200 && cwd.code < 300) return { name: posix.basename(full), type: 'folder', size: 0, mtime: 0 };
       return null;
     });
@@ -458,4 +499,4 @@ class FtpRemote {
   }
 }
 
-module.exports = { FtpRemote, setCertPolicy, parseListDate, parseFtpTimestamp, formatFtpTimestamp, certFingerprint, normalize };
+module.exports = { CA_SIGNED, FtpRemote, setCertPolicy, parseListDate, parseFtpTimestamp, formatFtpTimestamp, certFingerprint, normalize };

@@ -135,7 +135,7 @@ async function readDb(fsx, basePath, onDamaged, out, reuse) {
     if (out) { out.digest = digest; out.doc = json; }
     return json;
   } catch (err) {
-    if (onDamaged) onDamaged(`${p} is damaged (${err.message}) — it will be rebuilt from this run.`);
+    if (onDamaged) onDamaged(`${p} is damaged (${err.message}): it will be rebuilt from this run.`);
     return null;
   }
 }
@@ -229,7 +229,7 @@ async function judgePair(dl, dr, damage, pairId) {
   const sr = dr.sessions && dr.sessions[pairId];
   if (!sl || !sr) return { db: new SyncDb(null), reason: 'no database yet' };
   if (sl.stamp !== sr.stamp) {
-    return { db: new SyncDb(null), reason: 'the two database copies disagree — falling back to a plain comparison' };
+    return { db: new SyncDb(null), reason: 'the two database copies disagree: falling back to a plain comparison' };
   }
   return { db: new SyncDb(sl), reason: null };
 }

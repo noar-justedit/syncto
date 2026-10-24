@@ -109,7 +109,13 @@ function expandMacros(phrase, now) {
 // Returns { kind:'native', path } or
 //         { kind:'sftp'|'ftp', protocol, host, port, username, password, ... path }
 function parseLocation(phrase, credentials) {
-  const raw = expandMacros(String(phrase || '').trim());
+  let raw = expandMacros(String(phrase || '').trim());
+  const expanded = raw;
+  // (0.9.3) A password holding "@" or "/" is lifted out before the address is
+  // read, so the host is the real one.
+  let typed = null;
+  const a = splitAuthority(raw);
+  if (a && a.password != null && /[@/]/.test(a.password)) { typed = a.password; raw = a.lead + a.user + '@' + a.after; }
   const m = new RegExp('^(sftp|ftpes|ftps|ftp):\\/\\/(?:([^@/:]+)(?::([^@/]*))?@)?([^/:]+)(?::(\\d+))?(\\/.*)?$', 'i').exec(raw);
   if (m) {
     const protocol = PROTOCOL_OF[m[1].toLowerCase()];
@@ -130,20 +136,22 @@ function parseLocation(phrase, credentials) {
         cred = credentials[`${m[2] || ''}@${host}:${port}`] ||
                (port === 22 ? credentials[`${m[2] || ''}@${host}`] : null) || {};
       } else {
-        cred = credentials[`ftp:${m[2] || ''}@${host}:${port}`] || {};
+        // (0.9.3) Keyed by protocol too: the password of a server saved as FTPS
+        // was offered, in clear, to an ftp:// address naming the same host.
+        cred = credentials[`${protocol}:${m[2] || ''}@${host}:${port}`] || {};
       }
     }
     const loc = {
       kind,
       protocol,
       username  : m[2] || cred.username || '',
-      password  : m[3] || cred.password || '',
+      password  : typed || m[3] || cred.password || '',
       privateKey: kind === 'sftp' ? (cred.privateKey || null) : null,
       passphrase: kind === 'sftp' ? (cred.passphrase || '') : '',
       host,
       port,
       path      : m[6] || '/',
-      phrase    : raw,
+      phrase    : expanded,
     };
     if (kind === 'ftp') loc.transferMode = cred.transferMode === 'active' ? 'active' : 'passive';
     return loc;
@@ -227,6 +235,14 @@ class FsPool {
     return { fs: backend, path: backend.resolve(loc.path), kind: loc.kind };
   }
 
+  // (0.9.3) One lane that could not take its transfer connection.
+  async closeLane(loc, i) {
+    const key = `${poolKey(loc)}#${i}`;
+    const b = this.sftp.get(key);
+    this.sftp.delete(key);
+    if (b) { try { await b.close(); } catch (_) {} }
+  }
+
   async closeLanes() {
     for (const [key, b] of [...this.sftp.entries()]) {
       if (!key.includes('#')) continue;
@@ -252,8 +268,34 @@ function redactLocation(phrase) {
   const s = String(phrase == null ? '' : phrase);
   // (0.9.0) Leading spaces allowed, as parseLocation allows them: " sftp://u:p@h"
   // connected (it trims) but was not redacted, and the password was saved.
-  return s.replace(new RegExp('^(\\s*' + REMOTE_SCHEME + ')([^@/:]+):([^@/]*)@', 'i'), '$1$2@');
+  // (0.9.3) A password holding "@" or "/" ("p@ss", "pa/ss") was cut at its
+  // first one: the rest stayed in the file, or all of it. splitAuthority finds
+  // where the password really ends.
+  const a = splitAuthority(s);
+  if (!a || a.password == null) return s;
+  return a.lead + a.user + '@' + a.after;
 }
 
-module.exports = { FsPool, parseLocation, expandMacros, redactLocation, isServerKind, isServerAddress, kindOf, poolKey,
+// (0.9.3) "scheme://user:password@host[:port]/path" taken apart where a
+// password may itself hold "@" or "/". The password ends at the first "@"
+// that is followed by something shaped like a host ("name", "name:21", then
+// "/" or the end). Returns null when this is not a server address with a user,
+// and password null when there is no password.
+function splitAuthority(phrase) {
+  const s = String(phrase == null ? '' : phrase);
+  const head = new RegExp('^(\\s*' + REMOTE_SCHEME + ')([^@/:\\s]+)', 'i').exec(s);
+  if (!head) return null;
+  const lead = head[1], user = head[2];
+  let i = head[0].length;
+  if (s[i] === '@') return { lead, user, password: null, after: s.slice(i + 1) };
+  if (s[i] !== ':') return null;
+  const hostShape = /^[^/@:\s]+(?::\d+)?(?:\/|$)/;
+  for (let at = s.indexOf('@', i + 1); at >= 0; at = s.indexOf('@', at + 1)) {
+    const after = s.slice(at + 1);
+    if (hostShape.test(after)) return { lead, user, password: s.slice(i + 1, at), after };
+  }
+  return null;
+}
+
+module.exports = { FsPool, parseLocation, expandMacros, redactLocation, splitAuthority, isServerKind, isServerAddress, kindOf, poolKey,
                    PROTOCOL_OF, DEFAULT_PORT, REMOTE_SCHEME };

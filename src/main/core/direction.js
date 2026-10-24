@@ -141,7 +141,7 @@ function directionByChange(node, dirs, dbEntry, cfg) {
     // could not carry, it is one of the two files gone bad (same size, same
     // date). Doing nothing ignored it at every run.
     if (node.cat === CAT.DIFFERENT) {
-      return { dir: 'conflict', msg: 'The contents differ, although neither side changed since the last synchronization — one of the two copies may be damaged.' };
+      return { dir: 'conflict', msg: 'The contents differ, although neither side changed since the last synchronization: one of the two copies may be damaged.' };
     }
     if (dbEntry && dbEntry.synced) return { dir: 'none' };
     return { dir: 'conflict', msg: 'Cannot determine a direction: no change since the last synchronization.' };

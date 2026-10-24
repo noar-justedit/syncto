@@ -615,7 +615,7 @@ class Session {
       const doomed = this.nodes.filter(n => n.active &&
         n.op === (otherSide === 'left' ? OP.DELETE_LEFT : OP.DELETE_RIGHT));
       if (doomed.length) {
-        return `The ${e.missingRoot} folder is not there (${e.path}), which makes that side look empty — ` +
+        return `The ${e.missingRoot} folder is not there (${e.path}), which makes that side look empty, ` +
           `and this job would delete ${doomed.length} item${doomed.length > 1 ? 's' : ''} from the ${otherSide} side because of it. ` +
           `Reconnect the drive or fix the path, then compare again.`;
       }
@@ -653,7 +653,7 @@ class Session {
       // Not a refusal: a notice the confirmation shows before the run.
       return (runner.noTrash || []).map(t => ({
         notice: true, noTrash: true, side: t.side, path: redactLocation(t.path),
-        message: `No trash on ${redactLocation(t.path)} — what is removed or replaced there will be deleted permanently.`,
+        message: `No trash on ${redactLocation(t.path)}: what is removed or replaced there will be deleted permanently.`,
       }));
     } catch (err) {
       return [{ message: err.message, preflight: !!err.preflight }];
@@ -666,15 +666,29 @@ class Session {
   async _openLanes(job) {
     const want = Math.max(1, Math.min(10, Number((job.sync || {}).transferLanes) || 1));
     const out = { left: [this.left], right: [this.right] };
+    // (0.9.3) An FTP lane needs two connections (control and transfer). Each is
+    // opened before the run, the first lane's first: a server limiting the
+    // connections per account gets the lanes it can take, instead of failing
+    // files halfway through.
+    const warm = async (b) => { if (b && b.fs && typeof b.fs.prewarm === 'function') await b.fs.prewarm(); };
+    for (const which of ['left', 'right']) {
+      const side = this[which];
+      if (side && side.kind !== 'native') { try { await warm(side); } catch (_) { continue; } }
+    }
     if (want <= 1) return out;
     for (const which of ['left', 'right']) {
       const side = this[which];
       const loc = which === 'left' ? this.leftLoc : this.rightLoc;
       if (!side || side.kind === 'native' || !loc) continue;
+      if (side.fs && side.fs._ctlOnly) continue;      // not even one transfer connection: one lane
       for (let i = 1; i < want; i++) {
+        let lane = null;
         try {
-          out[which].push(await this.pool.openLane(loc, i));
+          lane = await this.pool.openLane(loc, i);
+          await warm(lane);
+          out[which].push(lane);
         } catch (err) {
+          if (lane) { try { await this.pool.closeLane(loc, i); } catch (_) {} }
           break;
         }
       }
@@ -693,7 +707,7 @@ class Session {
     const fatal = this.errors.filter(e => e.fatal);
     if (fatal.length) {
       throw new Error(`The comparison could not read ${fatal.length === 1 ? 'a folder' : fatal.length + ' folders'} ` +
-        `(${fatal[0].path}: ${fatal[0].message}) — synchronizing now could delete healthy files. Fix the error and compare again.`);
+        `(${fatal[0].path}: ${fatal[0].message}): synchronizing now could delete healthy files. Fix the error and compare again.`);
     }
 
     // A base folder that is GONE reads as an empty side, and an empty side plus
@@ -859,7 +873,7 @@ class Session {
         // database, puts it straight back. The report used to say "Completed
         // successfully" over exactly that.
         const msg = `The synchronization database could not be written (${err.message}). ` +
-          `The next run will not know what this one did — two-way jobs may resurrect deleted files. ` +
+          `The next run will not know what this one did: two-way jobs may resurrect deleted files. ` +
           `Check the permissions and the free space on both folders.`;
         run.notes.push(msg);
         run.errors.push({ rel: '.syncto.db', message: msg });
@@ -870,6 +884,7 @@ class Session {
     return {
       counters : run.counters,
       verified : run.verified || 0,
+      serverChecked: run.serverChecked || 0,
       plan     : run.plan,
       errors   : run.errors,
       notes    : run.notes,
@@ -1125,7 +1140,7 @@ class MultiSession {
   // Returns { ok, path } or { ok:false, error }.
   locate(gidx, side) {
     const { s, idx } = this._split(gidx);
-    if (!s || !s.nodes || !s.nodes[idx]) return { ok: false, error: 'That row is no longer there — compare again.' };
+    if (!s || !s.nodes || !s.nodes[idx]) return { ok: false, error: 'That row is no longer there: compare again.' };
     const node = s.nodes[idx];
     const base = side === 'left' ? s.left : s.right;
     if (!base) return { ok: false, error: 'That side is not open.' };
@@ -1137,7 +1152,7 @@ class MultiSession {
 
     const state = side === 'left' ? node.left : node.right;
     if (!state || !state.exists) {
-      return { ok: false, error: 'That item does not exist on this side — nothing to reveal.',
+      return { ok: false, error: 'That item does not exist on this side: nothing to reveal.',
                fallback: base.path };
     }
     const rel = (side === 'left' ? node.relL : node.relR) || node.rel;
@@ -1299,7 +1314,7 @@ class MultiSession {
         onStatus: st => onProgress && onProgress({
           phase: 'lock', current: st.takingOver
             ? `Taking over an abandoned lock from ${st.holder}…`
-            : `Waiting for ${st.holder}${st.secondsLeft != null ? ` — ${st.secondsLeft}s` : ''}`,
+            : `Waiting for ${st.holder}${st.secondsLeft != null ? `: ${st.secondsLeft}s` : ''}`,
           waiting: true, holder: st.holder, secondsLeft: st.secondsLeft,
         }),
       });
@@ -1323,7 +1338,7 @@ class MultiSession {
     const perPair = [];
     let doneBytes = 0, doneFiles = 0, doneItems = 0, cancelled = false;
     const counters = { files: 0, bytes: 0, deleted: 0, folders: 0, moved: 0, renamed: 0, errors: 0, failed: 0, dated: 0 };
-    let verified = 0;
+    let verified = 0, serverChecked = 0;
     const allErrors = [], allNotes = [], checksumFiles = [];
     const dbSaved = [];
 
@@ -1406,6 +1421,7 @@ class MultiSession {
       // res.errors.length again would double every one of them.
       for (const k of Object.keys(counters)) counters[k] += res.counters[k] || 0;
       verified += res.verified || 0;
+      serverChecked += res.serverChecked || 0;
       allErrors.push(...res.errors.map(e => Object.assign({}, e, {
         rel: multi ? `[${pairLabel(pr)}] ${e.rel}` : e.rel,
       })));
@@ -1431,7 +1447,7 @@ class MultiSession {
 
 
     if (lockLost) {
-      const msg = `The folder lock was lost during the run (${lockLost}) — another machine took over, ` +
+      const msg = `The folder lock was lost during the run (${lockLost}): another machine took over, ` +
         `so syncto stopped to avoid two engines writing the same files. Nothing after that point was done.`;
       allNotes.push(msg);
       allErrors.push({ rel: '.syncto.lock', message: msg });
@@ -1444,7 +1460,7 @@ class MultiSession {
       const h = locks.hiccups();
       if (h.count) {
         allNotes.push(`The network stopped answering ${h.count} time${h.count > 1 ? 's' : ''} ` +
-          `during the run (longest ${Math.round(h.worstMs / 1000)} s). The run rode it out — ` +
+          `during the run (longest ${Math.round(h.worstMs / 1000)} s). The run rode it out: ` +
           `a folder is only given up after ${Math.round(DETECT_ABANDONED_MS / 1000)} s of complete silence.`);
       }
     }
@@ -1452,6 +1468,7 @@ class MultiSession {
     return {
       counters,
       verified,
+      serverChecked,
       errors: allErrors,
       notes : allNotes,
       cancelled,
@@ -1550,7 +1567,7 @@ const MAX_TEXT_BYTES = 128 * 1024 * 1024;
 async function readText(fsx, p) {
   const st = await fsx.stat(p);
   if (!st || st.type !== 'file') return null;
-  if (st.size > MAX_TEXT_BYTES) throw new Error(`${p} is larger than ${MAX_TEXT_BYTES / 1048576} MB — not a checksum list.`);
+  if (st.size > MAX_TEXT_BYTES) throw new Error(`${p} is larger than ${MAX_TEXT_BYTES / 1048576} MB: not a checksum list.`);
   return new Promise((resolve, reject) => {
     const chunks = [];
     let total = 0;

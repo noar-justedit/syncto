@@ -27,7 +27,7 @@
 const fs   = require('fs');
 const path = require('path');
 const secrets = require('./secrets');
-const { redactLocation, DEFAULT_PORT, PROTOCOL_OF } = require('./fs/afs');
+const { redactLocation, splitAuthority, DEFAULT_PORT, PROTOCOL_OF } = require('./fs/afs');
 
 // The protocol a saved server uses. Entries written before FTP existed have none: SFTP.
 const PROTOCOLS = ['sftp', 'ftp', 'ftps', 'ftps-implicit'];
@@ -185,10 +185,12 @@ function credentialMap(servers) {
   for (const s of (servers || [])) {
     if (!s || !s.host || !s.username) continue;
     const protocol = protocolOf(s);
-    // (0.9.1) An FTP server's entry is keyed "ftp:user@host:port", always with
-    // the port, and no SSH key travels with it.
+    // (0.9.1) An FTP server's entry is keyed with its port, and no SSH key
+    // travels with it. (0.9.3) And with its protocol ("ftps:user@host:21"):
+    // under one "ftp:" key, an FTPS password was offered in clear to an
+    // ftp:// address naming the same host and port.
     if (protocol !== 'sftp') {
-      out[`ftp:${s.username}@${s.host}:${Number(s.port) || DEFAULT_PORT[protocol]}`] = {
+      out[`${protocol}:${s.username}@${s.host}:${Number(s.port) || DEFAULT_PORT[protocol]}`] = {
         username  : s.username,
         password  : secrets.decrypt(s.passwordEnc),
         transferMode: s.transferMode === 'active' ? 'active' : 'passive',
@@ -304,9 +306,12 @@ function migratePrefs(raw) {
 // credentials all gone, with no message; for a .syncto it meant the user's own
 // job file destroyed.
 function writeFileAtomic(file, text) {
-  const tmp = file + '.tmp';
+  // (0.9.3) A fresh name, created exclusively: a symbolic link planted as
+  // "job.syncto.tmp" in a shared folder made the save write through it, onto
+  // whatever file it pointed at. An exclusive create never follows a link.
+  const tmp = `${file}.${process.pid}.${require('crypto').randomBytes(4).toString('hex')}.tmp`;
   try {
-    fs.writeFileSync(tmp, text, 'utf8');
+    fs.writeFileSync(tmp, text, { encoding: 'utf8', flag: 'wx' });
     fs.renameSync(tmp, file);
   } catch (err) {
     try { fs.unlinkSync(tmp); } catch (_) {}
@@ -546,7 +551,9 @@ class Prefs {
     if (!this.data.knownHosts || typeof this.data.knownHosts !== 'object') return;
     const p = protocol || 'sftp';
     if (p === 'sftp') this.data.knownHosts[`${host}:${Number(port) || 22}`] = '';
-    else this.data.knownHosts[`ftps:${host}:${Number(port) || DEFAULT_PORT[p]}`] = '';
+    // (0.9.3) Plain FTP has no certificate: forgetting a plain FTP entry erased
+    // the one pinned for the FTPS server on the same host and port.
+    else if (p === 'ftps' || p === 'ftps-implicit') this.data.knownHosts[`ftps:${host}:${Number(port) || DEFAULT_PORT[p]}`] = '';
   }
 
   // ── ntfy ─────────────────────────────────────────────────────────────────
@@ -586,9 +593,13 @@ class Prefs {
 // credential store, keyed by user@host, so the job keeps working.
 function captureUrlPassword(data, phrase) {
   // (0.9.0) Leading spaces allowed, as parseLocation allows them.
-  const m = /^\s*(sftp|ftpes|ftps|ftp):\/\/([^@/:]+):([^@/]*)@([^/:]+)(?::(\d+))?/i.exec(String(phrase || ''));
-  if (!m || !m[3]) return phrase;
-  const [, scheme, username, password, host, port] = m;
+  // (0.9.3) A password may hold "@" or "/" (splitAuthority).
+  const a = splitAuthority(phrase);
+  if (!a || !a.password) return a && a.password === '' ? redactLocation(phrase) : phrase;
+  const hp = /^([^/:]+)(?::(\d+))?/.exec(a.after);
+  if (!hp) return phrase;
+  const scheme = /([a-z]+):\/\/$/i.exec(a.lead)[1];
+  const username = a.user, password = a.password, host = hp[1], port = hp[2];
   const protocol = PROTOCOL_OF[scheme.toLowerCase()];
   if (!Array.isArray(data.servers)) data.servers = [];
   const p = Number(port) || DEFAULT_PORT[protocol];
@@ -599,8 +610,13 @@ function captureUrlPassword(data, phrase) {
               name: host, host, protocol, port: p, username, keyPath: '' };
     data.servers.push(entry);
   }
-  const enc = secrets.encrypt(password);
-  if (enc) { entry.passwordEnc = enc; entry.savePassword = true; }
+  // (0.9.3) A password already saved for this server is never replaced from an
+  // address: a job received from someone else carrying "ftpes://admin:x@nas"
+  // overwrote the real one. A changed password is entered in the server window.
+  if (!entry.passwordEnc) {
+    const enc = secrets.encrypt(password);
+    if (enc) { entry.passwordEnc = enc; entry.savePassword = true; }
+  }
   return redactLocation(phrase);
 }
 

@@ -41,6 +41,8 @@ const DEFAULT_PORT = { ftp: 21, ftps: 21, 'ftps-implicit': 990 };
 const SCHEME = { ftp: 'ftp', ftps: 'ftpes', 'ftps-implicit': 'ftps' };
 const MAX_TRANSFER_CONNECTIONS = 4;
 const STREAM_BUFFER = 1024 * 1024;
+// (0.9.3) A connection silent this long gets a NOOP (servers drop idle ones).
+const KEEPALIVE_MS = 30000;
 
 function normalize(p) {
   let s = String(p || '');
@@ -84,7 +86,9 @@ class FtpFs {
 
   // The error that killed the control connection, if any (the pool looks at it
   // to decide whether this backend can be reused).
-  get dead() { return (this.ctl && this.ctl.dead) || null; }
+  // (0.9.3) A control connection the server closed is reopened (see _c): only
+  // a failed reopening makes this backend dead.
+  get dead() { return this._deadForGood || null; }
   get hasFileIds() { return false; }
   supportsTrash() { return false; }
 
@@ -104,8 +108,46 @@ class FtpFs {
     });
   }
 
+  // (0.9.3) The control connection, reopened when the server closed it. FTP
+  // servers drop a connection that said nothing for a few minutes (vsftpd 300 s,
+  // FileZilla Server 120 s): the time spent reading the comparison before
+  // SYNCHRONIZE, or a long transfer on another connection. It was never
+  // reopened, and every later command failed with "not open".
+  async _c() {
+    if (this.closing) throw new Error('The FTP connection was closed.');
+    const c = this.ctl;
+    if (c && c.alive) return c;
+    if (!c) { await this.connect(); return this.ctl; }
+    if (!this._reopening) {
+      this._reopening = (async () => {
+        const r = this._remote();
+        try { await r.connect(); }
+        catch (e) { if (e.fatal || e.hostKeyChanged) this._deadForGood = e; throw e; }
+        const old = this.ctl;
+        this.ctl = r;
+        try { if (old) old.close(); } catch (_) {}
+        return r;
+      })().finally(() => { this._reopening = null; });
+    }
+    return this._reopening;
+  }
+
+  // (0.9.3) A NOOP on the connections that have been silent for a while, so
+  // the server does not drop them in the first place.
+  _keepAlive() {
+    if (this._kaTimer) return;
+    this._kaTimer = setInterval(() => {
+      if (this.closing) return;
+      const idle = r => r && r.alive && Date.now() - (r.lastUse || 0) > KEEPALIVE_MS;
+      if (idle(this.ctl) && !this._ctlOnlyBusy) this.ctl.noop().catch(() => {});
+      for (const x of this.xfers) if (!x.busy && !x.shared && idle(x.remote)) x.remote.noop().catch(() => {});
+    }, KEEPALIVE_MS / 2);
+    if (this._kaTimer.unref) this._kaTimer.unref();
+  }
+
   connect() {
     if (this._connectPromise) return this._connectPromise;
+    this._keepAlive();
     const ctl = this._remote();
     this.ctl = ctl;
     this._connectPromise = ctl.connect().catch(err => {
@@ -120,6 +162,8 @@ class FtpFs {
 
   async close() {
     this.closing = true;
+    if (this._kaTimer) { clearInterval(this._kaTimer); this._kaTimer = null; }
+    for (const w of (this._waiters || []).splice(0)) w();
     const all = [this.ctl].concat(this.xfers.map(x => x.remote));
     this.xfers = [];
     this.ctl = null;
@@ -129,23 +173,49 @@ class FtpFs {
 
   // ── Transfer connections ────────────────────────────────────────────────
   async _lease() {
-    if (this.closing) throw new Error('The FTP connection was closed.');
-    if (this.dead) throw this.dead;
-    this.xfers = this.xfers.filter(x => x.busy || x.remote.alive);
-    let x = this.xfers.find(c => !c.busy);
-    if (x) { x.busy = true; return x; }
-    if (this.xfers.length >= MAX_TRANSFER_CONNECTIONS) {
-      throw new RemoteError('Too many transfers at once on this FTP server.', { network: false });
+    for (;;) {
+      if (this.closing) throw new Error('The FTP connection was closed.');
+      this.xfers = this.xfers.filter(x => x.busy || x.remote.alive);
+      let x = this.xfers.find(c => !c.busy);
+      if (x) { x.busy = true; return x; }
+      // (0.9.3) A server that allows no second connection for this account:
+      // transfers go over the control connection, one thing at a time.
+      if (this._ctlOnly) {
+        if (!this._ctlOnlyBusy) {
+          this._ctlOnlyBusy = true;
+          return { remote: await this._c(), busy: true, shared: true };
+        }
+        await new Promise(res => (this._waiters = this._waiters || []).push(res));
+        continue;
+      }
+      if (this.xfers.length < MAX_TRANSFER_CONNECTIONS) {
+        const remote = this._remote();
+        x = { remote, busy: true };
+        this.xfers.push(x);
+        try { await remote.connect(); return x; }
+        catch (err) {
+          this.xfers = this.xfers.filter(c => c !== x);
+          // (0.9.3) The server allows no more connections for this account
+          // (421). With a transfer connection already open, wait for it; with
+          // none, use the control connection. Four lanes asked for eight
+          // connections and a server limited to six failed files, to four
+          // copied nothing.
+          if (this.closing || err.fatal || err.hostKeyChanged) throw err;
+          if (!this.xfers.length) { this._ctlOnly = true; continue; }
+        }
+      }
+      await new Promise(res => (this._waiters = this._waiters || []).push(res));
     }
-    const remote = this._remote();
-    x = { remote, busy: true };
-    this.xfers.push(x);
-    try { await remote.connect(); }
-    catch (err) {
-      this.xfers = this.xfers.filter(c => c !== x);
-      throw err;
-    }
-    return x;
+  }
+
+  // (0.9.3) Opens this backend's first transfer connection now, so a run knows
+  // before it starts how many lanes the server really allows (MultiSession
+  // keeps a lane only when this succeeds).
+  async prewarm() {
+    const x = await this._lease();
+    const shared = !!x.shared;
+    this._release(x, false);
+    if (shared) throw new RemoteError('This FTP server allows no second connection for this account.', { network: false });
   }
 
   // A connection that carried a transfer which did not end cleanly is closed:
@@ -153,10 +223,14 @@ class FtpFs {
   _release(x, bad) {
     if (!x) return;
     x.busy = false;
-    if (bad || !x.remote.alive) {
+    if (x.shared) {
+      this._ctlOnlyBusy = false;
+    } else if (bad || !x.remote.alive) {
       this.xfers = this.xfers.filter(c => c !== x);
       try { x.remote.close(); } catch (_) {}
     }
+    const w = this._waiters && this._waiters.shift();
+    if (w) w();
   }
 
   // ── Metadata ────────────────────────────────────────────────────────────
@@ -175,7 +249,7 @@ class FtpFs {
   async _canEnter(dir) {
     const t = this._entered.get(dir);
     if (t && Date.now() - t < 20000) return true;
-    const ok = await this.ctl.canEnter(dir);
+    const ok = await (await this._c()).canEnter(dir);
     if (ok) this._entered.set(dir, Date.now());
     return ok;
   }
@@ -187,14 +261,14 @@ class FtpFs {
   async stat(p) {
     const full = normalize(p);
     if (full === '/') return { type: 'folder', size: 0, mtime: 0, mode: null, id: null };
-    const st = await this.ctl.stat(full);
+    const st = await (await this._c()).stat(full);
     if (st) return this._map(st);
     const dir = posix.dirname(full);
     if (!(await this._canEnter(dir))) {
       // The folder around it is not enterable. Either it is not there (then
       // neither is this, and that is a plain "absent"), or it is there and
       // this account may not look inside: an error, never an absence.
-      if (await this.ctl.stat(dir)) {
+      if (await (await this._c()).stat(dir)) {
         throw new RemoteError(`The folder ${dir} cannot be entered with this account.`, { fatal: true });
       }
     }
@@ -204,15 +278,17 @@ class FtpFs {
   async exists(p) { return (await this.stat(p)) !== null; }
 
   async readdir(p) {
-    const list = await this.ctl.list(normalize(p));
+    const list = await (await this._c()).list(normalize(p));
     return list.map(e => {
       const m = this._map(e);
-      return { name: e.name, type: m.type, size: m.size, mtime: m.mtime, id: null };
+      const out = { name: e.name, type: m.type, size: m.size, mtime: m.mtime, id: null };
+      if (e.approx) out.approx = e.approx;
+      return out;
     });
   }
 
   async realpath(p) {
-    if (p == null || p === '.') return this.ctl.home();
+    if (p == null || p === '.') return (await this._c()).home();
     return normalize(p);
   }
 
@@ -242,26 +318,26 @@ class FtpFs {
     for (const part of parts) {
       cur += '/' + part;
       if (this._dirs && this._dirs.has(cur)) continue;
-      const st = await this.ctl.stat(cur);
+      const st = await (await this._c()).stat(cur);
       if (st) {
         if (st.type !== 'folder') throw Object.assign(new Error(`${cur} exists and is not a folder.`), { code: 'ENOTDIR' });
         this._remember(cur);
         continue;
       }
       try {
-        await this.ctl.mkdir(cur);
+        await (await this._c()).mkdir(cur);
       } catch (e) {
-        if (!(await this.ctl.stat(cur))) throw e;     // lost a race, that is fine
+        if (!(await (await this._c()).stat(cur))) throw e;     // lost a race, that is fine
       }
       this._remember(cur);
     }
   }
 
-  async unlink(p) { return this.ctl.unlink(normalize(p)); }
+  async unlink(p) { return (await this._c()).unlink(normalize(p)); }
 
   async rmdir(p) {
     this._forget(normalize(p));
-    return this.ctl.rmdir(normalize(p));
+    return (await this._c()).rmdir(normalize(p));
   }
 
   // Replacing a file: most servers (every Unix one) rename onto an existing
@@ -272,18 +348,18 @@ class FtpFs {
     const src = normalize(from), dst = normalize(to);
     this._forget(src);
     try {
-      await this.ctl.rename(src, dst);
+      await (await this._c()).rename(src, dst);
       return;
     } catch (e) {
       if (!(await this.exists(src)) || !(await this.exists(dst))) throw e;
     }
     const parked = dst + '.syncto_old';
     try { await this.unlink(parked); } catch (_) {}
-    await this.ctl.rename(dst, parked);
+    await (await this._c()).rename(dst, parked);
     try {
-      await this.ctl.rename(src, dst);
+      await (await this._c()).rename(src, dst);
     } catch (err) {
-      try { await this.ctl.rename(parked, dst); } catch (_) {}
+      try { await (await this._c()).rename(parked, dst); } catch (_) {}
       throw err;
     }
     try { await this.unlink(parked); } catch (_) {}
@@ -296,14 +372,14 @@ class FtpFs {
   async renameStrict(from, to) {
     const dst = normalize(to);
     if (await this.exists(dst)) throw Object.assign(new Error(`${dst} already exists.`), { code: 'EEXIST' });
-    return this.ctl.rename(normalize(from), dst);
+    return (await this._c()).rename(normalize(from), dst);
   }
 
   async setMTime(p, mtimeMs) {
-    if (!this.ctl.canSetMTime) {
+    if (!(await this._c()).canSetMTime) {
       throw new Error('This FTP server cannot set the modification date of a file (no MFMT).');
     }
-    return this.ctl.setMTime(normalize(p), mtimeMs);
+    return (await this._c()).setMTime(normalize(p), mtimeMs);
   }
 
   async chmod() { /* permissions are not carried over FTP */ }
@@ -315,16 +391,26 @@ class FtpFs {
   async writeExclusive(p, buf) {
     const full = normalize(p);
     if (await this.exists(full)) throw Object.assign(new Error(`${full} already exists.`), { code: 'EEXIST' });
-    await this.ctl.upload(Readable.from([Buffer.from(buf)]), full, 0);
+    await (await this._c()).upload(Readable.from([Buffer.from(buf)]), full, 0);
   }
 
   async appendByte(p, byte) {
-    await this.ctl.upload(Readable.from([Buffer.from(byte, 'utf8')]), normalize(p), 1);
+    await (await this._c()).upload(Readable.from([Buffer.from(byte, 'utf8')]), normalize(p), 1);
   }
 
   // ── Checksums computed by the server ────────────────────────────────────
-  hashAlgos() { return this.ctl.hashAlgos(); }
-  serverHash(p, algo, size) { return this.ctl.serverHash(normalize(p), algo, size); }
+  async hashAlgos() { return (await this._c()).hashAlgos(); }
+  // (0.9.3) On a transfer connection, never on the control one: a server takes
+  // minutes to read a 10 GB clip, and the control connection is also what
+  // keeps the folder lock alive. Blocked for over 60 s, the lock looked
+  // abandoned and the run stopped.
+  async serverHash(p, algo, size) {
+    const lease = await this._lease();
+    let bad = false;
+    try { return await lease.remote.serverHash(normalize(p), algo, size); }
+    catch (e) { bad = true; throw e; }
+    finally { this._release(lease, bad); }
+  }
 
   // ── Streams ─────────────────────────────────────────────────────────────
   // basic-ftp drives the data connection itself: it wants a destination to

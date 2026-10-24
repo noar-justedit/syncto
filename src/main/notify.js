@@ -139,24 +139,29 @@ function forRun(res, jobName) {
 
   let title, tags, priority;
   if (res.cancelled) {
-    title = `${name} — cancelled`;
+    title = `${name}: cancelled`;
     lines.push('Stopped before the end');
     tags = 'x'; priority = 3;
   } else if (res.lockLost) {
-    title = `${name} — stopped`;
+    title = `${name}: stopped`;
     lines.push('Another machine took the folder');
     tags = 'warning'; priority = 4;
   } else if (errors) {
-    title = `${name} — ${errors} error${errors > 1 ? 's' : ''}`;
+    title = `${name}: ${errors} error${errors > 1 ? 's' : ''}`;
     const first = res.errors[0];
-    if (first) lines.push(`First: ${first.rel ? first.rel + ' — ' : ''}${first.message}`);
+    if (first) lines.push(`First: ${first.rel ? first.rel + ': ' : ''}${first.message}`);
     tags = 'warning'; priority = 4;
   } else {
     // The whole point of the notification is that nobody is at the screen. So
     // it says what was checked, not just that it ended — "done" tells a DIT
     // waiting on a two-hour backup nothing they can act on.
-    title = `${name} — done`;
-    if (res.verified) {
+    title = `${name}: done`;
+    // (0.9.3) Files a server checked itself were not read back: said so.
+    const byServer = Math.min(res.verified || 0, res.serverChecked || 0);
+    if (res.verified && byServer) {
+      const back = res.verified - byServer;
+      lines.push(`✓ ${res.verified} verified: ${back ? back + ' read back (xxHash64), ' : ''}${byServer} checked by the server`);
+    } else if (res.verified) {
       lines.push(`✓ ${res.verified} read back and verified (xxHash64)`);
     } else if (!files) {
       lines.push('Both sides already matched');

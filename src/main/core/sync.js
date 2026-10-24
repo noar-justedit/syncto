@@ -127,6 +127,12 @@ function copyStream(srcFs, srcPath, dstFs, dstPath, hasher, onBytes, token, serv
         if (!pauseTimer) pauseTimer = setInterval(checkPause, 150);
       }
       bytes += chunk.length;
+      // (0.9.3) More bytes than the size the source gave: stop now. A server
+      // announcing 5 bytes and sending without end filled the destination disk
+      // before the size check at the end said no.
+      if (size != null && Number.isFinite(Number(size)) && bytes > Number(size)) {
+        return fail(new Error(`Size mismatch during copy (more than the ${size} bytes the source announced).`));
+      }
       if (hasher) { try { hasher.update(chunk); } catch (e) { return fail(e); } }
       if (sha) sha.update(chunk);
       if (onBytes) onBytes(chunk.length);
@@ -284,7 +290,7 @@ class SyncRunner {
     const unproven = (this.toVerify || []).filter(i => !i.ok);
     for (const i of unproven) this.applied.delete(i.rel);
     if (unproven.length) {
-      this.notes.push(`${unproven.length} file${unproven.length > 1 ? 's were' : ' was'} copied but not read back — ` +
+      this.notes.push(`${unproven.length} file${unproven.length > 1 ? 's were' : ' was'} copied but not read back: ` +
         `${unproven.length > 1 ? 'they are' : 'it is'} left out of the database, so the next run checks ` +
         `${unproven.length > 1 ? 'them' : 'it'} again.`);
     }
@@ -331,7 +337,7 @@ class SyncRunner {
       const st = await fsx.stat(this.abs(side, rel));
       if (!st) return;                     // absent: everything below will be created by us
       if (st.type === 'symlink') {
-        throw new Error(`"${rel}" is a link on this side — nothing is written through it.`);
+        throw new Error(`"${rel}" is a link on this side: nothing is written through it.`);
       }
       this._checkedDirs.add(key);
     }
@@ -711,8 +717,8 @@ class SyncRunner {
       const shown = blockers.slice(0, 3).map(n => `"${n}"`).join(', ');
       const more  = blockers.length > 3 ? ` and ${blockers.length - 3} more` : '';
       throw new Error(`The folder could not be removed: it still contains ${shown}${more}. ` +
-        `Those items are outside this synchronization — excluded by a filter, a symbolic link, ` +
-        `or the volume's own recycle bin — so syncto will not delete them. Remove the folder by hand ` +
+        `Those items are outside this synchronization (excluded by a filter, a symbolic link, ` +
+        `or the volume's own recycle bin), so syncto will not delete them. Remove the folder by hand ` +
         `if you want it gone.`);
     }
 
@@ -762,20 +768,26 @@ class SyncRunner {
     // Same instant, read twice: a FAT drive across a daylight-saving change
     // reports it one hour apart (it stores local time), 2 s apart at most
     // otherwise.
-    const sameTime = (a, b) => {
+    const sameTime = (a, b, tol) => {
+      const t = tol || 2000;
       const d = Math.abs((a || 0) - (b || 0));
-      return d <= 2000 || Math.abs(d - 3600000) <= 2000;
+      return d <= t || Math.abs(d - 3600000) <= t;
     };
+    // (0.9.3) A server that lists dates to the minute (FTP without MLSD) gave
+    // the comparison "12:30:00" and the stat here "12:30:41": every replace and
+    // every delete there was refused as "changed since the comparison".
+    const fsx = (this.side(side) || {}).fs;
+    const coarse = Math.max(2000, ((fsx && fsx.timeResolutionSec) || 0) * 1000);
     const seen = n[side] || {};
     const changed = !seen.exists ||
       (seen.size != null && st.size !== seen.size) ||
-      (seen.mtime && st.mtime && !sameTime(st.mtime, seen.mtime));
+      (seen.mtime && st.mtime && !sameTime(st.mtime, seen.mtime, coarse));
     if (!changed) return null;
     if (srcStat && st.size === srcStat.size && srcStat.mtime && sameTime(st.mtime, srcStat.mtime)) return 'same';
     if (!seen.exists) {
-      throw new Error('A file appeared at the destination since the comparison — not replaced. Compare again.');
+      throw new Error('A file appeared at the destination since the comparison: not replaced. Compare again.');
     }
-    throw new Error('This file changed since the comparison — left untouched. Compare again.');
+    throw new Error('This file changed since the comparison: left untouched. Compare again.');
   }
 
   // (0.8.8) What one attempt added to the progress figures, taken back when it
@@ -863,10 +875,10 @@ class SyncRunner {
 
     if (srcType === 'folder') {
       throw new Error('The source is a folder while the target is not. syncto will not turn a ' +
-        'file into a folder in one step — remove one of the two by hand and run again.');
+        'file into a folder in one step: remove one of the two by hand and run again.');
     }
     if (srcType === 'other') {
-      throw new Error('The source is neither a file, a folder nor a symbolic link — a device, a ' +
+      throw new Error('The source is neither a file, a folder nor a symbolic link: a device, a ' +
         'socket or a pipe. There is nothing to copy.');
     }
 
@@ -887,7 +899,7 @@ class SyncRunner {
           // different one, so keep the names and drop the explanation.
           const m = /it still contains (.+?)\. Those items/.exec(err.message || '');
           const what = m ? ` It still holds ${m[1]}.` : ` (${err.message})`;
-          throw new Error('The target holds a real folder where the source has a symbolic link — ' +
+          throw new Error('The target holds a real folder where the source has a symbolic link: ' +
             'an application bundle copied here by a tool that followed its links.' + what +
             ' Remove that folder on the target side and run again.');
         }
@@ -1158,7 +1170,7 @@ class SyncRunner {
     // seen under another spelling (a case-only difference) is not a clash.
     const there = await fsx.stat(to);
     if (there && !(st.id && there.id === st.id) && from.toLowerCase() !== to.toLowerCase()) {
-      throw new Error('A file appeared at the new name since the comparison — not replaced. Compare again.');
+      throw new Error('A file appeared at the new name since the comparison: not replaced. Compare again.');
     }
     await fsx.mkdir(fsx.dirname(to));
     try {
@@ -1217,7 +1229,7 @@ class SyncRunner {
       const v = this.versionerFor(side);
       if (!v) {
         throw new Error('Versioning is selected but no revision folder is set for the ' + side +
-          ' side — the file about to be replaced would be lost.');
+          ' side: the file about to be replaced would be lost.');
       }
       await v.archive(fsx, p, this.relOn(node, side));
       this._archived.add(once);
@@ -1258,6 +1270,7 @@ class SyncRunner {
       notes    : this.notes,
       checksums: this.checksums,
       verified : this.toVerify.filter(v => v.ok).length,
+      serverChecked: this.serverChecked || 0,
       counters : this.done,
       plan     : this.plan,
       cancelled: !!this.token.cancelled,
@@ -1363,7 +1376,7 @@ class SyncRunner {
       // Wording matters here: this is the message that has to get a user
       // moving again, so it names the folder and the exact controls to change.
       const err = new Error(
-        `The recycle bin does not work on ${where} — network volumes usually have none. ` +
+        `The recycle bin does not work on ${where}: network volumes usually have none. ` +
         `syncto will not delete or replace anything permanently while "Move to the trash" is ` +
         `selected. In Settings › Deletion, set "Default action" to "Delete permanently".`);
       err.preflight = true;
@@ -1528,12 +1541,12 @@ class SyncRunner {
     });
 
     if (this.done.dated) {
-      this.notes.push(`${this.done.dated} file${this.done.dated > 1 ? 's were' : ' was'} identical, byte for byte — ` +
+      this.notes.push(`${this.done.dated} file${this.done.dated > 1 ? 's were' : ' was'} identical, byte for byte: ` +
         'only the date was corrected, nothing was copied.');
     }
     if (this.done.already) {
       this.notes.push(`${this.done.already} file${this.done.already > 1 ? 's were' : ' was'} already at the destination ` +
-        '(same size and date), written there since the comparison — another pair or job — and left as is.');
+        '(same size and date), written there since the comparison by another pair or job, and left as is.');
     }
 
     // A checksum list is a list of fingerprints that were CHECKED. With the

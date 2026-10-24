@@ -262,8 +262,8 @@ class Comparer {
     // `missingRoot` is what tells sync() this side is empty because it is gone,
     // not because it is genuinely empty. A missing base folder plus a mirror is
     // a mass deletion of the healthy side — see Session.sync().
-    if (!lRoot) this.errors.push({ path: this.left.path,  message: 'Left folder not found — it will be created.',  missingRoot: 'left'  });
-    if (!rRoot) this.errors.push({ path: this.right.path, message: 'Right folder not found — it will be created.', missingRoot: 'right' });
+    if (!lRoot) this.errors.push({ path: this.left.path,  message: 'Left folder not found: it will be created.',  missingRoot: 'left'  });
+    if (!rRoot) this.errors.push({ path: this.right.path, message: 'Right folder not found: it will be created.', missingRoot: 'right' });
 
     // One event before anything is walked, and one after. Without the first,
     // nothing reaches the window until the 200th item — on a slow share or a
@@ -386,10 +386,10 @@ class Comparer {
           this.errors.push({
             path: base.fs.join(dir, e.name),
             message: !byCase
-              ? `"${e.name}" and "${other}" become the same name for Windows ("${windowsSafe(e.name.normalize('NFC'))}") — neither is synchronized. Rename one of them.`
+              ? `"${e.name}" and "${other}" become the same name for Windows ("${windowsSafe(e.name.normalize('NFC'))}"): neither is synchronized. Rename one of them.`
               : other
-              ? `"${e.name}" and "${other}" differ only by upper/lower case — neither is synchronized. Rename one of them.`
-              : `"${e.name}" differs only by upper/lower case from another name here — not synchronized.`,
+              ? `"${e.name}" and "${other}" differ only by upper/lower case: neither is synchronized. Rename one of them.`
+              : `"${e.name}" differs only by upper/lower case from another name here: not synchronized.`,
           });
           map.delete(key);
           map.collided.add(key);
@@ -670,6 +670,24 @@ class Comparer {
     }
 
     // timeSize
+    // (0.9.3) A date read from a plain FTP listing (no MLSD) is only good to
+    // the minute, or to the day for a file over six months old, and the
+    // server's time zone was measured once (a summer date and a winter date
+    // cannot both be right). When such a date is all that separates two files
+    // of the same size, the exact one is asked (MDTM). Before, a whole old
+    // archive was copied again at every run.
+    if ((l.approx || r.approx) && l.size === r.size && compareTime(l.mtime, r.mtime, tol, shifts) !== 'equal') {
+      const d = Math.abs(l.mtime - r.mtime);
+      if (l.approx === 'day' || r.approx === 'day' || Math.abs(d - 3600000) <= 61000) {
+        for (const [e, sideName, base, relSide] of [[l, 'left', this.left, rels.l], [r, 'right', this.right, rels.r]]) {
+          if (!e.approx) continue;
+          try {
+            const st = await base.fs.stat(base.fs.join(base.path, ...relSide.split('/')));
+            if (st && st.mtime) { e.mtime = st.mtime; node[sideName].mtime = st.mtime; delete e.approx; }
+          } catch (_) { /* the listing's date stands */ }
+        }
+      }
+    }
     const res = compareTime(l.mtime, r.mtime, tol, shifts);
     if (res === 'equal') {
       if (l.size === r.size) node.cat = CAT.EQUAL;

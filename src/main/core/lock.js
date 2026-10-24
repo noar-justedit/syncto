@@ -284,7 +284,7 @@ class DirLock {
       const silent = Date.now() - this._lastBeat;
       if (silent >= this.detectMs) {
         return this._fail(`the lock file has not been refreshed for ${
-          Math.round(silent / 1000)} s — the folder may have been taken over`);
+          Math.round(silent / 1000)} s: the folder may have been taken over`);
       }
       if (this._beating) return;
       this._beating = (async () => {

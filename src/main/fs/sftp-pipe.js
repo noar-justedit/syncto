@@ -323,6 +323,10 @@ class PipelinedReader extends Readable {
       this.pending.delete(this.wantSeq);
       this.wantSeq++;
       if (!this.push(buf)) this.flowing = false;
+      // (0.9.3) The consumer may destroy the stream from inside push() (a
+      // cancelled copy does): the handle is gone then, and going on issued a
+      // read on nothing, which killed the whole SFTP connection.
+      if (this.destroyed) return;
     }
     if (this.wantSeq >= this.eofSeq && !this.inflight) {
       this._unwatch();
@@ -337,7 +341,7 @@ class PipelinedReader extends Readable {
     // Never further ahead of the consumer than twice the depth: a server that
     // holds back one reply and answers all the later ones cannot make the
     // waiting pieces fill the memory.
-    while (this.inflight < this.limit && this.nextSeq - this.wantSeq < this.limit * 2 && this.nextSeq < this.eofSeq && this.reqPos < this.end && !this.failure) this._issue();
+    while (!this.destroyed && this.handle && this.inflight < this.limit && this.nextSeq - this.wantSeq < this.limit * 2 && this.nextSeq < this.eofSeq && this.reqPos < this.end && !this.failure) this._issue();
   }
 
   _read() {

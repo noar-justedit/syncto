@@ -178,7 +178,7 @@ function markMissingPaths(list) {
     const inp = row.querySelector(e.side === 'left' ? '.pr-left' : '.pr-right');
     if (!inp) continue;
     inp.classList.add('gone');
-    inp.dataset.tip = 'This folder is not there — Browse to point this row somewhere else';
+    inp.dataset.tip = 'This folder is not there: Browse to point this row somewhere else';
   }
 }
 
@@ -283,7 +283,7 @@ function renderJobTitle() {
   renderJobActions();
   const el = $('job-title');
   if (state.jobPath) el.textContent = state.job.name || 'Untitled';
-  else el.innerHTML = '<span class="unsaved">Untitled — not saved yet</span>';
+  else el.innerHTML = '<span class="unsaved">Untitled, not saved yet</span>';
 }
 
 function jobToUi() {
@@ -422,7 +422,7 @@ function renderEmptyState(res) {
   // (0) A run emptied the list: everything landed, the run is not over yet
   // (a read-back or the clean-up may still be going).
   if (state.busy === 'sync') {
-    set('', ICO_EMPTY_FOLDER, 'Everything is on its way', 'The list is empty — the run finishes below.');
+    set('', ICO_EMPTY_FOLDER, 'Everything is on its way', 'The list is empty: the run finishes below.');
     return;
   }
 
@@ -598,8 +598,8 @@ function rowHtml(r, absIndex) {
   let tipText = r.catMsg || CAT_LABEL[r.cat] || r.cat;
   if (r.mv) {
     tipText = r.op.endsWith('From')
-      ? `detected move — will be renamed to ${r.mv}, nothing re-copied`
-      : `detected move — will be renamed from ${r.mv}, nothing re-copied`;
+      ? `detected move: will be renamed to ${r.mv}, nothing re-copied`
+      : `detected move: will be renamed from ${r.mv}, nothing re-copied`;
   }
   // (0.9.0) A name this run changes for Windows: said on the row, in blue
   // like every rename.
@@ -764,8 +764,8 @@ function openCtx(x, y, r) {
   // builds a lighter row) — offer it and let the main process answer.
   const off = v => v === null ? ' off' : '';
   const reveal =
-    `<div class="ctx-it${off(r.l)}" data-k="rv-left">${CTX_REVEAL}<span class="lbl">${REVEAL_VERB} — source</span></div>` +
-    `<div class="ctx-it${off(r.r)}" data-k="rv-right">${CTX_REVEAL}<span class="lbl">${REVEAL_VERB} — destination</span></div>` +
+    `<div class="ctx-it${off(r.l)}" data-k="rv-left">${CTX_REVEAL}<span class="lbl">${REVEAL_VERB}: source</span></div>` +
+    `<div class="ctx-it${off(r.r)}" data-k="rv-right">${CTX_REVEAL}<span class="lbl">${REVEAL_VERB}: destination</span></div>` +
     `<div class="ctx-sep"></div>`;
 
   const m = document.createElement('div');
@@ -774,8 +774,8 @@ function openCtx(x, y, r) {
   m.innerHTML = reveal +
     `<div class="ctx-it" data-k="temp">${r.active ? CTX_SQ : CTX_SQ_CHK}<span class="lbl">Exclude temporarily</span><span class="key">Space</span></div>` +
     `<div class="ctx-sep"></div>` +
-    `<div class="ctx-it">${CTX_OK}<span class="lbl">Keep — add to the include filter</span><span class="sub-arrow">▶</span><div class="ctx-sub"><div class="ctx-head">Keep, from now on…</div>${sub('include')}</div></div>` +
-    `<div class="ctx-it">${CTX_KO}<span class="lbl">Skip — add to the exclude filter</span><span class="sub-arrow">▶</span><div class="ctx-sub"><div class="ctx-head">Skip, from now on…</div>${sub('exclude')}</div></div>`;
+    `<div class="ctx-it">${CTX_OK}<span class="lbl">Keep: add to the include filter</span><span class="sub-arrow">▶</span><div class="ctx-sub"><div class="ctx-head">Keep, from now on…</div>${sub('include')}</div></div>` +
+    `<div class="ctx-it">${CTX_KO}<span class="lbl">Skip: add to the exclude filter</span><span class="sub-arrow">▶</span><div class="ctx-sub"><div class="ctx-head">Skip, from now on…</div>${sub('exclude')}</div></div>`;
   document.body.appendChild(m);
 
   // Keep it on screen.
@@ -974,7 +974,7 @@ function invalidateComparison(reason) {
   state.view.scope = null;
   renderScopeBar();
   const note = $('status-note');
-  if (note) note.textContent = reason || 'Folders changed — compare again.';
+  if (note) note.textContent = reason || 'Folders changed: compare again.';
   if (!state.busy) setBusyUi(false);
   refreshGrid(true).catch(() => {});
   refreshOverview().catch(() => {});
@@ -1013,7 +1013,7 @@ function planKeyOf(job) {
 function invalidateIfPlanChanged() {
   if (!state.comparedPlan) return false;
   if (planKeyOf(state.job) === state.comparedPlan) return false;
-  invalidateComparison('Settings changed — compare again before synchronizing.');
+  invalidateComparison('Settings changed: compare again before synchronizing.');
   return true;
 }
 
@@ -1037,7 +1037,7 @@ function lockPlan(on, run) {
 function invalidateIfPairsChanged() {
   if (!state.comparedPairs) return;
   if (pairsKey(completePairs()) === state.comparedPairs) return;
-  invalidateComparison('The folders changed — compare again before synchronizing.');
+  invalidateComparison('The folders changed: compare again before synchronizing.');
 }
 
 async function doCompare() {
@@ -1068,12 +1068,12 @@ async function doCompare() {
   if (!res.ok && res.offline) {
     // A drive that is not mounted: said in so many words, and the folders
     // that live on it turn red in the pair rows.
-    invalidateComparison('Volume not mounted — connect it and compare again.');
+    invalidateComparison('Volume not mounted: connect it and compare again.');
     showError(res.offline.length > 1 ? 'Volumes not mounted' : 'Volume not mounted', res.error);
     offerRelinkForJob(true);
     return;
   }
-  if (!res.ok) { invalidateComparison('Comparison failed — compare again.'); showError('Comparison failed', res.error); return; }
+  if (!res.ok) { invalidateComparison('Comparison failed: compare again.'); showError('Comparison failed', res.error); return; }
 
   // Aborted halfway: the tree covers only the part that was scanned. Showing
   // it is fine, arming SYNCHRONIZE on it is not — the engine refuses anyway,
@@ -1084,7 +1084,7 @@ async function doCompare() {
     await refreshOverview();
     renderStats();
     setBusyUi(false);
-    $('status-note').textContent = 'Comparison stopped before the end — the list below is partial. Compare again to synchronize.';
+    $('status-note').textContent = 'Comparison stopped before the end: the list below is partial. Compare again to synchronize.';
     return;
   }
 
@@ -1099,7 +1099,7 @@ async function doCompare() {
   renderAutoUi();
 
   const notes = [];
-  if (res.movesFound) notes.push(`${res.movesFound} move${res.movesFound > 1 ? 's' : ''} detected — will rename, not re-copy`);
+  if (res.movesFound) notes.push(`${res.movesFound} move${res.movesFound > 1 ? 's' : ''} detected: will rename, not re-copy`);
   if (res.dbNote) notes.push(res.dbNote);
   if (res.errors && res.errors.length) notes.push(`${res.errors.length} folder(s) could not be read`);
   if (notes.length) $('status-note').textContent += ' · ' + notes.join(' · ');
@@ -1175,7 +1175,7 @@ function showRelink(list, quiet) {
     : 'A folder this job uses is missing';
   $('rl-sub').innerHTML =
     `${esc(named)} points at ${n > 1 ? 'folders that are' : 'a folder that is'} not there. ` +
-    `Point ${n > 1 ? 'them' : 'it'} at the right place now, or open the job as it is and fix it later — ` +
+    `Point ${n > 1 ? 'them' : 'it'} at the right place now, or open the job as it is and fix it later: ` +
     `comparing against a missing folder plans a copy of everything into it.`;
   renderRelinkList();
   $('ov-relink').classList.add('open');
@@ -1218,7 +1218,7 @@ $('rl-list').addEventListener('click', async e => {
     const side = item.side === 'left' ? 'Source folder' : 'Destination folder';
     // Opens where the folder used to be: in the renamed case the parent is
     // still there, with the folder under its new name sitting in it.
-    const p = await API.browseFolder(`${side} — ${item.label || 'pair'}`, item.path);
+    const p = await API.browseFolder(`${side}: ${item.label || 'pair'}`, item.path);
     if (!p) return;
     item.chosen = p;
   }
@@ -1239,7 +1239,7 @@ async function applyRelink() {
   }
   jobToUi();
   persist();
-  invalidateComparison('Folders changed — compare again.');
+  invalidateComparison('Folders changed: compare again.');
   renderMissingBadge(relinkEntries.length - done.length);
   relinkEntries = [];
   recheckPathsSoon();
@@ -1267,7 +1267,7 @@ function renderMissingBadge(n) {
   const allOffline = (state.missingPaths || []).length && (state.missingPaths || []).every(e => e.offline);
   el.textContent = n <= 0 ? ''
     : allOffline ? `${vols.join(', ')} not mounted`
-    : `${n} folder${n > 1 ? 's' : ''} missing — fix`;
+    : `${n} folder${n > 1 ? 's' : ''} missing: fix`;
 }
 
 // ── Lock files a previous run left behind ──────────────────────────────────
@@ -1288,7 +1288,7 @@ function renderLockBadge() {
   el.style.display = n > 0 ? '' : 'none';
   el.disabled = false;
   el.textContent = n > 0
-    ? `${n} leftover lock${n > 1 ? 's' : ''} — clear`
+    ? `${n} leftover lock${n > 1 ? 's' : ''}: clear`
     : '';
 }
 
@@ -1323,7 +1323,7 @@ async function clearStaleLocksNow() {
   renderLockBadge();
   const bits = [];
   if (removed) bits.push(`${removed} leftover lock${removed > 1 ? 's' : ''} removed`);
-  if (alive)   bits.push(`${alive} still in use — left alone`);
+  if (alive)   bits.push(`${alive} still in use: left alone`);
   if (failed)  bits.push(`${failed} could not be removed`);
   $('status-note').textContent = bits.join(' · ') || 'Nothing to clear.';
 }
@@ -1428,7 +1428,7 @@ function askConfirm() {
       'Projects that use them (Premiere, Resolve, After Effects…) will lose their links.');
   }
   if (s.renameRight) warns.push(`${s.renameRight} item${s.renameRight > 1 ? 's' : ''} in the destination will be renamed for Windows.`);
-  if (s.conflicts) warns.push(`${s.conflicts} conflict${s.conflicts > 1 ? 's' : ''} will be skipped — resolve them by clicking their action cell.`);
+  if (s.conflicts) warns.push(`${s.conflicts} conflict${s.conflicts > 1 ? 's' : ''} will be skipped: resolve them by clicking their action cell.`);
   const changed = s.createLeft + s.createRight + s.updateLeft + s.updateRight + removals;
   if (changed >= 10 && changed > 0.5 * s.rows && (removals || s.updateLeft + s.updateRight)) {
     warns.push('More than half of the compared items are about to change. Check that both folders are the ones you meant.');
@@ -1521,13 +1521,13 @@ async function doCompareQuiet() {
   }
   // (0.9.0) Stopped with CANCEL is not a failure, and is not said as one.
   if (res && res.cancelled) {
-    invalidateComparison('The check after the run was stopped — compare again to synchronize.');
+    invalidateComparison('The check after the run was stopped: compare again to synchronize.');
     setRecheck(null);
     return;
   }
   if (!res || !res.ok) {
     invalidateComparison('Compare again to synchronize.');
-    setRecheck('ko', 'The folders could not be compared again — press Compare when you are ready.');
+    setRecheck('ko', 'The folders could not be compared again: press Compare when you are ready.');
     return;
   }
   state.stats = res.stats;
@@ -1948,6 +1948,7 @@ function renderVerifyLine(res) {
   const box = $('sum-verify');
   const copied = (res.counters && res.counters.files) || 0;
   const verified = res.verified || 0;
+  const byServer = Math.min(verified, res.serverChecked || 0);
 
   if (!copied && !verified) { box.style.display = 'none'; return; }
   box.style.display = '';
@@ -1964,6 +1965,15 @@ function renderVerifyLine(res) {
     head = `${verifyFailures} file${verifyFailures > 1 ? 's' : ''} failed verification`;
     sub = 'They were read back and did not match what was written. They are listed below, left '
         + 'out of the checksum list, and will be looked at again on the next run.';
+  } else if (verified && byServer) {
+    // (0.9.3) A server that computes checksums is asked, not read back: the
+    // line said "read back (xxHash64)" for files no one read back.
+    const back = verified - byServer;
+    kind = 'good'; ico = ICO_SHIELD;
+    head = `${verified} file${verified > 1 ? 's' : ''} verified`;
+    sub = (back ? `${back} read back from their final location and compared with the xxHash64 fingerprint taken while writing; ` : '')
+        + `${byServer} checked by the server itself: it computed the checksum of what it holds, `
+        + 'compared with the one taken while writing. Not one differed.';
   } else if (verified) {
     kind = 'good'; ico = ICO_SHIELD;
     head = `${verified} file${verified > 1 ? 's' : ''} read back and verified`;
@@ -1974,7 +1984,7 @@ function renderVerifyLine(res) {
     // servers in the settings. This line is the one people trust after a long
     // backup, so it has to say plainly that there is no proof this time.
     kind = 'warn'; ico = ICO_WARN;
-    head = `${copied} file${copied > 1 ? 's' : ''} copied — not read back`;
+    head = `${copied} file${copied > 1 ? 's' : ''} copied, not read back`;
     sub = 'Reading files back is turned off for servers in the settings, so these copies were '
         + 'checked for their size only, like any ordinary transfer. Turn it back on for a run '
         + 'you need proof of.';
@@ -1999,8 +2009,8 @@ function showSummary(res) {
   $('sum-ico').className = 'sum-ico ' + kind;
   $('sum-ico').innerHTML = kind === 'ok' ? ICO_OK : kind === 'err' ? ICO_ERR : ICO_CANCEL;
   $('sum-h1').textContent = res.cancelled ? 'Cancelled'
-    : res.lockLost ? 'Stopped — another machine took the folder'
-    : res.stopReason === 'rename' ? 'Stopped — a name could not be changed for Windows'
+    : res.lockLost ? 'Stopped: another machine took the folder'
+    : res.stopReason === 'rename' ? 'Stopped: a name could not be changed for Windows'
     : stopped ? 'Stopped at the first error'
     : failed ? `Completed with ${failed} error${failed > 1 ? 's' : ''}` : 'Completed successfully';
   $('sum-h2').textContent = `${state.job.name} · ${fmtEta(res.durationMs / 1000)}`;
@@ -2028,11 +2038,11 @@ function showSummary(res) {
   // (0.9.0) A list cut short says so: 60 rename notes hid the one saying why
   // the run stopped, and nothing showed there was more.
   const more = (n, shown) => n > shown
-    ? `<div class="err-item more">…and ${fmtCount(n - shown, true)} more — Copy gives the whole list.</div>` : '';
+    ? `<div class="err-item more">…and ${fmtCount(n - shown, true)} more: Copy gives the whole list.</div>` : '';
   $('sum-errors').style.display = failed ? '' : 'none';
   $('sum-errors-body').innerHTML = res.errors.slice(0, 60)
-    .map(e => `<div class="err-item">${esc(e.rel)} — ${esc(e.message)}</div>`).join('') + more(res.errors.length, 60);
-  setCopyBlock('sum-errors-body', res.errors.map(e => `${e.rel} — ${e.message}`),
+    .map(e => `<div class="err-item">${esc(e.rel)}: ${esc(e.message)}</div>`).join('') + more(res.errors.length, 60);
+  setCopyBlock('sum-errors-body', res.errors.map(e => `${e.rel}: ${e.message}`),
     copyHeader(`${res.errors.length} error${res.errors.length > 1 ? 's' : ''}`));
 
   // (0.9.0) Why a run stopped comes first.
@@ -2162,8 +2172,8 @@ async function doVerify() {
   const bad = res.results.filter(r => r.status !== 'ok');
   $('vf-bad').style.display = bad.length ? '' : 'none';
   $('vf-bad-body').innerHTML = bad.slice(0, 60)
-    .map(r => `<div class="err-item">${esc(r.rel)} — ${esc(r.status)}</div>`).join('');
-  setCopyBlock('vf-bad-body', bad.map(r => `${r.rel} — ${r.status}`),
+    .map(r => `<div class="err-item">${esc(r.rel)}: ${esc(r.status)}</div>`).join('');
+  setCopyBlock('vf-bad-body', bad.map(r => `${r.rel}: ${r.status}`),
     copyHeader(`verify · ${bad.length} problem${bad.length > 1 ? 's' : ''}`));
 }
 
@@ -2202,7 +2212,7 @@ function bind() {
     if (state.busy) return;   // locked anyway; the run follows its own plan
     uiToJob();
     if (t.id === 'st-safenames' && state.stats && planKeyOf(state.job) !== state.comparedPlan) {
-      invalidateComparison('Windows-safe names changed — compare again.');
+      invalidateComparison('Windows-safe names changed: compare again.');
     } else invalidateIfPlanChanged();
   });
 
@@ -2307,9 +2317,15 @@ function bind() {
     if (bl || br) {
       const p = await API.browseFolder(bl ? 'Source folder' : 'Destination folder');
       if (!p) return;
-      row.querySelector(bl ? '.pr-left' : '.pr-right').value = p;
+      const input = row.querySelector(bl ? '.pr-left' : '.pr-right');
+      input.value = p;
+      // (0.9.3) As if typed: the server button goes out when a server address
+      // is replaced by a local folder, and a comparison of the old folders
+      // stops offering SYNCHRONIZE.
+      lightServerButton(input);
       uiToJob();
       persist();
+      onPathChanged();
     }
   });
   $('ps-add').addEventListener('click', () => {
@@ -2570,7 +2586,7 @@ async function closeJob(p) {
   }
   renderRecent();
   renderJobActions();
-  $('status-note').textContent = `${name} closed — the file is still on disk: ${target}`;
+  $('status-note').textContent = `${name} closed: the file is still on disk: ${target}`;
 }
 
 // CLOSE is only meaningful while a job file is open. NEW is what clears an
@@ -2580,8 +2596,8 @@ function renderJobActions() {
   if (!b) return;
   b.disabled = !state.jobPath;
   b.dataset.tip = state.jobPath
-    ? 'Close this job — the file stays on disk'
-    : 'Nothing to close — no job file is open';
+    ? 'Close this job: the file stays on disk'
+    : 'Nothing to close: no job file is open';
 }
 
 const CTX_OPEN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></svg>';
@@ -2627,7 +2643,7 @@ const ICON_JOB = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" str
 function renderRecent() {
   const box = $('recent-list');
   if (!state.recent.length) {
-    box.innerHTML = '<div class="recent-empty">No recent jobs yet — save one and it will appear here.</div>';
+    box.innerHTML = '<div class="recent-empty">No recent jobs yet: save one and it will appear here.</div>';
     return;
   }
   box.innerHTML = state.recent.map(r =>
@@ -2677,7 +2693,7 @@ async function refreshOverview() {
     box.innerHTML = ren
       ? `<div class="ov-empty">${fmtCount(ren, true)} name${ren > 1 ? 's' : ''} to change for Windows, nothing to copy.</div>`
       : nothing
-      ? '<div class="ov-empty">Nothing to do — both sides already match.<br>Tick “Show identical” to list the folders anyway.</div>'
+      ? '<div class="ov-empty">Nothing to do: both sides already match.<br>Tick “Show identical” to list the folders anyway.</div>'
       : '<div class="ov-empty">Both folders are empty.</div>';
     return;
   }
@@ -2697,7 +2713,7 @@ async function refreshOverview() {
     ? '<div class="ov-reset">Click the empty space below to <b>show everything</b> again.</div>'
     : '';
   box.classList.toggle('can-reset', viewIsNarrowed());
-  box.innerHTML = ov.rows.map(g => {
+  const items = ov.rows.map(g => {
     const head = (multi && g.first)
       ? `<div class="ov-pairhead"><span class="n">${g.pair}</span>${esc(bidiLabel(g.pairLabel))}</div>`
       : '';
@@ -2713,7 +2729,7 @@ async function refreshOverview() {
     <div class="ov-row${g.idx === state.selIdx ? ' sel' : ''}${g.active ? '' : ' off'}${scoped ? ' scoped' : ''}${state.ovSel.has(key) ? ' picked' : ''}"
          data-idx="${g.idx}" data-name="${esc(g.name)}" data-rel="${esc(g.rel)}" data-type="${g.type}"
          data-pair="${g.pairIdx}" data-active="${g.active ? 1 : 0}" data-kids="${g.kids ? 1 : 0}"
-         data-tip="${g.pairLabel ? '[' + esc(bidiLabel(g.pairLabel)) + '] ' : ''}${esc(g.rel)} — ${fmtCount(g.items, true)} item${g.items === 1 ? '' : 's'}, ${esc(fmtBytes(g.bytes))}.${g.kids ? ' Click to select · double-click to open it and show it in the grid.' : ' Click to select · double-click to show it in the grid.'}">
+         data-tip="${g.pairLabel ? '[' + esc(bidiLabel(g.pairLabel)) + '] ' : ''}${esc(g.rel)}: ${fmtCount(g.items, true)} item${g.items === 1 ? '' : 's'}, ${esc(fmtBytes(g.bytes))}.${g.kids ? ' Click to select · double-click to open it and show it in the grid.' : ' Click to select · double-click to show it in the grid.'}">
       <div class="ov-chk"><input type="checkbox" ${g.active ? 'checked' : ''} data-act="toggle"></div>
       <div class="ov-pct"><div class="bar" style="width:${g.pct}%"></div><div class="lbl">${g.pct}%</div></div>
       <div class="ov-name" style="padding-left:${g.depth * 11}px">${twist}${g.type === 'folder' ? ICON_FOLDER : ICON_FILE}<span>${esc(g.name)}</span></div>
@@ -2722,7 +2738,81 @@ async function refreshOverview() {
     </div>`;
   // The hint sits at the END of the list, next to the empty space it is
   // talking about, not above the rows where it would push them down.
-  }).join('') + back;
+  });
+  // (0.9.3) A few thousand folders at the top of a job made this one
+  // innerHTML of several megabytes, rebuilt every second during a run: the
+  // window froze for about a second each time. Past OV_VIRTUAL_MIN rows only
+  // what can be seen is in the page (as in the grid), between two spacers.
+  state.ovItems = items;
+  state.ovHeads = ov.rows.map(g => !!(multi && g.first));
+  state.ovBack = back;
+  if (items.length < OV_VIRTUAL_MIN) {
+    state.ovVirtual = null;
+    box.innerHTML = items.join('') + back;
+    return;
+  }
+  ovLayout();
+  drawOvWindow();
+}
+
+// (0.9.3) The overview, drawn by window when it is long (see refreshOverview).
+const OV_VIRTUAL_MIN = 600;
+const OV_OVERSCAN = 30;
+// Row and heading heights, measured from the page once (the theme sets them).
+function ovMeasure() {
+  if (state.ovRowH) return;
+  const box = $('ov-list');
+  const probe = document.createElement('div');
+  probe.style.cssText = 'position:absolute;visibility:hidden;left:0;right:0;top:0';
+  probe.innerHTML = '<div class="ov-row"><div class="ov-chk"></div><div class="ov-pct"><div class="lbl">0%</div></div><div class="ov-name"><span>x</span></div><div class="ov-items">0</div><div class="ov-bytes">0</div></div>' +
+                    '<div class="ov-pairhead"><span class="n">1</span>x</div>';
+  box.appendChild(probe);
+  const row = probe.children[0], head = probe.children[1];
+  const cs = getComputedStyle(head);
+  state.ovRowH = row.getBoundingClientRect().height || 26;
+  state.ovHeadH = head.getBoundingClientRect().height + parseFloat(cs.marginTop || 0) + parseFloat(cs.marginBottom || 0);
+  probe.remove();
+}
+// Where each row starts, heading included, in list coordinates.
+function ovLayout() {
+  ovMeasure();
+  const n = state.ovItems.length;
+  const top = new Float64Array(n + 1);
+  for (let i = 0; i < n; i++) top[i + 1] = top[i] + (state.ovHeads[i] ? state.ovHeadH : 0) + state.ovRowH;
+  state.ovVirtual = { top };
+}
+function drawOvWindow() {
+  const v = state.ovVirtual;
+  if (!v) return;
+  const box = $('ov-list');
+  const n = state.ovItems.length;
+  const y0 = box.scrollTop, y1 = y0 + box.clientHeight;
+  let a = 0, b = n;
+  // Binary search for the first row ending below the top of the view.
+  let lo = 0, hi = n;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (v.top[m + 1] <= y0) lo = m + 1; else hi = m; }
+  a = Math.max(0, lo - OV_OVERSCAN);
+  lo = a; hi = n;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (v.top[m] < y1) lo = m + 1; else hi = m; }
+  b = Math.min(n, lo + OV_OVERSCAN);
+  if (v.a === a && v.b === b && v.drawn === state.ovItems) return;
+  v.a = a; v.b = b; v.drawn = state.ovItems;
+  // The first heading drawn keeps its top margin inside the spacer's height.
+  box.innerHTML = `<div class="ov-spacer" style="height:${v.top[a]}px"></div>` +
+    state.ovItems.slice(a, b).join('') +
+    `<div class="ov-spacer" style="height:${v.top[n] - v.top[b]}px"></div>` + state.ovBack;
+}
+// The keys a lasso covers, from the layout rather than the rows in the page.
+function ovKeysBetween(yTop, yBot) {
+  const v = state.ovVirtual;
+  const out = [];
+  if (!v) return out;
+  for (let i = 0; i < state.ovOrder.length; i++) {
+    const rowTop = v.top[i + 1] - state.ovRowH;
+    if (v.top[i + 1] > yTop && rowTop < yBot) out.push(state.ovOrder[i]);
+    else if (rowTop >= yBot) break;
+  }
+  return out;
 }
 
 // What a gesture on ONE row applies to: the whole selection when that row is
@@ -2793,6 +2883,16 @@ async function setScope(pairIdx, rel, label) {
 // once: the folder opens in the panel and the grid narrows to it. The arrow
 // alone unfolds WITHOUT touching the grid, for reading down a tree while the
 // grid stays where it is.
+// (0.9.3) A long overview draws the rows that come into view.
+{
+  let pending = false;
+  $('ov-list').addEventListener('scroll', () => {
+    if (!state.ovVirtual || pending) return;
+    pending = true;
+    requestAnimationFrame(() => { pending = false; drawOvWindow(); });
+  }, { passive: true });
+  window.addEventListener('resize', () => { if (state.ovVirtual) { state.ovVirtual.a = -1; drawOvWindow(); } });
+}
 $('ov-list').addEventListener('click', async e => {
   if (lassoJustEnded) { lassoJustEnded = false; return; }   // the release of a lasso
   const it = e.target.closest('.ov-row');
@@ -2893,6 +2993,13 @@ function lassoApply(finalPass) {
   const top = Math.min(lasso.y0, lasso.y1) - list.scrollTop + lr.top;
   const bot = Math.max(lasso.y0, lasso.y1) - list.scrollTop + lr.top;
   const hit = new Set(lasso.add ? lasso.before : []);
+  // (0.9.3) A long overview has only some of its rows in the page: the rows
+  // a lasso covers are read from the layout.
+  if (state.ovVirtual) {
+    for (const k of ovKeysBetween(Math.min(lasso.y0, lasso.y1), Math.max(lasso.y0, lasso.y1))) hit.add(k);
+    if (!finalPass) for (const row of list.querySelectorAll('.ov-row')) row.classList.toggle('picked', hit.has(row.dataset.pair + ':' + row.dataset.rel));
+    return hit;
+  }
   for (const row of list.querySelectorAll('.ov-row')) {
     const r = row.getBoundingClientRect();
     const key = row.dataset.pair + ':' + row.dataset.rel;
@@ -2997,7 +3104,7 @@ function renderAutoUi() {
   btn.classList.toggle('auto', on);
   if (on) {
     btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 10v4h4"/><path d="m12 14 1.535-1.605a5 5 0 0 1 8 1.5"/><path d="M22 22v-4h-4"/><path d="m22 18-1.535 1.605a5 5 0 0 1-8-1.5"/><path d="M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v.5"/></svg>` +
-      `AUTO-SYNC ON — ${state.busy ? 'running' : count}`;
+      `AUTO-SYNC ON: ${state.busy ? 'running' : count}`;
     btn.setAttribute('data-tip', 'Auto-sync is armed: syncto runs by itself. Click to disarm.');
     if (!state.busy) btn.disabled = false;
   } else {
@@ -3053,7 +3160,7 @@ async function autoRun() {
   $('btn-pause').style.display = '';
   if (!cmp.ok) {
     state.busy = null; setBusyUi(false);
-    $('footer-auto').textContent = `auto-sync ${stamp()}: comparison failed — ${cmp.error}`;
+    $('footer-auto').textContent = `auto-sync ${stamp()}: comparison failed: ${cmp.error}`;
     return;
   }
   // (0.9.0) CANCEL during auto-sync's comparison: this cycle ends there. It
@@ -3063,7 +3170,7 @@ async function autoRun() {
     state.busy = null; setBusyUi(false);
     state.stats = null;
     renderStats(); await refreshGrid(true); await refreshOverview();
-    $('footer-auto').textContent = `auto-sync ${stamp()}: comparison cancelled — nothing synchronized`;
+    $('footer-auto').textContent = `auto-sync ${stamp()}: comparison cancelled: nothing synchronized`;
     return;
   }
   state.stats = cmp.stats;
@@ -3077,7 +3184,7 @@ async function autoRun() {
   if (cmp.errors && cmp.errors.length) {
     state.busy = null; setBusyUi(false);
     $('footer-auto').textContent =
-      `auto-sync ${stamp()}: ${cmp.errors.length} folder error(s) during comparison — synchronization skipped`;
+      `auto-sync ${stamp()}: ${cmp.errors.length} folder error(s) during comparison: synchronization skipped`;
     return;
   }
 
@@ -3088,12 +3195,12 @@ async function autoRun() {
   }
 
   state.busy = 'sync';
-  startRunUi('Auto-sync — synchronizing…');
+  startRunUi('Auto-sync: synchronizing…');
   const res = await ipc(API.sync(state.job));
   state.busy = null;
   setBusyUi(false);
   if (!res.ok) {
-    $('footer-auto').textContent = `auto-sync ${stamp()}: failed — ${res.error}`;
+    $('footer-auto').textContent = `auto-sync ${stamp()}: failed: ${res.error}`;
     // A run that failed is the one a person away from the screen most needs
     // to hear about — and auto-sync is unattended by definition. The manual
     // path has sent this since 0.4.0; this one returned before it.
@@ -3108,7 +3215,7 @@ async function autoRun() {
   if (c.renamed) bits.push(`${c.renamed} renamed for Windows`);
   if (c.deleted)bits.push(`${c.deleted} removed`);
   $('footer-auto').textContent =
-    `auto-sync ${stamp()}: ${bits.length ? bits.join(', ') : 'done'}${res.errors.length ? ` — ${res.errors.length} ERROR(S)` : ''}`;
+    `auto-sync ${stamp()}: ${bits.length ? bits.join(', ') : 'done'}${res.errors.length ? `: ${res.errors.length} ERROR(S)` : ''}`;
   if (res.errors.length) showSummary(res);   // errors deserve a face
   await doCompareQuiet();
   await afterRun(res);
@@ -3415,13 +3522,21 @@ async function loadNtfyUi() {
 const NTFY_ICON_ON  = '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>';
 const NTFY_ICON_OFF = '<path d="M8.7 3A6 6 0 0 1 18 8a21.3 21.3 0 0 0 .6 5"/><path d="M17 17H3s3-2 3-9a4.67 4.67 0 0 1 .3-1.7"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/><path d="m2 2 20 20"/>';
 function renderNtfyBtn() {
-  const on = $('st-ntfy-en').checked;
+  // (0.9.3) On means: switched on AND somewhere to send to.
+  const on = $('st-ntfy-en').checked && !!$('st-ntfy-topic').value.trim();
   const b = $('btn-ntfy');
   b.classList.toggle('on', on);
   b.classList.toggle('off', !on);
   b.querySelector('svg').innerHTML = on ? NTFY_ICON_ON : NTFY_ICON_OFF;
   b.dataset.tip = on ? 'ntfy notifications: on (click to turn off)' : 'ntfy notifications: off (click to turn on)';
   b.setAttribute('aria-pressed', on ? 'true' : 'false');
+}
+
+// (0.9.3) Said in Settings, next to the field, not in the status line behind it.
+function ntfyAsk() {
+  const res = $('st-ntfy-res');
+  res.textContent = 'Enter a topic first.'; res.style.color = 'var(--orange)';
+  $('st-ntfy-topic').focus();
 }
 
 function ntfyPatchFromUi() {
@@ -3436,12 +3551,21 @@ function bindAfterAndNtfy() {
   bindAfterMenu();
   $('after-cancel').addEventListener('click', () => {
     stopCountdown();
-    $('status-note').textContent = 'Cancelled — the machine was left alone.';
+    $('status-note').textContent = 'Cancelled: the machine was left alone.';
   });
   $('after-now').addEventListener('click', fireAfterAction);
 
   for (const id of ['st-ntfy-en', 'st-ntfy-server', 'st-ntfy-topic']) {
-    $(id).addEventListener('change', () => { API.ntfySave(ntfyPatchFromUi()); renderNtfyBtn(); });
+    $(id).addEventListener('change', () => {
+      // (0.9.3) Switched on with no topic: there is nowhere to send anything,
+      // and the bell turned green all the same. Same rule as the bell's click.
+      if (id === 'st-ntfy-en' && $('st-ntfy-en').checked && !$('st-ntfy-topic').value.trim()) {
+        $('st-ntfy-en').checked = false;
+        ntfyAsk();
+      }
+      API.ntfySave(ntfyPatchFromUi());
+      renderNtfyBtn();
+    });
   }
 
   // One click turns ntfy on or off. With no topic there is nowhere to send
@@ -3450,8 +3574,7 @@ function bindAfterAndNtfy() {
     const on = $('st-ntfy-en').checked;
     if (!on && !$('st-ntfy-topic').value.trim()) {
       $('btn-settings').click();
-      $('st-ntfy-topic').focus();
-      $('status-note').textContent = 'ntfy needs a topic first: enter one in Settings.';
+      ntfyAsk();
       return;
     }
     $('st-ntfy-en').checked = !on;
@@ -3466,7 +3589,7 @@ function bindAfterAndNtfy() {
     res.textContent = 'Sending…'; res.style.color = 'var(--text3)';
     await API.ntfySave(ntfyPatchFromUi());
     const r = await API.ntfyTest(ntfyPatchFromUi());
-    if (r && r.ok) { res.textContent = '✓ Sent — check your phone.'; res.style.color = 'var(--green)'; }
+    if (r && r.ok) { res.textContent = '✓ Sent: check your phone.'; res.style.color = 'var(--green)'; }
     else { res.textContent = '✗ ' + ((r && r.error) || 'Failed'); res.style.color = 'var(--red)'; }
   });
 }
@@ -3519,7 +3642,12 @@ async function openServerDialog(target) {
   $('srv-title').textContent = 'Connect to a server';
   srvShowStep(1);
   srvStatus('idle', 'Not connected');
-  $('srv-pass').value = '';
+  // (0.9.3) Nothing carried over from the last time the window was open: the
+  // address, login, key and name of another server stayed in the fields (a
+  // Connect then used that key; Save made a second "NAS" entry).
+  for (const id of ['srv-pass', 'srv-host', 'srv-user', 'srv-key', 'srv-name', 'srv-newname']) $(id).value = '';
+  $('srv-tools-new').style.display = 'none';
+  $('srv-remember').checked = true;
   $('srv-proto').value = 'sftp';
   $('srv-proto').dataset.prev = 'sftp';
   $('srv-port').value = SRV_DEFAULT_PORT.sftp;
@@ -3550,7 +3678,7 @@ async function openServerDialog(target) {
   } else {
     note.style.display = '';
     note.textContent = 'This machine has no usable credential store, so the password cannot be ' +
-      'remembered safely — syncto will ask for it each time rather than write it to a file.';
+      'remembered safely: syncto will ask for it each time rather than write it to a file.';
     $('srv-remember').checked = false;
   }
   setTimeout(() => $('srv-host').focus(), 60);
@@ -3617,7 +3745,7 @@ async function srvConnect() {
 
   if (!res.ok) {
     if (res.needsPassword) {
-      srvStatus('bad', 'This server has no remembered password — type it here.');
+      srvStatus('bad', 'This server has no remembered password: type it here.');
       $('srv-pass').focus();
       return;
     }
@@ -3635,12 +3763,12 @@ async function srvConnect() {
       // Do not let this pass silently: the user ticked "remember" and it
       // did not happen, and they will find out at the worst moment otherwise.
       $('srv-status2-txt').textContent =
-        `Connected to ${res.banner} — the password could NOT be stored on this machine.`;
+        `Connected to ${res.banner}: the password could NOT be stored on this machine.`;
     }
   }
 
   $('srv-title').textContent = 'Choose a folder';
-  $('srv-status2-txt').textContent = `Connected — ${res.banner}`;
+  $('srv-status2-txt').textContent = `Connected: ${res.banner}`;
   srvShowStep(2);
   srv.cwd = res.start || '/';
   srv.picked = srv.cwd;
@@ -3803,7 +3931,7 @@ function bindServerDialog() {
     $('srv-pass').value = '';
     $('srv-remember').checked = !!s.savePassword;
     srvStatus('idle', s.hasPassword || s.keyPath
-      ? 'Ready — press Connect'
+      ? 'Ready, press Connect'
       : 'Type the password, then press Connect');
     srvConnect();
   });

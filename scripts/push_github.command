@@ -16,7 +16,10 @@
 #      .DS_Store excepted), then takes out what is for the maintainer and not
 #      for users: CLAUDE.md, AGENTS.md, ETAT_PROJET.md, test/ and docs/ (except
 #      docs/screenshots, which the README shows). Those stay in the ZIP and in
-#      this folder; on GitHub they are removed if they were there;
+#      this folder; on GitHub they are removed if they were there. Nor
+#      node_modules at any depth, nor anything that looks like a secret
+#      (.env, .npmrc, *.p12, *.pfx, *.pem, *.key, *.cer, provisioning
+#      profiles, keychains): listed, never sent;
 #   5. holds version.json back while the GitHub Release vX.Y.Z does not exist:
 #      that file is what makes every installed copy announce an update, and it
 #      must not point at a release with no binaries yet. Publish the Release,
@@ -107,6 +110,20 @@ if [ -d "$TMP/repo/docs" ]; then
   find "$TMP/repo/docs" -mindepth 1 -maxdepth 1 ! -name screenshots -exec rm -rf {} +
   rmdir "$TMP/repo/docs" 2>/dev/null
 fi
+# (0.9.3) Never published, wherever they sit: dependencies installed in a
+# sub-folder, and anything that looks like a secret (an environment file, npm
+# credentials, a certificate or a private key). Listed below, so nothing is
+# held back without a word.
+SECRETS="$(find "$TMP/repo" -path "$TMP/repo/.git" -prune -o \( -type d -name node_modules -prune -print \) -o \
+  \( -type f \( -name '.env' -o -name '.env.*' -o -name '.npmrc' -o -name '*.p12' -o -name '*.pfx' \
+  -o -name '*.pem' -o -name '*.key' -o -name '*.cer' -o -name '*.mobileprovision' -o -name '*.keychain' \
+  -o -name '*.keychain-db' \) -print \))"
+if [ -n "$SECRETS" ]; then
+  echo "Kept back (never sent to GitHub):"
+  printf '%s\n' "$SECRETS" | sed "s#^$TMP/repo/#  #"
+  echo ""
+  printf '%s\n' "$SECRETS" | while IFS= read -r p; do [ -n "$p" ] && rm -rf "$p"; done
+fi
 # Scripts stay executable on GitHub, whatever the unzip tool did to them here.
 find . -path ./.git -prune -o -type f \( -name '*.command' -o -name '*.sh' \) -exec chmod +x {} +
 
@@ -114,7 +131,7 @@ find . -path ./.git -prune -o -type f \( -name '*.command' -o -name '*.sh' \) -e
 case "${PUSH_GITHUB_RELEASE:-}" in
   yes) released=yes ;;
   no)  released=no ;;
-  *)   code="$(curl -s -o /dev/null -w '%{http_code}' "https://api.github.com/repos/$SLUG/releases/tags/v$VER")"
+  *)   code="$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' "https://api.github.com/repos/$SLUG/releases/tags/v$VER")"
        if [ "$code" = "200" ]; then released=yes; else released=no; fi ;;
 esac
 held=no
