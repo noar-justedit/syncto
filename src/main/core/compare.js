@@ -670,7 +670,7 @@ class Comparer {
     }
 
     // timeSize
-    // (0.9.3) A date read from a plain FTP listing (no MLSD) is only good to
+    // (0.9.4) A date read from a plain FTP listing (no MLSD) is only good to
     // the minute, or to the day for a file over six months old, and the
     // server's time zone was measured once (a summer date and a winter date
     // cannot both be right). When such a date is all that separates two files

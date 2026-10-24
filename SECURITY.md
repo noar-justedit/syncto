@@ -29,12 +29,12 @@ areas worth scrutiny:
   keys: one no authority signed is trusted the first time and pinned, and a
   changed certificate stops the connection before `USER` is sent. A server that
   shows no certificate is refused. A certificate an authority signed is
-  remembered as such (0.9.3): a home-made one in its place is refused like a
+  remembered as such (0.9.4): a home-made one in its place is refused like a
   changed one. An SSH password is never offered to an FTP server, and the
   password of an FTPS server is never offered to plain FTP (saved passwords are
   kept per protocol).
 - **The window and the engine.** The window is sandboxed and cannot navigate
-  away from its own page; since 0.9.3 the engine also refuses any request that
+  away from its own page; since 0.9.4 the engine also refuses any request that
   does not come from that page, the window cannot change the saved servers or
   the remembered keys through the preferences, and no browser permission is
   granted. The packaged app is built with Electron fuses (no `ELECTRON_RUN_AS_NODE`,

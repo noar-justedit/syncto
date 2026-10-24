@@ -156,7 +156,7 @@ function forRun(res, jobName) {
     // it says what was checked, not just that it ended — "done" tells a DIT
     // waiting on a two-hour backup nothing they can act on.
     title = `${name}: done`;
-    // (0.9.3) Files a server checked itself were not read back: said so.
+    // (0.9.4) Files a server checked itself were not read back: said so.
     const byServer = Math.min(res.verified || 0, res.serverChecked || 0);
     if (res.verified && byServer) {
       const back = res.verified - byServer;

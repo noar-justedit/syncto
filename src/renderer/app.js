@@ -1966,7 +1966,7 @@ function renderVerifyLine(res) {
     sub = 'They were read back and did not match what was written. They are listed below, left '
         + 'out of the checksum list, and will be looked at again on the next run.';
   } else if (verified && byServer) {
-    // (0.9.3) A server that computes checksums is asked, not read back: the
+    // (0.9.4) A server that computes checksums is asked, not read back: the
     // line said "read back (xxHash64)" for files no one read back.
     const back = verified - byServer;
     kind = 'good'; ico = ICO_SHIELD;
@@ -2319,7 +2319,7 @@ function bind() {
       if (!p) return;
       const input = row.querySelector(bl ? '.pr-left' : '.pr-right');
       input.value = p;
-      // (0.9.3) As if typed: the server button goes out when a server address
+      // (0.9.4) As if typed: the server button goes out when a server address
       // is replaced by a local folder, and a comparison of the old folders
       // stops offering SYNCHRONIZE.
       lightServerButton(input);
@@ -2739,7 +2739,7 @@ async function refreshOverview() {
   // The hint sits at the END of the list, next to the empty space it is
   // talking about, not above the rows where it would push them down.
   });
-  // (0.9.3) A few thousand folders at the top of a job made this one
+  // (0.9.4) A few thousand folders at the top of a job made this one
   // innerHTML of several megabytes, rebuilt every second during a run: the
   // window froze for about a second each time. Past OV_VIRTUAL_MIN rows only
   // what can be seen is in the page (as in the grid), between two spacers.
@@ -2755,7 +2755,7 @@ async function refreshOverview() {
   drawOvWindow();
 }
 
-// (0.9.3) The overview, drawn by window when it is long (see refreshOverview).
+// (0.9.4) The overview, drawn by window when it is long (see refreshOverview).
 const OV_VIRTUAL_MIN = 600;
 const OV_OVERSCAN = 30;
 // Row and heading heights, measured from the page once (the theme sets them).
@@ -2883,7 +2883,7 @@ async function setScope(pairIdx, rel, label) {
 // once: the folder opens in the panel and the grid narrows to it. The arrow
 // alone unfolds WITHOUT touching the grid, for reading down a tree while the
 // grid stays where it is.
-// (0.9.3) A long overview draws the rows that come into view.
+// (0.9.4) A long overview draws the rows that come into view.
 {
   let pending = false;
   $('ov-list').addEventListener('scroll', () => {
@@ -2993,7 +2993,7 @@ function lassoApply(finalPass) {
   const top = Math.min(lasso.y0, lasso.y1) - list.scrollTop + lr.top;
   const bot = Math.max(lasso.y0, lasso.y1) - list.scrollTop + lr.top;
   const hit = new Set(lasso.add ? lasso.before : []);
-  // (0.9.3) A long overview has only some of its rows in the page: the rows
+  // (0.9.4) A long overview has only some of its rows in the page: the rows
   // a lasso covers are read from the layout.
   if (state.ovVirtual) {
     for (const k of ovKeysBetween(Math.min(lasso.y0, lasso.y1), Math.max(lasso.y0, lasso.y1))) hit.add(k);
@@ -3522,7 +3522,7 @@ async function loadNtfyUi() {
 const NTFY_ICON_ON  = '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>';
 const NTFY_ICON_OFF = '<path d="M8.7 3A6 6 0 0 1 18 8a21.3 21.3 0 0 0 .6 5"/><path d="M17 17H3s3-2 3-9a4.67 4.67 0 0 1 .3-1.7"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/><path d="m2 2 20 20"/>';
 function renderNtfyBtn() {
-  // (0.9.3) On means: switched on AND somewhere to send to.
+  // (0.9.4) On means: switched on AND somewhere to send to.
   const on = $('st-ntfy-en').checked && !!$('st-ntfy-topic').value.trim();
   const b = $('btn-ntfy');
   b.classList.toggle('on', on);
@@ -3532,7 +3532,7 @@ function renderNtfyBtn() {
   b.setAttribute('aria-pressed', on ? 'true' : 'false');
 }
 
-// (0.9.3) Said in Settings, next to the field, not in the status line behind it.
+// (0.9.4) Said in Settings, next to the field, not in the status line behind it.
 function ntfyAsk() {
   const res = $('st-ntfy-res');
   res.textContent = 'Enter a topic first.'; res.style.color = 'var(--orange)';
@@ -3557,7 +3557,7 @@ function bindAfterAndNtfy() {
 
   for (const id of ['st-ntfy-en', 'st-ntfy-server', 'st-ntfy-topic']) {
     $(id).addEventListener('change', () => {
-      // (0.9.3) Switched on with no topic: there is nowhere to send anything,
+      // (0.9.4) Switched on with no topic: there is nowhere to send anything,
       // and the bell turned green all the same. Same rule as the bell's click.
       if (id === 'st-ntfy-en' && $('st-ntfy-en').checked && !$('st-ntfy-topic').value.trim()) {
         $('st-ntfy-en').checked = false;
@@ -3642,7 +3642,7 @@ async function openServerDialog(target) {
   $('srv-title').textContent = 'Connect to a server';
   srvShowStep(1);
   srvStatus('idle', 'Not connected');
-  // (0.9.3) Nothing carried over from the last time the window was open: the
+  // (0.9.4) Nothing carried over from the last time the window was open: the
   // address, login, key and name of another server stayed in the fields (a
   // Connect then used that key; Save made a second "NAS" entry).
   for (const id of ['srv-pass', 'srv-host', 'srv-user', 'srv-key', 'srv-name', 'srv-newname']) $(id).value = '';

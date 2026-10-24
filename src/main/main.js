@@ -280,7 +280,7 @@ function buildMenu() {
 
 // ── Lifecycle ──────────────────────────────────────────────────────────────
 app.whenReady().then(() => {
-  // (0.9.3) The page asks for no permission (camera, microphone, location,
+  // (0.9.4) The page asks for no permission (camera, microphone, location,
   // notifications…); Electron grants them by default. None is granted.
   try {
     const { session: ses } = require('electron');
@@ -340,7 +340,7 @@ async function trashItem(fsx, absPath) {
 }
 
 // ── IPC: basics ────────────────────────────────────────────────────────────
-// (0.9.3) Every channel answers syncto's own page, and nothing else: the main
+// (0.9.4) Every channel answers syncto's own page, and nothing else: the main
 // frame of the main window, showing src/renderer/index.html. The page is
 // sandboxed and cannot navigate away (see createWindow), so this is a second
 // lock on the same door, for the day a flaw lets something else in.
@@ -365,7 +365,7 @@ function fromOwnPage(event) {
   ipcMain.on = (channel, fn) => rawOn(channel, (event, ...args) => { if (fromOwnPage(event)) fn(event, ...args); });
 }
 
-// (0.9.3) What the window may change in the preferences: the job it shows, its
+// (0.9.4) What the window may change in the preferences: the job it shows, its
 // own layout, and the update notice it dismissed. Servers, passwords and
 // remembered keys go through their own channels, never this one.
 const RENDERER_PREF_KEYS = ['job', 'ui', 'updateDismissedVersion'];

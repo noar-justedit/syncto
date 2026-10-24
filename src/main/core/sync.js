@@ -127,7 +127,7 @@ function copyStream(srcFs, srcPath, dstFs, dstPath, hasher, onBytes, token, serv
         if (!pauseTimer) pauseTimer = setInterval(checkPause, 150);
       }
       bytes += chunk.length;
-      // (0.9.3) More bytes than the size the source gave: stop now. A server
+      // (0.9.4) More bytes than the size the source gave: stop now. A server
       // announcing 5 bytes and sending without end filled the destination disk
       // before the size check at the end said no.
       if (size != null && Number.isFinite(Number(size)) && bytes > Number(size)) {
@@ -773,7 +773,7 @@ class SyncRunner {
       const d = Math.abs((a || 0) - (b || 0));
       return d <= t || Math.abs(d - 3600000) <= t;
     };
-    // (0.9.3) A server that lists dates to the minute (FTP without MLSD) gave
+    // (0.9.4) A server that lists dates to the minute (FTP without MLSD) gave
     // the comparison "12:30:00" and the stat here "12:30:41": every replace and
     // every delete there was refused as "changed since the comparison".
     const fsx = (this.side(side) || {}).fs;

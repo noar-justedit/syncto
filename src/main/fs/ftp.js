@@ -41,7 +41,7 @@ const DEFAULT_PORT = { ftp: 21, ftps: 21, 'ftps-implicit': 990 };
 const SCHEME = { ftp: 'ftp', ftps: 'ftpes', 'ftps-implicit': 'ftps' };
 const MAX_TRANSFER_CONNECTIONS = 4;
 const STREAM_BUFFER = 1024 * 1024;
-// (0.9.3) A connection silent this long gets a NOOP (servers drop idle ones).
+// (0.9.4) A connection silent this long gets a NOOP (servers drop idle ones).
 const KEEPALIVE_MS = 30000;
 
 function normalize(p) {
@@ -86,7 +86,7 @@ class FtpFs {
 
   // The error that killed the control connection, if any (the pool looks at it
   // to decide whether this backend can be reused).
-  // (0.9.3) A control connection the server closed is reopened (see _c): only
+  // (0.9.4) A control connection the server closed is reopened (see _c): only
   // a failed reopening makes this backend dead.
   get dead() { return this._deadForGood || null; }
   get hasFileIds() { return false; }
@@ -108,7 +108,7 @@ class FtpFs {
     });
   }
 
-  // (0.9.3) The control connection, reopened when the server closed it. FTP
+  // (0.9.4) The control connection, reopened when the server closed it. FTP
   // servers drop a connection that said nothing for a few minutes (vsftpd 300 s,
   // FileZilla Server 120 s): the time spent reading the comparison before
   // SYNCHRONIZE, or a long transfer on another connection. It was never
@@ -132,7 +132,7 @@ class FtpFs {
     return this._reopening;
   }
 
-  // (0.9.3) A NOOP on the connections that have been silent for a while, so
+  // (0.9.4) A NOOP on the connections that have been silent for a while, so
   // the server does not drop them in the first place.
   _keepAlive() {
     if (this._kaTimer) return;
@@ -178,7 +178,7 @@ class FtpFs {
       this.xfers = this.xfers.filter(x => x.busy || x.remote.alive);
       let x = this.xfers.find(c => !c.busy);
       if (x) { x.busy = true; return x; }
-      // (0.9.3) A server that allows no second connection for this account:
+      // (0.9.4) A server that allows no second connection for this account:
       // transfers go over the control connection, one thing at a time.
       if (this._ctlOnly) {
         if (!this._ctlOnlyBusy) {
@@ -195,7 +195,7 @@ class FtpFs {
         try { await remote.connect(); return x; }
         catch (err) {
           this.xfers = this.xfers.filter(c => c !== x);
-          // (0.9.3) The server allows no more connections for this account
+          // (0.9.4) The server allows no more connections for this account
           // (421). With a transfer connection already open, wait for it; with
           // none, use the control connection. Four lanes asked for eight
           // connections and a server limited to six failed files, to four
@@ -208,7 +208,7 @@ class FtpFs {
     }
   }
 
-  // (0.9.3) Opens this backend's first transfer connection now, so a run knows
+  // (0.9.4) Opens this backend's first transfer connection now, so a run knows
   // before it starts how many lanes the server really allows (MultiSession
   // keeps a lane only when this succeeds).
   async prewarm() {
@@ -400,7 +400,7 @@ class FtpFs {
 
   // ── Checksums computed by the server ────────────────────────────────────
   async hashAlgos() { return (await this._c()).hashAlgos(); }
-  // (0.9.3) On a transfer connection, never on the control one: a server takes
+  // (0.9.4) On a transfer connection, never on the control one: a server takes
   // minutes to read a 10 GB clip, and the control connection is also what
   // keeps the folder lock alive. Blocked for over 60 s, the lock looked
   // abandoned and the run stopped.

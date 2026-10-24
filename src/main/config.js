@@ -186,7 +186,7 @@ function credentialMap(servers) {
     if (!s || !s.host || !s.username) continue;
     const protocol = protocolOf(s);
     // (0.9.1) An FTP server's entry is keyed with its port, and no SSH key
-    // travels with it. (0.9.3) And with its protocol ("ftps:user@host:21"):
+    // travels with it. (0.9.4) And with its protocol ("ftps:user@host:21"):
     // under one "ftp:" key, an FTPS password was offered in clear to an
     // ftp:// address naming the same host and port.
     if (protocol !== 'sftp') {
@@ -306,7 +306,7 @@ function migratePrefs(raw) {
 // credentials all gone, with no message; for a .syncto it meant the user's own
 // job file destroyed.
 function writeFileAtomic(file, text) {
-  // (0.9.3) A fresh name, created exclusively: a symbolic link planted as
+  // (0.9.4) A fresh name, created exclusively: a symbolic link planted as
   // "job.syncto.tmp" in a shared folder made the save write through it, onto
   // whatever file it pointed at. An exclusive create never follows a link.
   const tmp = `${file}.${process.pid}.${require('crypto').randomBytes(4).toString('hex')}.tmp`;
@@ -551,7 +551,7 @@ class Prefs {
     if (!this.data.knownHosts || typeof this.data.knownHosts !== 'object') return;
     const p = protocol || 'sftp';
     if (p === 'sftp') this.data.knownHosts[`${host}:${Number(port) || 22}`] = '';
-    // (0.9.3) Plain FTP has no certificate: forgetting a plain FTP entry erased
+    // (0.9.4) Plain FTP has no certificate: forgetting a plain FTP entry erased
     // the one pinned for the FTPS server on the same host and port.
     else if (p === 'ftps' || p === 'ftps-implicit') this.data.knownHosts[`ftps:${host}:${Number(port) || DEFAULT_PORT[p]}`] = '';
   }
@@ -593,7 +593,7 @@ class Prefs {
 // credential store, keyed by user@host, so the job keeps working.
 function captureUrlPassword(data, phrase) {
   // (0.9.0) Leading spaces allowed, as parseLocation allows them.
-  // (0.9.3) A password may hold "@" or "/" (splitAuthority).
+  // (0.9.4) A password may hold "@" or "/" (splitAuthority).
   const a = splitAuthority(phrase);
   if (!a || !a.password) return a && a.password === '' ? redactLocation(phrase) : phrase;
   const hp = /^([^/:]+)(?::(\d+))?/.exec(a.after);
@@ -610,7 +610,7 @@ function captureUrlPassword(data, phrase) {
               name: host, host, protocol, port: p, username, keyPath: '' };
     data.servers.push(entry);
   }
-  // (0.9.3) A password already saved for this server is never replaced from an
+  // (0.9.4) A password already saved for this server is never replaced from an
   // address: a job received from someone else carrying "ftpes://admin:x@nas"
   // overwrote the real one. A changed password is entered in the server window.
   if (!entry.passwordEnc) {

@@ -111,7 +111,7 @@ function expandMacros(phrase, now) {
 function parseLocation(phrase, credentials) {
   let raw = expandMacros(String(phrase || '').trim());
   const expanded = raw;
-  // (0.9.3) A password holding "@" or "/" is lifted out before the address is
+  // (0.9.4) A password holding "@" or "/" is lifted out before the address is
   // read, so the host is the real one.
   let typed = null;
   const a = splitAuthority(raw);
@@ -136,7 +136,7 @@ function parseLocation(phrase, credentials) {
         cred = credentials[`${m[2] || ''}@${host}:${port}`] ||
                (port === 22 ? credentials[`${m[2] || ''}@${host}`] : null) || {};
       } else {
-        // (0.9.3) Keyed by protocol too: the password of a server saved as FTPS
+        // (0.9.4) Keyed by protocol too: the password of a server saved as FTPS
         // was offered, in clear, to an ftp:// address naming the same host.
         cred = credentials[`${protocol}:${m[2] || ''}@${host}:${port}`] || {};
       }
@@ -235,7 +235,7 @@ class FsPool {
     return { fs: backend, path: backend.resolve(loc.path), kind: loc.kind };
   }
 
-  // (0.9.3) One lane that could not take its transfer connection.
+  // (0.9.4) One lane that could not take its transfer connection.
   async closeLane(loc, i) {
     const key = `${poolKey(loc)}#${i}`;
     const b = this.sftp.get(key);
@@ -268,7 +268,7 @@ function redactLocation(phrase) {
   const s = String(phrase == null ? '' : phrase);
   // (0.9.0) Leading spaces allowed, as parseLocation allows them: " sftp://u:p@h"
   // connected (it trims) but was not redacted, and the password was saved.
-  // (0.9.3) A password holding "@" or "/" ("p@ss", "pa/ss") was cut at its
+  // (0.9.4) A password holding "@" or "/" ("p@ss", "pa/ss") was cut at its
   // first one: the rest stayed in the file, or all of it. splitAuthority finds
   // where the password really ends.
   const a = splitAuthority(s);
@@ -276,7 +276,7 @@ function redactLocation(phrase) {
   return a.lead + a.user + '@' + a.after;
 }
 
-// (0.9.3) "scheme://user:password@host[:port]/path" taken apart where a
+// (0.9.4) "scheme://user:password@host[:port]/path" taken apart where a
 // password may itself hold "@" or "/". The password ends at the first "@"
 // that is followed by something shaped like a host ("name", "name:21", then
 // "/" or the end). Returns null when this is not a server address with a user,

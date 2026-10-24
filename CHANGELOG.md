@@ -4,10 +4,10 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
-## [0.9.3] — 2026-10-24
+## [0.9.4] — 2026-10-24
 
-A full review of 0.9.1 to 0.9.3 (bugs, security, window, speed) on top of what
-0.9.3 already held, and what Noar chose from it.
+A full review of 0.9.1 to 0.9.3 (bugs, security, window, speed), and the
+fixes Noar chose from it.
 
 ### Security
 
@@ -77,14 +77,20 @@ A full review of 0.9.1 to 0.9.3 (bugs, security, window, speed) on top of what
 
 - The Settings section "S-FTP" is now "Servers" (it applies to FTP too).
 - No long dash ("—") in messages, labels and tooltips any more.
+- Said more precisely than in 0.9.3: the faster comparison of folders with many
+  sub-folders helps a mounted NAS share; an `ftp://` or `sftp://` address gains
+  nothing (its listings go one at a time on one connection).
+
+## [0.9.3] — 2026-10-22
+
+### Changed
 
 - **Faster on small files** (audit of 13/10/2026, lot E). A local file smaller
   than 4 MiB is read and written with a buffer the size of the file instead of
   a 4 MiB one: 3000 files of 2 to 150 KB copied 25 to 60 % faster in our
   measurement. Large files are unchanged. Servers are unchanged.
-- **Faster comparison of folders with many sub-folders, on a mounted NAS
-  share.** (An `ftp://` or `sftp://` address gains nothing: its listings go one
-  at a time on one connection.) While a folder is walked, the listings of its next sub-folders are
+- **Faster comparison of folders with many sub-folders, on a slow link or a
+  NAS.** While a folder is walked, the listings of its next sub-folders are
   already requested (eight at most). The comparison order, its results and the
   way an unreadable folder is reported are unchanged. With 40 ms per listing, 40
   folders took 470 ms instead of about 1640 ms. On a local disk there is no
@@ -166,7 +172,7 @@ faster on a slow link, and syncto speaks FTP and FTPS.
   permanent).
 - A file's date is kept only on servers that implement MFMT; the run says so
   when one does not.
-- Up to eight connections to one server with four lanes (a control and a transfer connection per lane); 0.9.3 adapts to servers that allow fewer.
+- Up to eight connections to one server with four lanes (a control and a transfer connection per lane); 0.9.4 adapts to servers that allow fewer.
 
 ## [0.9.0] — 2026-10-13
 

@@ -323,7 +323,7 @@ class PipelinedReader extends Readable {
       this.pending.delete(this.wantSeq);
       this.wantSeq++;
       if (!this.push(buf)) this.flowing = false;
-      // (0.9.3) The consumer may destroy the stream from inside push() (a
+      // (0.9.4) The consumer may destroy the stream from inside push() (a
       // cancelled copy does): the handle is gone then, and going on issued a
       // read on nothing, which killed the whole SFTP connection.
       if (this.destroyed) return;

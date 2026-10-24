@@ -110,7 +110,7 @@ if [ -d "$TMP/repo/docs" ]; then
   find "$TMP/repo/docs" -mindepth 1 -maxdepth 1 ! -name screenshots -exec rm -rf {} +
   rmdir "$TMP/repo/docs" 2>/dev/null
 fi
-# (0.9.3) Never published, wherever they sit: dependencies installed in a
+# (0.9.4) Never published, wherever they sit: dependencies installed in a
 # sub-folder, and anything that looks like a secret (an environment file, npm
 # credentials, a certificate or a private key). Listed below, so nothing is
 # held back without a word.

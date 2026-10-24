@@ -22,7 +22,7 @@ asar: true
 # only loses a CPU-feature probe used to pick an accelerated cipher.
 npmRebuild: false
 
-# (0.9.3) Electron's fuses, burnt into the executable at build time. The
+# (0.9.4) Electron's fuses, burnt into the executable at build time. The
 # packaged app can no longer be turned into a plain Node.js (ELECTRON_RUN_AS_NODE),
 # be handed code through NODE_OPTIONS or --inspect, or load its code from
 # anywhere but its own app.asar. syncto uses none of these. Two fuses are left

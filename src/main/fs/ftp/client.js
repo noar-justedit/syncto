@@ -50,7 +50,7 @@ const { enterActiveMode } = require('./active');
 const { makePassive } = require('./passive');
 
 let certPolicy = null;
-// (0.9.3) What is remembered for a server whose certificate an authority signed.
+// (0.9.4) What is remembered for a server whose certificate an authority signed.
 const CA_SIGNED = 'authority';
 // { known(host, port) → fingerprint | null, remember(host, port, fingerprint) }
 function setCertPolicy(p) { certPolicy = p || null; }
@@ -162,7 +162,7 @@ const HASH_NAMES = { sha256: 'SHA-256', sha1: 'SHA-1', md5: 'MD5', crc32: 'CRC32
 const X_COMMANDS = { sha256: 'XSHA256', sha1: 'XSHA1', md5: 'XMD5', crc32: 'XCRC' };
 const HEX_LEN = { sha256: 64, sha1: 40, md5: 32, crc32: 8 };
 
-// (0.9.3) A 4xx answer ("450 file busy", "421 too many users") says "try again
+// (0.9.4) A 4xx answer ("450 file busy", "421 too many users") says "try again
 // later", not "there is nothing here". Taken for an absence, a file the server
 // was busy with counted as deleted while it stayed on the server.
 function transient(res, what) {
@@ -206,7 +206,7 @@ class FtpRemote {
     return run;
   }
 
-  // (0.9.3) Keeps a silent connection open (FtpFs._keepAlive).
+  // (0.9.4) Keeps a silent connection open (FtpFs._keepAlive).
   noop() { return this._q(() => this.client.send('NOOP')); }
 
   async connect() {
@@ -274,7 +274,7 @@ class FtpRemote {
     const cert = socket && socket.getPeerCertificate ? socket.getPeerCertificate() : null;
     const fp = certFingerprint(cert);
     const known = certPolicy && certPolicy.known ? certPolicy.known(host, port) : null;
-    // (0.9.3) A server whose certificate an authority signed is remembered as
+    // (0.9.4) A server whose certificate an authority signed is remembered as
     // such ("authority"), not by fingerprint (it is renewed every few weeks).
     // From then on a certificate nobody signed is refused like a changed one:
     // before, it counted as a first visit and an impostor was pinned.
@@ -356,7 +356,7 @@ class FtpRemote {
       if (out.some(e => e._naive)) {
         let off = null;
         try { off = await this._tzOffset(d, out); } catch (_) {}
-        // (0.9.3) How far the date can be trusted: to the minute, or only to the
+        // (0.9.4) How far the date can be trusted: to the minute, or only to the
         // day ("Jan 05  2025": no time for files over six months old). The
         // comparison asks MDTM (exact, UTC) when such a date is all that tells
         // two files apart.

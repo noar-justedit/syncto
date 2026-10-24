@@ -666,7 +666,7 @@ class Session {
   async _openLanes(job) {
     const want = Math.max(1, Math.min(10, Number((job.sync || {}).transferLanes) || 1));
     const out = { left: [this.left], right: [this.right] };
-    // (0.9.3) An FTP lane needs two connections (control and transfer). Each is
+    // (0.9.4) An FTP lane needs two connections (control and transfer). Each is
     // opened before the run, the first lane's first: a server limiting the
     // connections per account gets the lanes it can take, instead of failing
     // files halfway through.
