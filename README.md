@@ -27,6 +27,7 @@ in green, updates in orange, deletions in red, moves in blue.</sub>
 |---|---|
 | **Compare** | by modification time and size, byte for byte, or by size only |
 | **Synchronize** | 2 Ways, Mirror, Update, or a Custom rule per category |
+| **Compare only** | the COMPARE mode browses both sides in two panels and shows what differs; a right-click copies chosen items to the other side, nothing else is ever written |
 | **Multi-pair** | one job synchronizes any number of folder pairs, FreeFileSync-style |
 | **Moved files** | a rename is detected and replayed as a rename — no re-copy |
 | **Verified copy** | one mode: every file read back and compared (xxHash64), with an optional checksum sidecar |
@@ -207,6 +208,44 @@ published here.
 | **Update →** | new and changed files are copied rightward. Nothing is ever removed. |
 | **2 Ways** | both sides converge. Needs the database from the previous run to tell a deletion from a creation — the first run therefore only copies. |
 | **Custom** | you decide, per category, in the settings. |
+
+### Compare only
+
+The **COMPARE** mode, next to VERIFY in the modes row, is for comparing two
+folders or volumes without synchronizing anything. After pressing COMPARE, the
+grid gives way to two panels, source and destination, showing one folder at a
+time: opening a folder on one side opens it on the other, and the overview on
+the left jumps straight to any folder.
+
+- **Yellow** name: only on this side. **Green** name: newer on this side (or
+  the same date with another size, green on both sides).
+- A **dot** after a folder: something differs inside it.
+- The chips under the panels count, over the whole comparison, what is only in
+  the source, only in the destination, newer on either side, different, or
+  identical. A click shows that category alone; the button at the right of the
+  path shows only what differs. "Filter the view" filters the names.
+- Click selects, double-click opens a folder. Cmd-click (Ctrl-click on
+  Windows and Linux) adds a row to the selection, Shift-click selects a range,
+  Cmd/Ctrl+A selects the whole folder.
+- Right-click a row to reveal it in the Finder / Explorer, on either side.
+
+**Copy, item by item.** Right-click a selection and choose **Copy to
+destination** or **Copy to source**. A folder goes with everything inside it.
+The copy adds what is missing on the other side and replaces what is older
+there; it never deletes anything and never replaces a newer file (those are
+counted and left as they are, as are excluded files and conflicts). When files
+are about to be replaced, a dialog says how many and where the replaced
+versions go (trash, revision folder, or deleted permanently, as set in
+Settings › Deletion); a copy that only adds starts at once. It is a normal run
+of the engine on those rows only: same folder lock, read-back check, retries
+and report as SYNCHRONIZE. The panels are updated from what was copied,
+without comparing everything again.
+
+Apart from these copies, nothing is written in this mode: SYNCHRONIZE and
+auto-sync are disabled, and the engine refuses a synchronization of a job in
+COMPARE mode. Choosing a synchronization mode again brings back the grid and
+the mode the job had. The comparison uses the same settings as always (time and
+size, content, or size).
 
 ### Moved files
 

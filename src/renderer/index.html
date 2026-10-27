@@ -1015,6 +1015,10 @@ box-shadow:0 6px 18px rgba(0,0,0,.4);pointer-events:none;animation:tipIn .12s ea
 :root{
   --page:#0a0b0e; --card:#14161c; --ins:#0e1014; --raise:#1b1d24;
   --text4:#6f757f;
+  /* (0.9.5) COMPARE mode only, with filo's and FileZilla's codes: yellow =
+     only on this side, and its green = newer on this side. The one place the
+     green does not mean "read back and verified" (Noar, 27/10/2026). */
+  --yellow:#f2c94c; --yellow-d:rgba(242,201,76,.18);
   --r-card:14px; --r-ins:11px; --r-field:8px; --r-badge:4px;
   --accent:#2cc4ea;
   /* Anything above that still asks for the old accent tints gets neutral
@@ -1335,6 +1339,63 @@ html,body{background:var(--page);}
 #var-mirror.on{box-shadow:inset 0 0 0 1.5px var(--orange);}
 #var-update.on{box-shadow:inset 0 0 0 1.5px var(--green);}
 #var-custom.on{box-shadow:inset 0 0 0 1.5px var(--text3);}
+/* (0.9.5) COMPARE: neutral like VERIFY, it does nothing to the files. */
+.modes-row #var-compare{flex:0 0 auto;padding-right:18px;}
+#var-compare .mico{color:var(--text2);background:rgba(255,255,255,.06);border-radius:var(--r-field);}
+#var-compare.on{background:var(--ins);box-shadow:inset 0 0 0 1.5px var(--text3);}
+#var-compare.on .mico{color:var(--text);}
+#var-compare.on .msel{visibility:visible;}
+/* ── (0.9.5) The COMPARE view ──────────────────────────────────────────── */
+#cmpview{display:none;flex:1;flex-direction:column;min-height:0;}
+body.cmpmode #cmpview{display:flex;}
+body.cmpmode #scope-bar,body.cmpmode #gridhead,body.cmpmode #gridscroll,body.cmpmode #gridempty{display:none !important;}
+body.cmpmode .viewopt.eq{display:none;}
+body.cmpmode #auto-switch + .slider,body.cmpmode .autorow{opacity:.35;pointer-events:none;}
+#cmp-bar{display:flex;align-items:center;gap:8px;padding:10px 6px 8px;}
+.cmp-ib{width:30px;height:30px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;border:none;
+  border-radius:var(--r-field);background:var(--ins);color:var(--text2);cursor:pointer;}
+.cmp-ib:hover:not(:disabled){color:var(--text);}
+.cmp-ib:disabled{opacity:.4;cursor:default;}
+.cmp-ib svg{width:14px;height:14px;}
+.cmp-ib.on{background:var(--yellow-d);color:var(--yellow);}
+#cmp-pair{height:30px;background:var(--ins);border:none;border-radius:var(--r-field);color:var(--text);
+  font-size:12px;padding:0 8px;max-width:30%;}
+#cmp-crumbs{flex:1;min-width:0;height:30px;display:flex;align-items:center;gap:2px;background:var(--ins);
+  border-radius:var(--r-field);padding:0 8px;overflow:hidden;white-space:nowrap;font-family:var(--mono);font-size:12px;color:var(--text3);}
+#cmp-crumbs .cr{background:none;border:none;color:var(--text2);font:inherit;padding:3px 4px;border-radius:5px;cursor:pointer;
+  overflow:hidden;text-overflow:ellipsis;max-width:40ch;}
+#cmp-crumbs .cr:hover{color:var(--text);background:rgba(255,255,255,.05);}
+#cmp-crumbs .cr.cur{color:var(--text);font-weight:700;cursor:default;}
+#cmp-crumbs .sep{color:var(--text4);padding:0 2px;}
+#cmp-panels{flex:1;display:flex;gap:8px;min-height:0;padding-bottom:6px;}
+.cmp-panel{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--ins);border-radius:var(--r-ins);overflow:hidden;}
+.cmp-h{display:flex;align-items:baseline;gap:8px;padding:9px 12px 4px;min-width:0;}
+.cmp-side{font-size:10px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:var(--text3);flex-shrink:0;}
+.cmp-path{font-family:var(--mono);font-size:11px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:rtl;text-align:left;}
+.cmp-cols{display:grid;grid-template-columns:minmax(0,1fr) 84px 124px;gap:10px;padding:4px 14px 6px 40px;
+  font-size:9.5px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--text4);}
+.cmp-cols .r{text-align:right;}
+.cmp-list{flex:1;min-height:0;overflow:auto;position:relative;padding:0 6px;outline:none;}
+.cmp-spacer{position:relative;}
+.cmp-body{position:absolute;left:0;right:0;top:0;}
+.cmp-row{display:grid;grid-template-columns:18px minmax(0,1fr) 84px 124px;gap:10px;align-items:center;height:27px;
+  padding:0 8px;border-radius:6px;font-size:12.5px;cursor:default;}
+.cmp-row:hover{background:rgba(255,255,255,.03);}
+.cmp-row.sel{background:rgba(255,255,255,.07);}
+.cmp-list:focus .cmp-row.sel{box-shadow:var(--focus);}
+.cmp-row.off{opacity:.45;}
+.cmp-row > svg{width:15px;height:15px;color:var(--text3);}
+.cmp-row.fold > svg{color:#7fa8e8;}
+.cmp-row .nm{font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.cmp-row .nm .hl{padding:1px 6px;margin-left:-6px;border-radius:5px;}
+.cmp-row .nm .hl.o{background:var(--yellow-d);color:var(--yellow);}
+.cmp-row .nm .hl.n{background:var(--green-d);color:var(--green);}
+.cmp-row .nm .dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--text2);margin-left:8px;vertical-align:middle;}
+.cmp-row .sz,.cmp-row .dt{font-family:var(--mono);font-size:11.5px;color:var(--text2);text-align:right;white-space:nowrap;overflow:hidden;}
+.cmp-empty{display:none;margin:40px 20px;text-align:center;color:var(--text3);font-size:12.5px;line-height:1.5;}
+.cmp-foot{padding:6px 14px 9px;font-size:11px;color:var(--text3);min-height:14px;}
+.cmp-foot b{font-weight:800;} .cmp-foot .o{color:var(--yellow);} .cmp-foot .n{color:var(--green);}
+.stat.y{color:var(--yellow);} .stat.on.y{color:var(--yellow);}
 /* VERIFY: on the modes line, apart from the four. */
 .modes-row .modes-sep{flex:0 0 1px;align-self:stretch;margin:4px 6px;background:var(--text4);opacity:.5;}
 .modes-row #btn-verify{flex:0 0 auto;padding-right:18px;}
@@ -1611,6 +1672,14 @@ body.lassoing .tooltip-float{display:none !important;}
     <!-- Not a fifth mode: it copies nothing. It sits on the same line because
          it is the other thing you come here to do with a folder. -->
     <span class="modes-sep" aria-hidden="true"></span>
+    <!-- (0.9.5) COMPARE: the job only compares, and is browsed in two panels
+         (filo's synchronized browsing). Nothing is ever written. -->
+    <button class="mbtn" id="var-compare" data-tip="COMPARE: browse both sides in two panels and see what differs. Nothing is copied, nothing is written.">
+      <span class="mico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="7" height="16" rx="1.5"/><rect x="14" y="4" width="7" height="16" rx="1.5"/></svg></span>
+      <div class="minfo">
+        <div class="mbadge-row"><div class="mbadge">COMPARE</div><span class="msel">Selected</span></div>
+      </div>
+    </button>
     <button class="mbtn" id="btn-verify" data-tip="Verify a folder against its syncto checksum list">
       <span class="mico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="m9 12 2 2 4-4"/></svg></span>
       <div class="minfo">
@@ -1667,7 +1736,7 @@ body.lassoing .tooltip-float{display:none !important;}
     </div>
   </div>
   <div class="tool-spacer"></div>
-  <span class="viewopt"><label class="switch"><input type="checkbox" id="chk-equal"><span class="slider"></span></label>Show identical</span>
+  <span class="viewopt eq"><label class="switch"><input type="checkbox" id="chk-equal"><span class="slider"></span></label>Show identical</span>
   <span class="viewopt"><label class="switch"><input type="checkbox" id="chk-excluded"><span class="slider"></span></label>Show excluded</span>
   <input id="search" placeholder="Filter the view…" spellcheck="false">
 </div>
@@ -1703,6 +1772,34 @@ body.lassoing .tooltip-float{display:none !important;}
     <div id="ge-title"></div>
     <div id="ge-sub">Pick two folders, then press <b>Compare</b>.</div>
     <button id="ge-act"></button>
+  </div>
+  <!-- (0.9.5) COMPARE mode: two panels, one folder at a time, both sides
+       moving together. Built by app.js (renderCompare). -->
+  <div id="cmpview" aria-label="Compare">
+    <div id="cmp-bar">
+      <button class="cmp-ib" id="cmp-up" aria-label="Up one folder" data-tip="Up one folder (Backspace)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>
+      </button>
+      <select id="cmp-pair" aria-label="Folder pair" style="display:none"></select>
+      <div id="cmp-crumbs"></div>
+      <button class="cmp-ib" id="cmp-diff" aria-label="Differences only" aria-pressed="false" data-tip="DIFFERENCES ONLY: show only what differs between the two sides">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M7 12h10"/><path d="M10 18h4"/></svg>
+      </button>
+    </div>
+    <div id="cmp-panels">
+      <div class="cmp-panel" id="cmp-left" data-side="left">
+        <div class="cmp-h"><span class="cmp-side">Source</span><span class="cmp-path"></span></div>
+        <div class="cmp-cols"><div>Name</div><div class="r">Size</div><div class="r">Date</div></div>
+        <div class="cmp-list" tabindex="0"><div class="cmp-spacer"><div class="cmp-body"></div></div><div class="cmp-empty"></div></div>
+        <div class="cmp-foot"></div>
+      </div>
+      <div class="cmp-panel" id="cmp-right" data-side="right">
+        <div class="cmp-h"><span class="cmp-side">Destination</span><span class="cmp-path"></span></div>
+        <div class="cmp-cols"><div>Name</div><div class="r">Size</div><div class="r">Date</div></div>
+        <div class="cmp-list" tabindex="0"><div class="cmp-spacer"><div class="cmp-body"></div></div><div class="cmp-empty"></div></div>
+        <div class="cmp-foot"></div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -2121,6 +2218,23 @@ body.lassoing .tooltip-float{display:none !important;}
       <button class="m-btn" id="cf-cancel">Cancel</button>
       <button class="m-btn" id="btn-cf-settings" style="display:none">Open settings</button>
       <button class="m-btn primary" id="cf-ok">Synchronize</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ (0.9.5) Copy from the COMPARE panels, when it replaces files ═ -->
+<div class="ov" id="ov-cmpcopy">
+  <div class="mcard sm">
+    <div class="m-h1" id="cc-title">Replace files?</div>
+    <div class="m-sub" id="cc-sub"></div>
+    <div class="sum-grid" id="cc-grid"></div>
+    <div class="err-block" id="cc-warn">
+      <div class="err-title">Warning</div>
+      <div id="cc-warn-body"></div>
+    </div>
+    <div class="m-btns">
+      <button class="m-btn" id="cc-cancel">Cancel</button>
+      <button class="m-btn primary" id="cc-ok">Copy</button>
     </div>
   </div>
 </div>

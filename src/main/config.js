@@ -143,6 +143,10 @@ function defaultJob() {
       enabled: false,
       minutes: 30,                      // compare + sync with current settings
     },
+    // (0.9.5) COMPARE mode: the job compares and is browsed in two panels,
+    // and never synchronizes. The mode it had (sync.variant) is kept for when
+    // a synchronization mode is chosen again.
+    compareOnly: false,
   };
 }
 

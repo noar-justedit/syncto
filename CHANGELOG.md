@@ -4,6 +4,37 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.9.5] — 2026-10-27
+
+### Added
+
+- **COMPARE mode**, asked for by Manuel López: compare two folders or volumes
+  side by side without synchronizing anything. Next to VERIFY in the modes
+  row. After a comparison, two panels show one folder of the source and the
+  same folder of the destination; opening a folder (double-click) on one side
+  opens it on the other, as filo's synchronized browsing does, with its codes: a yellow name is
+  only on this side, a green name is newer on this side. A dot after a folder
+  says something differs inside it. The chips count what is only in the
+  source, only in the destination, newer on either side, different and
+  identical; a click shows that category alone, and "Differences only" hides
+  what is identical. The overview jumps to a folder, "Filter the view" filters
+  the names, a right-click reveals a row in the Finder / Explorer.
+  SYNCHRONIZE and auto-sync are disabled, leftovers are not cleared, and the
+  engine refuses to synchronize such a job. The job keeps its synchronization
+  mode for when one is chosen again, and a job saved in COMPARE mode reopens
+  in it.
+- **Copy item by item from the COMPARE panels** (Noar): right-click a
+  selection, *Copy to destination* or *Copy to source*. Folders go with their
+  contents, and folders missing on the other side are created on the way.
+  Missing files are added, older ones replaced; nothing is deleted and a newer
+  file is never replaced (counted and left alone, like excluded files and
+  conflicts). A dialog asks first only when files are replaced, and says
+  where the replaced versions go. The run is the engine's own, restricted to
+  those rows and to their pair: same checks, lock, read-back and report. The
+  panels are updated from what was copied, without a new comparison.
+- **Several rows at once** in the panels: Cmd/Ctrl-click, Shift-click,
+  Cmd/Ctrl+A.
+
 ## [0.9.4] — 2026-10-24
 
 A full review of 0.9.1 to 0.9.3 (bugs, security, window, speed), and the

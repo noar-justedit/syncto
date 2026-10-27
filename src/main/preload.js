@@ -40,6 +40,8 @@ const api = {
   jobSave    : (job, as) => ipcRenderer.invoke('job-save', job, as),
   jobClose   : (p)       => ipcRenderer.invoke('job-close', p),
   getOverview: (view, open, sort) => ipcRenderer.invoke('get-overview', view, open, sort),
+  compareBrowse: (p, rel, f) => ipcRenderer.invoke('compare-browse', p, rel, f),
+  compareCopy: (job, indices, to, dryRun) => ipcRenderer.invoke('compare-copy', job, indices, to, !!dryRun),
   revealNode : (idx, side)=> ipcRenderer.invoke('reveal-node', idx, side),
   preflight  : (job)     => ipcRenderer.invoke('preflight', job),
 

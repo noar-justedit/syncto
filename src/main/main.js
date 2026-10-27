@@ -595,6 +595,8 @@ function openJobFile(p) {
 // Removing a lock a previous run left behind. Never done on the way past: this
 // can mean watching the file for a full minute to be sure nobody is feeding it.
 ipcMain.handle('clear-locks', async (_, job, items) => {
+  // (0.9.5) COMPARE mode writes nothing, leftovers included.
+  if (job && job.compareOnly) return { ok: false, error: 'This job is in COMPARE mode: nothing is written. Choose a synchronization mode to clear leftovers.' };
   try {
     const results = await clearStaleLocks(job, items, {
       credentials: credentialMap(prefs.data.servers),
@@ -726,6 +728,8 @@ ipcMain.handle('compare-cancel', () => { tokens.compare.cancelled = true; return
 
 ipcMain.handle('get-rows', (_, offset, limit, view) => session.rows(offset, limit, view));
 ipcMain.handle('get-overview', (_, view, open, sort) => session.overview(view, open, sort));
+// (0.9.5) The COMPARE view: one folder of one pair, both sides. Read only.
+ipcMain.handle('compare-browse', (_, p, rel, f) => session.browse(Number(p) || 0, String(rel || ''), f && typeof f === 'object' ? f : {}));
 
 // Right-click → Reveal. The window sends a row index and a side; the path is
 // resolved here, where the pairs, the two roots and each side's own spelling of
@@ -771,6 +775,31 @@ ipcMain.handle('sync', async (_, job) => {
     return { ok: true, ...res };
   } catch (err) {
     return { ok: false, error: err.message || String(err) };
+  } finally {
+    holdSleep(false);
+  }
+});
+
+// (0.9.5) Copy from the COMPARE panels: the rows picked there, to one side.
+// `dryRun` only answers what would be copied and replaced.
+ipcMain.handle('compare-copy', async (_, job, indices, to, dryRun) => {
+  if (!Array.isArray(indices) || indices.length > 1e6) return { ok: false, error: 'Nothing to copy.' };
+  if (dryRun) {
+    try { return { ok: true, ...(await session.copyItems(job, indices, to, { dryRun: true, trashItem })) }; }
+    catch (err) { return { ok: false, error: err.message || String(err) }; }
+  }
+  tokens.sync.cancelled = false;
+  tokens.sync.paused = false;
+  holdSleep(true);
+  try {
+    const res = await session.copyItems(job, indices, to, {
+      token: tokens.sync,
+      trashItem,
+      onProgress: p => send('sync-progress', p),
+    });
+    return { ok: true, ...res, stats: session.stats };
+  } catch (err) {
+    return { ok: false, error: err.message || String(err), stats: session.stats };
   } finally {
     holdSleep(false);
   }
