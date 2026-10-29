@@ -691,7 +691,7 @@ class Comparer {
     const res = compareTime(l.mtime, r.mtime, tol, shifts);
     if (res === 'equal') {
       if (l.size === r.size) node.cat = CAT.EQUAL;
-      else { node.cat = CAT.CONFLICT; node.catMsg = 'Same date but a different size.'; }
+      else { node.cat = CAT.CONFLICT; node.catMsg = 'Same date but a different size.'; node.sizeOnly = true; }   // (0.9.7) copyable from COMPARE
     } else if (res === 'leftInvalid' || res === 'rightInvalid') {
       node.cat = CAT.TIME_INVALID;
       node.catMsg = 'Invalid modification date.';

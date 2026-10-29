@@ -113,11 +113,13 @@ fi
 # (0.9.4) Never published, wherever they sit: dependencies installed in a
 # sub-folder, and anything that looks like a secret (an environment file, npm
 # credentials, a certificate or a private key). Listed below, so nothing is
-# held back without a word.
+# held back without a word. (0.9.7) Also App Store Connect API keys (.p8), SSH
+# keys, .netrc and Java keystores.
 SECRETS="$(find "$TMP/repo" -path "$TMP/repo/.git" -prune -o \( -type d -name node_modules -prune -print \) -o \
   \( -type f \( -name '.env' -o -name '.env.*' -o -name '.npmrc' -o -name '*.p12' -o -name '*.pfx' \
   -o -name '*.pem' -o -name '*.key' -o -name '*.cer' -o -name '*.mobileprovision' -o -name '*.keychain' \
-  -o -name '*.keychain-db' \) -print \))"
+  -o -name '*.keychain-db' -o -name '*.p8' -o -name 'id_rsa*' -o -name 'id_ed25519*' -o -name 'id_ecdsa*' \
+  -o -name '.netrc' -o -name '*.jks' -o -name '*.keystore' \) -print \))"
 if [ -n "$SECRETS" ]; then
   echo "Kept back (never sent to GitHub):"
   printf '%s\n' "$SECRETS" | sed "s#^$TMP/repo/#  #"

@@ -21,11 +21,11 @@
 // sends back edits by index. That keeps a 200 000-file comparison responsive.
 
 const fs = require('fs');
-const { Comparer, CAT, OP, CHECKSUM_FILE, DEFAULT_TOLERANCE_SEC, sameTime } = require('./compare');
+const { Comparer, CAT, OP, CHECKSUM_FILE, DEFAULT_TOLERANCE_SEC, sameTime, compareTime } = require('./compare');
 const { PathFilter } = require('./filter');
 const { applyDirections, computeStats, operationFor, applyFolderRules,
         detectMoves, dissolveMove, usesDatabase, plannedRenames } = require('./direction');
-const { loadPairDb, savePairDb, buildSession, pairIdFor, readSideSession } = require('./db');
+const { SyncDb, loadPairDb, savePairDb, buildSession, pairIdFor, readSideSession } = require('./db');
 const { SyncRunner } = require('./sync');
 const { FsPool, parseLocation, redactLocation, isServerAddress } = require('../fs/afs');
 const { NativeFs } = require('../fs/native');
@@ -269,7 +269,7 @@ class Session {
             (v.scope && v.scope.rel) || ''].join('\u0000');
   }
 
-  _touched() { this._idxCache = null; }
+  _touched() { this._idxCache = null; this._cmpAgg = null; }   // (0.9.6) COMPARE counts too
   // (0.9.0) A row that lands during a run can only LEAVE the list: the cached
   // list is filtered when next asked for, instead of rebuilt from every node
   // at every file (13 % of the main thread at 400 000 rows).
@@ -379,9 +379,12 @@ class Session {
   // expanded here so the grid, the overview and the Space shortcut all agree.
   _expand(indices) {
     const out = new Set();
-    for (const i of indices) {
+    for (const i of new Set(indices)) {
       const n = this.nodes[i];
-      if (!n) continue;
+      // (0.9.7) Already in: listed twice, or inside a folder already
+      // expanded. The same folder sent 5 000 times walked its subtree 5 000
+      // times (seconds of a frozen main process).
+      if (!n || out.has(n.idx)) continue;
       out.add(n.idx);
       if (n.type === 'folder') {
         // (0.9.0) Nodes are listed parent first with idx === position, so a
@@ -453,6 +456,7 @@ class Session {
     // put it back. "Show excluded", the switch the grid already has, keeps
     // those rows here too.
     const showX = !!(view && view.showExcluded);
+    const cmpView = !!(view && view.cmp);
     const cmp = overviewSorter(sort);
     // The folders the panel has unfolded. A row always totals everything
     // underneath it; unfolding one adds its DIRECT contents as rows of their
@@ -466,9 +470,14 @@ class Session {
       // Walked rather than split: at 400 000 rows an array per node — rebuilt
       // every time a folder is unfolded — was 138 ms of pure allocation.
       const rel = n.rel;
-      const busy = (n.active && n.op !== OP.NONE && n.op !== OP.DO_NOTHING &&
-                    n.op !== OP.MOVE_LEFT_FROM && n.op !== OP.MOVE_RIGHT_FROM) ||
-                   ren.has(n.idx);   // (0.9.0) a rename for Windows is work too
+      // (0.9.7) In COMPARE mode the panel lists what DIFFERS, not the plan of
+      // the synchronization mode kept for later (Manuel López's panels and
+      // this one disagreed: destination-only files at 0 B, some missing).
+      const busy = cmpView
+        ? (n.active && n.type !== 'folder' && n.cat !== CAT.EQUAL)
+        : (n.active && n.op !== OP.NONE && n.op !== OP.DO_NOTHING &&
+           n.op !== OP.MOVE_LEFT_FROM && n.op !== OP.MOVE_RIGHT_FROM) ||
+          ren.has(n.idx);   // (0.9.0) a rename for Windows is work too
       let key = '';
       let from = 0;
       for (let i = 0; from <= rel.length; i++) {
@@ -509,6 +518,10 @@ class Session {
             g.bytes += Math.max(n.left.exists ? n.left.size || 0 : 0,
                                 n.right.exists ? n.right.size || 0 : 0);
           }
+        } else if (busy && cmpView) {
+          g.items++;
+          // What differs, the larger of the two copies.
+          g.bytes += Math.max(n.left.exists ? n.left.size || 0 : 0, n.right.exists ? n.right.size || 0 : 0);
         } else if (busy) {
           g.items++;
           // The bytes that will cross: the source side of a copy. A deletion
@@ -709,20 +722,34 @@ class Session {
     const OVER   = to === 'right' ? OP.OVERWRITE_RIGHT : OP.OVERWRITE_LEFT;
     const newerThere = to === 'right' ? CAT.RIGHT_NEWER : CAT.LEFT_NEWER;
     const nodes = this.nodes;
-    const out = { to, files: 0, folders: 0, bytes: 0, overwrite: 0, newer: 0, excluded: 0, unsure: 0, renames: 0, ops: new Map() };
+    const cfg = this.cmpCfg || {};
+    const out = { to, files: 0, folders: 0, bytes: 0, overwrite: 0, newer: 0, excluded: 0, unsure: 0, changedBoth: 0, renames: 0, ops: new Map() };
     for (const i of this._expand(indices)) {
       const n = nodes[i];
       if (!n[from].exists) continue;                       // nothing to send from this side
       const file = n.type !== 'folder';
       if (n.active === false) { if (file) out.excluded++; continue; }
-      if (n.cat === CAT.CONFLICT || n.cat === CAT.TIME_INVALID) { out.unsure++; continue; }
       if (!n[to].exists) {
         out.ops.set(i, CREATE);
         if (file) { out.files++; out.bytes += n[from].size || 0; } else out.folders++;
         continue;
       }
       if (!file || n.cat === CAT.EQUAL) continue;
+      // A file on one side and a folder on the other, content that could not
+      // be read, an invalid date: nobody can say which copy to keep. (0.9.7)
+      // Same date and another size is copied, after the confirmation (Noar).
+      if ((n.cat === CAT.CONFLICT && !n.sizeOnly) || n.cat === CAT.TIME_INVALID) { out.unsure++; continue; }
+      // (0.9.7) Changed on both sides since the last TWO WAY run: left for
+      // the grid, where it is resolved by hand (Noar).
+      if (n.dir === 'conflict' && n.dbChangeL && n.dbChangeR && n.dbChangeL !== 'noChange' && n.dbChangeR !== 'noChange') {
+        out.changedBoth++; continue;
+      }
       if (n.cat === newerThere) { out.newer++; continue; }
+      // (0.9.7) Compared by content or size, no date was looked at: a newer
+      // copy over there was replaced all the same.
+      if (n.cat === CAT.DIFFERENT && compareTime(n[to].mtime, n[from].mtime, cfg.timeTolerance, cfg.timeShifts) === 'leftNewer') {
+        out.newer++; continue;
+      }
       out.ops.set(i, OVER);
       out.files++; out.overwrite++; out.bytes += n[from].size || 0;
     }
@@ -753,10 +780,15 @@ class Session {
     return saved;
   }
 
+  // Every operation back as it was: nothing was written. (0.9.7)
+  _copyRestore(saved) {
+    for (const n of this.nodes) n.op = saved[n.idx];
+  }
+
   // The rows the copy did now hold what is on disk: the panels show them as
   // the same on both sides without comparing everything again (a NAS of
   // 400 000 files takes minutes). Every other row gets its operation back.
-  _copyEnd(saved, plan, applied) {
+  _copyEnd(saved, plan, applied, renamed) {
     const nodes = this.nodes;
     const done = new Set();
     if (plan && applied) {
@@ -782,13 +814,23 @@ class Session {
         const id = (to === 'right' ? a.idR : a.idL) || null;
         n[to] = { exists: true, size: n.type === 'folder' ? n[from].size : (a.size != null ? a.size : n[from].size), mtime: mt, id };
         if (n.type === 'folder' || variant !== 'timeSize' || sameTime(n[from].mtime, mt, cfg.timeTolerance, cfg.timeShifts)) {
-          n.cat = CAT.EQUAL; n.catMsg = ''; n.dir = 'none';
+          n.cat = CAT.EQUAL; n.catMsg = '';
         } else {
           // The copy got today's date (dates not kept): newer on the side it landed.
           n.cat = to === 'right' ? CAT.RIGHT_NEWER : CAT.LEFT_NEWER;
         }
-        n.op = operationFor(n);
+        n.dbChangeL = 'noChange'; n.dbChangeR = 'noChange';
       }
+      // (0.9.7) Their direction as a new comparison decides it: TWO WAY and
+      // UPDATE read the database this copy just wrote (or none, if it wrote
+      // none), the other modes the categories. The kept direction re-copied
+      // files the database already called synchronized.
+      applyDirections([...done].map(i => nodes[i]), plan.sync || {}, cfg, this.db);
+    }
+    // (0.9.7) Renamed for Windows by this copy: nothing left to rename.
+    if (renamed) {
+      for (const i of renamed.left || []) if (nodes[i]) delete nodes[i].fixL;
+      for (const i of renamed.right || []) if (nodes[i]) delete nodes[i].fixR;
     }
     this._touched();
     applyFolderRules(nodes);
@@ -850,7 +892,7 @@ class Session {
     }
     const endedAt = Date.now();
     // (0.9.5) A copy from the COMPARE panels updates its rows from this.
-    if (opts && typeof opts.onApplied === 'function') opts.onApplied(run.applied);
+    if (opts && typeof opts.onApplied === 'function') opts.onApplied(run.applied, run.renamedIdx);
 
     // Checksum sidecars, one per side that actually received data. The list is
     // MERGED with what is already there: each run only re-hashes what it
@@ -957,6 +999,11 @@ class Session {
     if (opts && typeof opts.lockLost === 'function' && opts.lockLost()) {
       run.notes.push('The synchronization database was NOT updated: the folder lock was lost, ' +
         'so another machine may already have written its own.');
+    } else if (opts && opts.onlyCopy && usesDatabase(job.sync.variant) && !(this.db && this.db.available)) {
+      // (0.9.7) A copy from the COMPARE panels in a TWO WAY or UPDATE job that
+      // has never been synchronized: writing a database of the few rows it
+      // copied made every other difference a "both sides changed" conflict at
+      // the next comparison. The first real synchronization writes it.
     } else if (usesDatabase(job.sync.variant) || this.wantMoves) {
       try {
         const pairId = this.pairId || pairIdFor(job.pairId, this.left.path, this.right.path);
@@ -969,6 +1016,10 @@ class Session {
           this.left.path, this.right.path, keepRel);
         dbStamp = await savePairDb(this.left, this.right, pairId, session, this.dbDocs);
         this.dbDocs = null;   // (0.9.0) used once: the files have changed now
+        // (0.9.7) What is on disk now. The next copy from the COMPARE panels
+        // (or a SYNCHRONIZE without comparing again) merged onto the database
+        // read at comparison time, and undid what this run had recorded.
+        this.db = new SyncDb(session);
       } catch (err) {
         // This is an ERROR, not a note. A two-way run whose database was not
         // written looks perfect and lies to the next one: delete a file the
@@ -1043,37 +1094,82 @@ function cmpOf(n) {
 function emptyCounts() { return { onlyL: 0, onlyR: 0, newL: 0, newR: 0, diff: 0, same: 0 }; }
 function addCounts(a, b) { for (const k of CMP_CATS) a[k] += b[k] || 0; return a; }
 function cmpDiffers(c) { return !!(c && (c.onlyL || c.onlyR || c.newL || c.newR || c.diff)); }
-// Children of each folder and the folder of each path, built once per comparison.
+// Children of each folder, built once per comparison.
 function cmpIndex(s) {
   if (s._cmpIx && s._cmpIx.nodes === s.nodes) return s._cmpIx;
-  const kids = new Map(), byRel = new Map();
+  const kids = new Map();
   for (const n of s.nodes) {
-    byRel.set(n.rel, n.idx);
     const k = n.parent >= 0 ? n.parent : -1;
     if (!kids.has(k)) kids.set(k, []);
     kids.get(k).push(n.idx);
   }
-  s._cmpIx = { nodes: s.nodes, kids, byRel };
+  s._cmpIx = { nodes: s.nodes, kids };
   return s._cmpIx;
 }
+// (0.9.7) The index of each path, only for browse(): built with the rest it
+// took 250 ms and 14 MB at every comparison of 400 000 files, for nothing.
+function cmpByRel(s, ix) {
+  if (!ix.byRel) { ix.byRel = new Map(); for (const n of s.nodes) ix.byRel.set(n.rel, n.idx); }
+  return ix.byRel;
+}
+// (0.9.7) The names in lower case, once per comparison, for the search: it
+// lowered 400 000 names at every key typed.
+function cmpLower(s, ix) {
+  if (!ix.lower) ix.lower = s.nodes.map(n => n.name.toLowerCase());
+  return ix.lower;
+}
 // How many files of each kind every folder holds, all the way down. Files
-// only: a folder is a place, what differs is what is in it.
+// only: a folder is a place, what differs is what is in it. (0.9.7) One slot
+// per folder, not per row: 9.6 MB became a few hundred KB.
 function cmpAggregate(s, shown) {
   const nodes = s.nodes;
   const K = CMP_CATS.length;
-  const per = new Int32Array(nodes.length * K);
+  const slot = new Int32Array(nodes.length);
+  let F = 0;
+  for (const n of nodes) slot[n.idx] = n.type === 'folder' ? F++ : -1;
+  const per = new Int32Array(Math.max(1, F) * K);
   const root = emptyCounts();
   for (const n of nodes) {
     if (n.type === 'folder' || !shown(n)) continue;
     const k = CMP_CATS.indexOf(cmpOf(n));
     root[CMP_CATS[k]]++;
-    for (let p = n.parent; p >= 0; p = nodes[p].parent) per[p * K + k]++;
+    for (let p = n.parent; p >= 0; p = nodes[p].parent) per[slot[p] * K + k]++;
   }
   return {
     root,
-    counts(i) { const o = {}; for (let k = 0; k < K; k++) o[CMP_CATS[k]] = per[i * K + k]; return o; },
+    counts(i) { const o = {}; const b = slot[i] * K; for (let k = 0; k < K; k++) o[CMP_CATS[k]] = b >= 0 ? per[b + k] : 0; return o; },
   };
 }
+// (0.9.6) The same, kept until the rows change (_touched) or another
+// comparison replaces them: the tree asks for it at every click.
+function cmpAggOf(s, showExcluded) {
+  const key = showExcluded ? 'x' : 'a';
+  const c = s._cmpAgg;
+  if (c && c.nodes === s.nodes && c[key]) return c[key];
+  if (!c || c.nodes !== s.nodes) s._cmpAgg = { nodes: s.nodes };
+  const shown = showExcluded ? () => true : n => n.active !== false;
+  return (s._cmpAgg[key] = cmpAggregate(s, shown));
+}
+// Children of a folder in the order the panels show them: folders first,
+// then names in natural order (clip 9 before clip 10). Sorted once per folder.
+const CMP_COLL = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+function cmpKids(s, ix, parent) {
+  if (!ix.sorted) ix.sorted = new Map();
+  let k = ix.sorted.get(parent);
+  if (!k) {
+    k = (ix.kids.get(parent) || []).slice();
+    const nodes = s.nodes;
+    k.sort((a, b) => {
+      const fa = nodes[a].type === 'folder', fb = nodes[b].type === 'folder';
+      return fa === fb ? CMP_COLL.compare(nodes[a].name, nodes[b].name) : (fa ? -1 : 1);
+    });
+    ix.sorted.set(parent, k);
+  }
+  return k;
+}
+// A tree fully opened on a NAS can be hundreds of thousands of rows: past
+// this, the window is told the list was cut.
+const CMP_TREE_MAX = 150000;
 
 function mergeStats(list) {
   const out = {
@@ -1143,6 +1239,8 @@ class MultiSession {
     // standing — sync() would happily run against half-compared sessions.
     this.comparedAt = 0;
     this.stats = null;
+    // (0.9.7) Which comparison the window's row numbers belong to.
+    this.gen = (this.gen || 0) + 1;
     this.planKey = planKeyOf(job);
     this.pairs = this._pairsOf(job);
     if (!this.pairs.length) throw new Error('Set at least one folder pair.');
@@ -1388,13 +1486,13 @@ class MultiSession {
     if (!s || !Array.isArray(s.nodes) || !pr) return empty;
     const ix = cmpIndex(s);
     const want = String(rel || '').replace(/^\/+|\/+$/g, '');
-    const at = want ? ix.byRel.get(want) : -1;
+    const at = want ? cmpByRel(s, ix).get(want) : -1;
     // A folder that is not in this comparison (renamed since, mistyped):
     // back to the root rather than an empty view that explains nothing.
     const here = at === undefined || (at >= 0 && s.nodes[at].type !== 'folder') ? -1 : at;
     const cur = here >= 0 ? s.nodes[here] : null;
     const shown = n => opts.showExcluded || n.active !== false;
-    const agg = cmpAggregate(s, shown);
+    const agg = cmpAggOf(s, !!opts.showExcluded);
     const search = String(opts.search || '').trim().toLowerCase();
     const cat = CMP_CATS.includes(opts.cat) ? opts.cat : '';
     const items = [];
@@ -1429,8 +1527,172 @@ class MultiSession {
       right: { exists: cur ? !!cur.right.exists : true, path: join(redactLocation(pr.right), cur ? (cur.relR || cur.rel) : '') },
       items,
       // What the chips count: every file of every pair.
-      totals: this.sessions.reduce((t, x) => addCounts(t, cmpAggregate(x, shown).root), emptyCounts()),
+      totals: this.sessions.reduce((t, x) => addCounts(t, cmpAggOf(x, !!opts.showExcluded).root), emptyCounts()),
     };
+  }
+
+  // (0.9.6) The COMPARE tree. Manuel López: "expand and collapse folders while
+  // keeping the overall structure visible", as Beyond Compare does. Both
+  // sides on the same rows (a row missing on one side is blank there).
+  // f: { view: 'all' | 'equal' | 'diff', cat, search, showExcluded }. Read
+  // from the comparison in memory, like browse.
+  //
+  // (0.9.7) The engine keeps which folders are open, and the flattened list:
+  // the window gets a skeleton of a few bytes per row (enough to select,
+  // move with the keyboard and offer the copy) and asks for the details of
+  // the rows it draws (cmpRows). Every click used to send the whole list
+  // back: 10 to 30 MB and up to 0.8 s per click on a large NAS.
+  // ops: { toggle: { idx, on }, expandDiff, collapse, reveal: rel }.
+  cmpTree(p, ops, f) {
+    const opts = f || {};
+    const o = ops && typeof ops === 'object' && !Array.isArray(ops) ? ops : {};
+    const pi = Number.isSafeInteger(p) && this.sessions[p] ? p : 0;
+    const s = this.sessions[pi];
+    const pr = this.pairs[pi];
+    if (!s || !Array.isArray(s.nodes) || !pr) return { ok: false, pairs: this.sessions.length, p: pi, count: 0, totals: emptyCounts() };
+    const nodes = s.nodes;
+    const ix = cmpIndex(s);
+    const showEx = !!opts.showExcluded;
+    const shown = n => showEx || n.active !== false;
+    const agg = cmpAggOf(s, showEx);
+    const view = opts.view === 'equal' || opts.view === 'diff' ? opts.view : 'all';
+    const cat = CMP_CATS.includes(opts.cat) ? opts.cat : '';
+    const search = String(opts.search || '').trim().toLowerCase();
+    const st = this._treeState(pi, search);
+    if (o.collapse) { st.open.clear(); st.shut.clear(); st.shutAll = true; }
+    if (o.expandDiff) { for (const r of this.cmpDiffFolders(pi, opts)) { st.open.add(r); st.shut.delete(r); } st.shutAll = false; }
+    if (o.toggle) {
+      const t = this._split(Number(o.toggle.idx));
+      if (t.s === s && nodes[t.idx].type === 'folder') {
+        const rel = nodes[t.idx].rel;
+        if (o.toggle.on) { st.open.add(rel); st.shut.delete(rel); } else { st.open.delete(rel); st.shut.add(rel); }
+      }
+    }
+    let revealIdx = -1;
+    if (typeof o.reveal === 'string' && o.reveal) {
+      const at = cmpByRel(s, ix).get(o.reveal);
+      if (at != null) {
+        revealIdx = at;
+        for (let a = at; a >= 0; a = nodes[a].parent) if (nodes[a].type === 'folder') { st.open.add(nodes[a].rel); st.shut.delete(nodes[a].rel); }
+      }
+    }
+    // A search shows what matches, and opens the folders on the way to it
+    // (unless closed by hand since).
+    let match = null, anc = null;
+    if (search) {
+      const lower = cmpLower(s, ix);
+      match = new Uint8Array(nodes.length); anc = new Uint8Array(nodes.length);
+      for (const n of nodes) {
+        if (!shown(n) || !lower[n.idx].includes(search)) continue;
+        match[n.idx] = 1;
+        for (let a = n.parent; a != null && a >= 0 && !anc[a]; a = nodes[a].parent) anc[a] = 1;
+      }
+    }
+    const filesIn = c => c.onlyL + c.onlyR + c.newL + c.newR + c.diff + c.same;
+    const keep = (n, c, inside) => {
+      const folder = n.type === 'folder';
+      if (cat && (folder ? !(c === cat || inside[cat] > 0) : c !== cat)) return false;
+      if (view === 'diff' && (folder ? !(c !== 'same' || cmpDiffers(inside)) : c === 'same')) return false;
+      if (view === 'equal' && (folder ? !(c === 'same' && (inside.same > 0 || !filesIn(inside))) : c !== 'same')) return false;
+      return true;
+    };
+    const list = [], depths = [], bits = [], cmps = [];
+    let truncated = false;
+    const walk = (parent, depth, under) => {
+      for (const i of cmpKids(s, ix, parent)) {
+        if (list.length >= CMP_TREE_MAX) { truncated = true; return; }
+        const n = nodes[i];
+        if (!shown(n)) continue;
+        if (match && !under && !match[i] && !anc[i]) continue;
+        const folder = n.type === 'folder';
+        const c = cmpOf(n);
+        const inside = folder ? agg.counts(i) : null;
+        if (!keep(n, c, inside)) continue;
+        const auto = !!(anc && !under && anc[i]) && !st.shutAll && !st.shut.has(n.rel);
+        const opened = folder && (st.open.has(n.rel) || auto);
+        const L = !!n.left.exists, R = !!n.right.exists;
+        // What a copy could carry each way (the menu offers a side only then).
+        const sendR = L && (folder ? (!R || !!(inside.onlyL || inside.newL || inside.diff)) : (c === 'onlyL' || c === 'newL' || c === 'diff'));
+        const sendL = R && (folder ? (!L || !!(inside.onlyR || inside.newR || inside.diff)) : (c === 'onlyR' || c === 'newR' || c === 'diff'));
+        list.push(i); depths.push(depth); cmps.push(CMP_CATS.indexOf(c));
+        bits.push((folder ? 1 : 0) | (opened ? 2 : 0) | (folder && (ix.kids.get(i) || []).length ? 4 : 0) |
+          (L ? 8 : 0) | (R ? 16 : 0) | (n.active !== false ? 32 : 0) | (sendR ? 64 : 0) | (sendL ? 128 : 0));
+        if (opened) walk(i, depth + 1, under || !!(match && match[i]));
+      }
+    };
+    walk(-1, 0, false);
+    const id = (this._treeSeq = (this._treeSeq || 0) + 1);
+    this._tree = { id, pi, s, list: Int32Array.from(list), depths: Uint16Array.from(depths), opts };
+    const join = (base, r) => (r ? String(base).replace(/[\\/]+$/, '') + '/' + r : String(base));
+    return {
+      ok: true, id, gen: this.gen, pairs: this.sessions.length, p: pi,
+      labels: this.pairs.map(x => pairLabel(x)),
+      left : { path: join(redactLocation(pr.left), '') },
+      right: { path: join(redactLocation(pr.right), '') },
+      count: list.length, truncated,
+      at: revealIdx >= 0 ? list.indexOf(revealIdx) : -1,
+      skel: {
+        idx: Float64Array.from(list, i => pi * PAIR_BASE + i),
+        depth: Uint16Array.from(depths), bits: Uint8Array.from(bits), cmp: Uint8Array.from(cmps),
+      },
+      totals: this.sessions.reduce((t, x) => addCounts(t, cmpAggOf(x, showEx).root), emptyCounts()),
+      // (0.9.7) The footers count the pair on screen, not every pair.
+      pairTotals: Object.assign({}, cmpAggOf(s, showEx).root),
+    };
+  }
+
+  // Which folders are open, per pair, for the comparison in memory. A new
+  // comparison starts closed; a new search forgets the folders closed by hand.
+  _treeState(pi, search) {
+    if (!this._tState || this._tState.gen !== this.gen) this._tState = { gen: this.gen, pairs: new Map() };
+    let st = this._tState.pairs.get(pi);
+    if (!st) { st = { open: new Set(), shut: new Set(), shutAll: false, search: '' }; this._tState.pairs.set(pi, st); }
+    if (st.search !== search) { st.search = search; st.shut.clear(); st.shutAll = false; }
+    return st;
+  }
+
+  // (0.9.7) The details of the rows the window draws, from the last tree.
+  cmpRows(id, start, count) {
+    const t = this._tree;
+    if (!t || t.id !== id || this.sessions[t.pi] !== t.s) return { stale: true };
+    const s = t.s, nodes = s.nodes, ix = cmpIndex(s);
+    const agg = cmpAggOf(s, !!t.opts.showExcluded);
+    const from = Math.max(0, Number(start) || 0);
+    const to = Math.min(t.list.length, from + Math.max(0, Math.min(2000, Number(count) || 0)));
+    const rows = [];
+    for (let k = from; k < to; k++) {
+      const i = t.list[k];
+      const n = nodes[i];
+      const folder = n.type === 'folder';
+      rows.push({
+        pos: k, idx: t.pi * PAIR_BASE + i, rel: n.rel, name: n.name, type: n.type, depth: t.depths[k],
+        cmp: cmpOf(n), active: n.active !== false,
+        kids: folder && (ix.kids.get(i) || []).length > 0,
+        l: n.left.exists  ? { size: n.left.size,  mtime: n.left.mtime  } : null,
+        r: n.right.exists ? { size: n.right.size, mtime: n.right.mtime } : null,
+        inside: folder ? agg.counts(i) : null,
+      });
+    }
+    return { id, rows };
+  }
+
+  // (0.9.6) "Expand differences": every folder present on both sides with
+  // something different inside. A folder on one side only stays closed: all
+  // of it differs, its own line says so, and opening a 30 000-clip folder of
+  // rushes nobody asked to see would bury the rest.
+  cmpDiffFolders(p, f) {
+    const opts = f || {};
+    const pi = Number.isSafeInteger(p) && this.sessions[p] ? p : 0;
+    const s = this.sessions[pi];
+    if (!s || !Array.isArray(s.nodes)) return [];
+    const agg = cmpAggOf(s, !!opts.showExcluded);
+    const out = [];
+    for (const n of s.nodes) {
+      if (n.type !== 'folder' || !n.left.exists || !n.right.exists) continue;
+      if (!opts.showExcluded && n.active === false) continue;
+      if (cmpDiffers(agg.counts(n.idx))) out.push(n.rel);
+    }
+    return out;
   }
 
   // Same check as Session.preflight, across every pair, before anything runs.
@@ -1458,31 +1720,41 @@ class MultiSession {
   // what it would do, for the window to ask before replacing anything. The
   // run itself is a normal synchronization in which every other row does
   // nothing: same checks, locks, read-back, trash or revisions, report.
-  async copyItems(job, indices, to, opts) {
+  async copyItems(job, sel, to, opts) {
     const { dryRun } = opts || {};
     if (to !== 'left' && to !== 'right') throw new Error('Copy to which side?');
     if (!this.comparedAt) throw new Error('Run a comparison first.');
     this._sameAsCompared(job);
+    // (0.9.7) The rows were picked in one comparison: a comparison run since
+    // (the dialog stays open while the user decides) gave the same numbers
+    // to other files, and the copy replaced a file nobody had picked.
+    const want = Array.isArray(sel) ? { idx: sel } : (sel || {});
+    if (want.gen != null && want.gen !== this.gen) {
+      throw new Error('The folders were compared again since these items were picked. Pick them again.');
+    }
+    // Held for the whole copy, whatever happens to this.sessions meanwhile.
+    const sessions = this.sessions;
     let s = null, p = -1;
     const local = [];
-    for (const g of indices || []) {
-      const r = this._split(Number(g));
+    for (const g of new Set((want.idx || []).map(Number))) {
+      const r = this._split(g);
       if (!r.s) continue;
       if (s && r.s !== s) throw new Error('Copy the items of one folder pair at a time.');
       s = r.s; p = r.p; local.push(r.idx);
     }
     if (!s) throw new Error('These items are no longer in the comparison. Compare again.');
     const plan = s.planCopy(local, to);
+    plan.sync = job.sync || {};
     const counts = () => ({
       to, files: plan.files, folders: plan.folders, bytes: plan.bytes, overwrite: plan.overwrite,
-      newer: plan.newer, excluded: plan.excluded, unsure: plan.unsure, renames: plan.renames,
+      newer: plan.newer, excluded: plan.excluded, unsure: plan.unsure, changedBoth: plan.changedBoth,
+      renames: plan.renames,
     });
-    const saved = this.sessions.map(x => x._copyBegin(x === s ? plan : null));
-    let applied = null;
+    const saved = sessions.map(x => x._copyBegin(x === s ? plan : null));
+    let applied = null, renamed = null, ran = false;
     try {
       // Windows-safe renames this copy would do first (only on its own rows).
-      const rn = plannedRenames(s.nodes);
-      plan.renames = rn.length;
+      plan.renames = plannedRenames(s.nodes).length;
       if (dryRun) {
         // What the run would refuse, and where a replaced file has no trash
         // to go to: said in the window before anything is copied.
@@ -1497,13 +1769,19 @@ class MultiSession {
       }
       if (!plan.ops.size) return Object.assign(counts(), { nothing: true });
       const runJob = Object.assign({}, job, { compareOnly: false });
+      ran = true;
       const res = await this.sync(runJob, Object.assign({}, opts, {
-        _only: { p, bytes: plan.bytes, files: plan.files + plan.folders, onApplied: a => { applied = a; } },
+        _only: { p, bytes: plan.bytes, files: plan.files + plan.folders, onApplied: (a, r) => { applied = a; renamed = r; } },
       }));
       return Object.assign(res, { copy: counts() });
     } finally {
-      this.sessions.forEach((x, i) => x._copyEnd(saved[i], x === s ? plan : null, x === s ? applied : null));
-      this.stats = mergeStats(this.sessions.map(x => x.stats));
+      // (0.9.7) A dry run changed nothing: the operations go back as they
+      // were, and the caches built for the panels and the grid stay good.
+      sessions.forEach((x, i) => {
+        if (ran && x === s) x._copyEnd(saved[i], plan, applied, renamed);
+        else x._copyRestore(saved[i]);
+      });
+      if (this.sessions === sessions) this.stats = mergeStats(sessions.map(x => x.stats));
     }
   }
 
@@ -1649,6 +1927,7 @@ class MultiSession {
           token, trashItem,
           lockLost: () => !!lockLost,
           onApplied: only ? only.onApplied : undefined,
+          onlyCopy: !!only,
           onProgress: prog => {
             if (prog.phase === 'sync' && prog.bytesTotal != null) {
               estBytes[p] = prog.bytesTotal; bytesTotal = sum(estBytes);

@@ -213,33 +213,46 @@ published here.
 
 The **COMPARE** mode, next to VERIFY in the modes row, is for comparing two
 folders or volumes without synchronizing anything. After pressing COMPARE, the
-grid gives way to two panels, source and destination, showing one folder at a
-time: opening a folder on one side opens it on the other, and the overview on
-the left jumps straight to any folder.
+grid gives way to a tree in two panels, source and destination, both sides on
+the same rows: an item missing on one side leaves a blank, hatched row there.
+Folders open and close in place (chevron, double-click, Enter, Left and Right
+arrows) and the two sides scroll together. **Expand differences** opens every
+folder present on both sides that has differences inside; **Collapse all**
+closes everything. The overview on the left opens any folder in the tree.
 
-- **Yellow** name: only on this side. **Green** name: newer on this side (or
-  the same date with another size, green on both sides).
-- A **dot** after a folder: something differs inside it.
+- **Yellow** name and icon: only on this side. **Green**: newer on this side
+  (or the same date with another size, green on both sides); the older copy
+  stays plain. **Grey**: identical on both sides.
+- A **blue** folder with a number: that many files differ inside it.
+- **All / Equal / Different** at the top show everything, only what is
+  identical, or every kind of difference.
 - The chips under the panels count, over the whole comparison, what is only in
   the source, only in the destination, newer on either side, different, or
-  identical. A click shows that category alone; the button at the right of the
-  path shows only what differs. "Filter the view" filters the names.
-- Click selects, double-click opens a folder. Cmd-click (Ctrl-click on
-  Windows and Linux) adds a row to the selection, Shift-click selects a range,
-  Cmd/Ctrl+A selects the whole folder.
+  identical. A click shows that category alone. "Filter the view" searches the
+  names and opens the folders on the way to what it finds.
+- Click selects, double-click opens or closes a folder. Cmd-click (Ctrl-click on
+  Windows and Linux) adds a row to the selection, Shift-click or Shift+arrows
+  select a range, Cmd/Ctrl+A selects every row shown. Home, End, Page Up and
+  Page Down move through the list; the menu key (or Shift+F10) opens the
+  right-click menu.
 - Right-click a row to reveal it in the Finder / Explorer, on either side.
 
 **Copy, item by item.** Right-click a selection and choose **Copy to
 destination** or **Copy to source**. A folder goes with everything inside it.
 The copy adds what is missing on the other side and replaces what is older
-there; it never deletes anything and never replaces a newer file (those are
-counted and left as they are, as are excluded files and conflicts). When files
+there; it never deletes anything and never replaces a newer file, whatever
+the comparison (time and size, content or size). A file with the same date
+and another size is copied. Left as they are, and counted: newer files,
+excluded files, a file on one side and a folder on the other, and in a TWO
+WAY job the files changed on both sides since the last synchronization
+(resolved in the grid). When files
 are about to be replaced, a dialog says how many and where the replaced
 versions go (trash, revision folder, or deleted permanently, as set in
 Settings › Deletion); a copy that only adds starts at once. It is a normal run
 of the engine on those rows only: same folder lock, read-back check, retries
-and report as SYNCHRONIZE. The panels are updated from what was copied,
-without comparing everything again.
+and report as SYNCHRONIZE, and one operation at a time (a comparison asked for
+during a copy waits). The panels are updated from what was copied, without
+comparing everything again.
 
 Apart from these copies, nothing is written in this mode: SYNCHRONIZE and
 auto-sync are disabled, and the engine refuses a synchronization of a job in

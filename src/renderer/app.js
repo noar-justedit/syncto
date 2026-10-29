@@ -294,7 +294,10 @@ function jobToUi() {
   setSeg('seg-cmp', j.compare.compareVariant);
   setVariantBtn(j.sync.variant);
   // (0.9.5) A job saved in COMPARE mode opens in it, on its top folder.
-  cmp.p = 0; cmp.rel = ''; cmp.sel = null; cmp.picked.clear(); cmp.cat = ''; cmp.data = null;
+  // (0.9.6) Only when the comparison on screen is no longer the job's: this
+  // also runs when Filter or Settings opens, and emptied both panels there
+  // while the comparison was still good (Manuel López).
+  if (!state.comparedPairs) { cmpClear(); cmp.p = 0; cmp.cat = ''; }
   if (isCompareOnly()) { renderCompare(); renderStats(); }
 
   $('st-moves').checked  = j.compare.detectMoves !== false;
@@ -435,6 +438,12 @@ function renderEmptyState(res) {
     return;
   }
 
+  // (0.9.7) Compared, then the folders or the settings changed.
+  if (state.planStale) {
+    set('', ICO_EMPTY_FOLDER, 'Compare again', 'The folders, the mode or a setting changed since the last comparison.');
+    return;
+  }
+
   // (1) Nothing has been compared yet.
   if (!s) {
     set('', ICO_EMPTY_FOLDER, '', 'Pick two folders, then press <b>Compare</b>.');
@@ -537,7 +546,7 @@ $('ge-act').addEventListener('click', async () => {
 async function refreshGrid(resetScroll) {
   const scroll = $('gridscroll');
   if (resetScroll) scroll.scrollTop = 0;
-  const res = await API.getRows(0, 1, state.view);
+  const res = state.planStale && !state.busy ? { total: 0, rows: [], pairs: 1, pairsShown: 0 } : await API.getRows(0, 1, state.view);
   state.total = res.total;
   $('gridspacer').style.height = (state.total * ROWH) + 'px';
   $('gridscroll').style.display = state.total ? '' : 'none';
@@ -555,6 +564,7 @@ async function refreshGrid(resetScroll) {
 }
 
 async function renderWindow() {
+  if (state.planStale && !state.busy) return;
   const scroll = $('gridscroll');
   const first  = Math.max(0, Math.floor(scroll.scrollTop / ROWH) - 6);
   const count  = Math.ceil(scroll.clientHeight / ROWH) + 14;
@@ -998,6 +1008,9 @@ function completePairs() {
 // folders, the engine replayed the old plan, and a mirror went the wrong way.
 function invalidateComparison(reason) {
   state.comparedPairs = null;
+  // (0.9.7) The grid went on showing the old plan under the new mode (red
+  // deletions of a MIRROR under UPDATE): it shows nothing until compared again.
+  state.planStale = true;
   state.comparedPlan = null;
   state.stats = null;
   state.selIdx = null;
@@ -1005,7 +1018,7 @@ function invalidateComparison(reason) {
   state.view.scope = null;
   renderScopeBar();
   // (0.9.5) And the COMPARE view showed the folders of the last comparison.
-  cmp.data = null; cmp.rel = ''; cmp.p = 0; cmp.sel = null; cmp.picked.clear();
+  cmpClear(); cmp.p = 0;
   if (isCompareOnly()) renderCompare();
   const note = $('status-note');
   if (note) note.textContent = reason || 'Folders changed: compare again.';
@@ -1047,7 +1060,7 @@ function planKeyOf(job) {
 function invalidateIfPlanChanged() {
   if (!state.comparedPlan) return false;
   if (planKeyOf(state.job) === state.comparedPlan) return false;
-  invalidateComparison('Settings changed: compare again before synchronizing.');
+  invalidateComparison(isCompareOnly() ? 'Settings changed: compare again.' : 'Settings changed: compare again before synchronizing.');
   return true;
 }
 
@@ -1071,7 +1084,7 @@ function lockPlan(on, run) {
 function invalidateIfPairsChanged() {
   if (!state.comparedPairs) return;
   if (pairsKey(completePairs()) === state.comparedPairs) return;
-  invalidateComparison('The folders changed: compare again before synchronizing.');
+  invalidateComparison(isCompareOnly() ? 'The folders changed: compare again.' : 'The folders changed: compare again before synchronizing.');
 }
 
 async function doCompare() {
@@ -1114,16 +1127,25 @@ async function doCompare() {
   // and it used to report "completed successfully" over a partial copy.
   if (res.cancelled) {
     state.stats = null;
+    // (0.9.7) Not a comparison to trust: the COMPARE panels showed the part
+    // scanned as if it were everything ("nothing only here").
+    state.comparedPairs = null;
+    state.comparedPlan = null;
+    state.planStale = false;   // the partial list stays in the grid, said as such
+    cmpClear();
+    if (isCompareOnly()) renderCompare();
     await refreshGrid(true);
     await refreshOverview();
     renderStats();
     setBusyUi(false);
-    $('status-note').textContent = 'Comparison stopped before the end: the list below is partial. Compare again to synchronize.';
+    $('status-note').textContent = isCompareOnly() ? 'Comparison stopped before the end: compare again to see the two sides.'
+      : 'Comparison stopped before the end: the list below is partial. Compare again to synchronize.';
     return;
   }
 
   state.stats = res.stats;
   state.comparedPairs = comparedPairs;
+  state.planStale = false;
   state.comparedPlan  = comparedPlan;
   state.view.onlyOperation = '';
   state.view.onlyCategory  = '';
@@ -1562,12 +1584,13 @@ async function doCompareQuiet() {
     return;
   }
   if (!res || !res.ok) {
-    invalidateComparison('Compare again to synchronize.');
+    invalidateComparison(isCompareOnly() ? 'Compare again.' : 'Compare again to synchronize.');
     setRecheck('ko', 'The folders could not be compared again: press Compare when you are ready.');
     return;
   }
   state.stats = res.stats;
   state.comparedPairs = comparedPairs;
+  state.planStale = false;
   state.comparedPlan  = comparedPlan;
   renderStats();
   await refreshGrid(true);
@@ -1606,7 +1629,8 @@ function startRunUi(title) {
   $('pb-title').textContent = runTitle('copy', false);
   $('pb-ring').classList.remove('spin');
   setStatLabels('Files', 'Left to copy', 'Speed', 'Total ETA');
-  { const del = $('s-del-box'); if (del) del.style.display = ''; }
+  // (0.9.7) A copy from the COMPARE panels never removes anything: no Removed tile.
+  { const del = $('s-del-box'); if (del) del.style.display = state.runKind === 'copy' ? 'none' : ''; }
 }
 
 // (0.8.8) Same for a comparison: CHECKING after a run and auto-sync's
@@ -2263,6 +2287,8 @@ function bind() {
     e.stopPropagation();
     cancelFilter();
   }, true);
+  // (0.9.6) Escape already left without applying; now a button says so.
+  $('filter-cancel').addEventListener('click', cancelFilter);
   $('filter-close').addEventListener('click', async () => {
     const before = state.job.compare.includeFilter + '\u0000' + state.job.compare.excludeFilter;
     uiToJob();
@@ -2428,6 +2454,9 @@ function bind() {
       state.view.search = e.target.value;
       // (0.9.5) In COMPARE mode the field filters the names in the two panels.
       cmp.search = e.target.value;
+      // (0.9.7) Only the panels: the hidden grid was worked out again at every
+      // key (up to 0.1 s on a large NAS). It catches up when it comes back.
+      if (isCompareOnly()) { await cmpLoad(true); return; }
       await refreshGrid(true);
     }, 180);
   });
@@ -2439,11 +2468,15 @@ function bind() {
     // ⌘T swapped the pair on screen while the copy went the other way, ⌘N and
     // ⌘O replaced the job under the running run, F9 opened the confirmation.
     if (state.busy && m.action !== 'job-save' && m.action !== 'job-save-as') return;
+    // (0.9.7) Nor while a dialog waits for an answer: Cmd+R under the copy
+    // dialog compared again, and the copy then went to other files.
+    if (document.querySelector('.ov.open') && m.action !== 'job-save' && m.action !== 'job-save-as') return;
     switch (m.action) {
       case 'compare': if (!$('btn-compare').disabled) doCompare(); break;
       case 'sync': if (state.stats && !$('btn-sync').disabled) askConfirm(); break;
       case 'swap': swapAllPairs(); break;
-      case 'invert': state.stats = await API.invertAll(); afterEdit(); break;
+      // (0.9.7) Not in COMPARE mode: it changed the plan kept for later, unseen.
+      case 'invert': if (isCompareOnly()) break; state.stats = await API.invertAll(); afterEdit(); break;
       case 'verify': doVerify(); break;
       case 'job-new': newJob(); break;
       case 'job-open': openJob(); break;
@@ -2568,6 +2601,7 @@ async function newJob() {
   noteStaleLocks([]);
   state.job = await API.jobNew();
   state.jobPath = '';
+  cmp.view = 'all'; cmp.cat = '';   // (0.9.7)
   jobToUi();
   renderRecent();
   state.stats = null; state.total = 0; state.comparedPairs = null;
@@ -2582,6 +2616,7 @@ async function openJob() {
   if (!res) return;
   state.job = res.job;
   state.jobPath = res.path;
+  cmp.view = 'all'; cmp.cat = '';   // (0.9.7) another job opens unfiltered
   if (res.recent) state.recent = res.recent;
   jobToUi();
   renderRecent();
@@ -2724,6 +2759,7 @@ async function openRecent(p) {
   }
   state.job = res.job;
   state.jobPath = res.path;
+  cmp.view = 'all'; cmp.cat = '';   // (0.9.7) another job opens unfiltered
   jobToUi();
   renderRecent();
   onPathChanged();
@@ -2743,12 +2779,15 @@ async function refreshOverview() {
     const i = k.indexOf(':');
     return { p: Number(k.slice(0, i)), rel: k.slice(i + 1) };
   });
-  const ov = await API.getOverview(state.view, open, state.ovSort);
+  // (0.9.7) In COMPARE mode it lists what differs, not the plan kept for later.
+  const ov = await API.getOverview(Object.assign({}, state.view, { cmp: isCompareOnly() }), open, state.ovSort);
   if (!ov || !ov.rows.length) {
     const nothing = state.stats.rows > 0;
     const ren = (state.stats.renameLeft || 0) + (state.stats.renameRight || 0);
     box.innerHTML = ren
       ? `<div class="ov-empty">${fmtCount(ren, true)} name${ren > 1 ? 's' : ''} to change for Windows, nothing to copy.</div>`
+      : nothing && isCompareOnly()
+      ? '<div class="ov-empty">Nothing differs: both sides are equal.</div>'
       : nothing
       ? '<div class="ov-empty">Nothing to do: both sides already match.<br>Tick “Show identical” to list the folders anyway.</div>'
       : '<div class="ov-empty">Both folders are empty.</div>';
@@ -2924,8 +2963,9 @@ function renderScopeBar() {
 }
 
 async function setScope(pairIdx, rel, label) {
-  // (0.9.5) In COMPARE mode the overview opens that folder in the two panels.
-  if (isCompareOnly()) { await cmpGo(pairIdx, rel); return; }
+  // (0.9.5) In COMPARE mode the overview shows that folder in the two panels
+  // (0.9.6: opened in the tree, selected, on screen).
+  if (isCompareOnly()) { await cmpReveal(pairIdx, rel); return; }
   const sc = state.view.scope;
   const same = sc && sc.p === pairIdx && sc.rel === rel;
   state.view.scope = same ? null : { p: pairIdx, rel, label };
@@ -3237,6 +3277,7 @@ async function autoRun() {
   }
   state.stats = cmp.stats;
   state.comparedPairs = comparedPairs;
+  state.planStale = false;
   state.comparedPlan  = comparedPlan;
   renderStats(); await refreshGrid(true); await refreshOverview();
 
@@ -3659,21 +3700,26 @@ function bindAfterAndNtfy() {
 // ── (0.9.5) COMPARE mode ───────────────────────────────────────────────────
 // Asked for by Manuel López (27/10/2026): compare two folders or volumes side
 // by side without synchronizing anything. Built like filo's synchronized
-// browsing, with its codes (Noar): two panels, one folder at a time, both
-// sides moving together; yellow = only on this side, green = newer on this
-// side. The engine answers from the comparison in memory (compareBrowse): no
-// disk and no server is read while browsing, and nothing is ever written.
-// `sel` is the row the keyboard and Shift-click start from; `picked` every
-// row selected (Cmd/Ctrl-click, Shift-click: 0.9.5).
-const cmp = { p: 0, rel: '', cat: '', diffOnly: false, search: '', data: null, sel: null, picked: new Set(), seq: 0, lists: { left: [], right: [] } };
+// browsing, with its codes (Noar): two panels, both sides moving together;
+// yellow = only on this side, green = newer on this side. (0.9.6) After
+// Manuel López's second round: a tree, both sides on the same rows, folders
+// opened and closed in place (as Beyond Compare), All / Equal / Different.
+// The engine answers from the comparison in memory (compareTree): no disk and
+// no server is read while browsing.
+// `open` holds the folders opened (their paths, per pair); `rows` what the
+// engine returned; `sel` is the row the keyboard and Shift-click start from;
+// `picked` every row selected (Cmd/Ctrl-click, Shift-click: 0.9.5).
+const cmp = { p: 0, view: 'all', cat: '', search: '', data: null, sk: null, count: 0, pos: new Map(), det: new Map(), want: null, sel: null, picked: new Set(), seq: 0 };
 const CMP_ROW = 27;
 const CMP_SYNC_TIP = 'COMPARE mode never synchronizes. Right-click an item to copy it to the other side, or choose a synchronization mode above.';
 const CMP_NOTE = 'Comparison only: nothing is synchronized. Right-click an item to copy it to the other side.';
+// (0.9.7) "equal" everywhere: the button says Equal (Manuel López's word).
 const CMP_LABEL = {
   onlyL: 'only in source', onlyR: 'only in destination',
   newL: 'newer in source', newR: 'newer in destination',
-  diff: 'different', same: 'identical',
+  diff: 'different', same: 'equal',
 };
+const CMP_CODES = ['onlyL', 'onlyR', 'newL', 'newR', 'diff', 'same'];   // engine's CMP_CATS order
 
 function isCompareOnly() { return !!(state.job && state.job.compareOnly); }
 
@@ -3696,12 +3742,12 @@ function cmpTip(it, side) {
   if (it.type === 'folder') {
     const inside = cmpInsideText(it.inside);
     const head = m === 'o' ? `Only in the ${side === 'left' ? 'source' : 'destination'}.` : '';
-    return [head, inside ? `Inside: ${inside}.` : (m ? '' : 'Nothing differs inside.'), 'Double-click to open it on both sides.'].filter(Boolean).join(' ');
+    return [head, inside ? `Inside: ${inside}.` : (m ? '' : 'Nothing differs inside.'), 'Double-click to open or close it.'].filter(Boolean).join(' ');
   }
   if (it.cmp === 'onlyL' || it.cmp === 'onlyR') return `Only in the ${it.cmp === 'onlyL' ? 'source' : 'destination'}.`;
   if (it.cmp === 'newL' || it.cmp === 'newR') return `Newer in the ${it.cmp === 'newL' ? 'source' : 'destination'}.`;
   if (it.cmp === 'diff') return 'Different on the two sides (same date, another size, or a file on one side and a folder on the other).';
-  return 'Identical on the two sides.';
+  return 'Equal on the two sides.';
 }
 
 // The mode buttons: the four synchronization modes, or COMPARE.
@@ -3720,159 +3766,257 @@ function applyCompareMode() {
     sync.disabled = !!state.busy || (isAutoOn() ? false : (!state.stats || state.stats.filesToProcess === 0));
   }
   renderStats();
-  if (on) cmpLoad(); else { cmp.data = null; refreshGrid(true).catch(() => {}); }
+  refreshOverview().catch(() => {});
+  if (on) cmpLoad(); else { cmpClear(); refreshGrid(true).catch(() => {}); }
 }
 
-async function cmpLoad(keepSel) {
+// Nothing on screen: no comparison, or not one that still holds.
+function cmpClear() {
+  cmp.data = null; cmp.sk = null; cmp.count = 0; cmp.pos = new Map(); cmp.det = new Map();
+  cmp.sel = null; cmp.picked.clear();
+}
+
+// (0.9.6) The tree, both sides on the same rows. (0.9.7) The engine keeps the
+// open folders and the flattened list and sends a skeleton (position, depth,
+// a few flags per row); the details of the rows on screen are asked for as
+// they are drawn (cmpFetch). `ops` opens or closes folders on the way.
+async function cmpLoad(keepSel, ops) {
   if (!isCompareOnly()) return;
   const seq = ++cmp.seq;
   // Only a comparison that ran to the end: a cancelled one, or folders changed
   // since, would show both sides of something that is no longer true.
-  if (!state.comparedPairs) {
-    cmp.data = null; renderCompare(); renderStats(); return;
-  }
-  const res = await ipc(API.compareBrowse(cmp.p, cmp.rel, {
-    cat: cmp.cat, diffOnly: cmp.diffOnly, search: cmp.search, showExcluded: !!state.view.showExcluded,
+  if (!state.comparedPairs) { cmpClear(); renderCompare(); renderStats(); return; }
+  const res = await ipc(API.compareTree(cmp.p, ops || {}, {
+    view: cmp.view, cat: cmp.cat, search: cmp.search, showExcluded: !!state.view.showExcluded,
   }));
   if (seq !== cmp.seq) return;
-  cmp.data = res && res.ok ? res : null;
-  if (cmp.data) { cmp.p = cmp.data.p; cmp.rel = cmp.data.rel; }
-  if (!keepSel) { cmp.sel = null; cmp.picked.clear(); }
+  if (!res || !res.ok) { cmpClear(); renderCompare(); renderStats(); return null; }
+  cmp.data = res;
+  cmp.p = res.p;
+  cmp.sk = res.skel;
+  cmp.count = res.count;
+  cmp.pos = new Map();
+  for (let k = 0; k < res.count; k++) cmp.pos.set(res.skel.idx[k], k);
+  cmp.det = new Map();
+  cmp.want = null;
+  if (keepSel) {
+    for (const i of [...cmp.picked]) if (!cmp.pos.has(i)) cmp.picked.delete(i);
+    if (cmp.sel != null && !cmp.pos.has(cmp.sel)) cmp.sel = null;
+  } else { cmp.sel = null; cmp.picked.clear(); }
   renderCompare();
   renderStats();
+  return res;
 }
 
-function cmpGo(p, rel) {
-  cmp.p = p; cmp.rel = rel || ''; cmp.sel = null; cmp.picked.clear();
-  for (const side of ['left', 'right']) $('cmp-' + side).querySelector('.cmp-list').scrollTop = 0;
-  return cmpLoad();
+// What the skeleton says of a row, with its details once they are fetched.
+function cmpItem(idx) {
+  const k = cmp.pos.get(idx);
+  if (k == null || !cmp.sk) return null;
+  const b = cmp.sk.bits[k];
+  const d = cmp.det.get(k);
+  return Object.assign({
+    pos: k, idx, depth: cmp.sk.depth[k], type: b & 1 ? 'folder' : 'file', cmp: CMP_CODES[cmp.sk.cmp[k]],
+    open: !!(b & 2), kids: !!(b & 4), l: b & 8 ? {} : null, r: b & 16 ? {} : null, active: !!(b & 32),
+    sendR: !!(b & 64), sendL: !!(b & 128),
+  }, d ? { rel: d.rel, name: d.name, l: d.l, r: d.r, inside: d.inside } : {});
 }
-function cmpUp() {
-  if (!cmp.data || cmp.data.parent == null) return;
-  const from = cmp.rel;
-  cmpGo(cmp.p, cmp.data.parent).then(() => {
-    // Back where we came from: the folder we left is selected.
-    const it = (cmp.data && cmp.data.items || []).find(x => x.rel === from);
-    if (it) { cmp.sel = it.idx; cmp.picked = new Set([it.idx]); drawCmpPanels(true); }
-  });
+function cmpAt(k) { return cmp.sk && k >= 0 && k < cmp.count ? cmpItem(cmp.sk.idx[k]) : null; }
+
+// Opens or closes a folder on both sides; the selection goes to it.
+async function cmpToggle(it, force) {
+  if (!it || it.type !== 'folder') return;
+  const on = force != null ? !!force : !it.open;
+  cmp.sel = it.idx;
+  cmp.picked = new Set([it.idx]);
+  await cmpLoad(true, { toggle: { idx: it.idx, on } });
+  drawCmpPanels(true);
 }
-function cmpOpen(it) {
-  if (it && it.type === 'folder') cmpGo(cmp.p, it.rel);
+function cmpOpen(it) { return cmpToggle(it); }
+
+// "Expand differences": every folder present on both sides with something
+// different inside. A folder on one side only stays closed (its line says it all).
+function cmpExpandDiff() { return cmpLoad(true, { expandDiff: true }); }
+function cmpCollapseAll() { return cmpLoad(true, { collapse: true }); }
+
+// The overview: that folder, open, selected and on screen.
+async function cmpReveal(p, rel) {
+  cmp.p = p;
+  let res = await cmpLoad(false, { reveal: rel });
+  // (0.9.7) Hidden by the view or a chip: back to everything, and said, rather
+  // than a double-click that seems to do nothing.
+  if (res && res.at < 0 && (cmp.view !== 'all' || cmp.cat || cmp.search)) {
+    cmp.view = 'all'; cmp.cat = '';
+    res = await cmpLoad(false, { reveal: rel });
+    $('status-note').textContent = 'That folder was hidden by the filter: showing everything.';
+  }
+  if (!res || res.at < 0) return;
+  cmp.sel = res.skel.idx[res.at];
+  cmp.picked = new Set([cmp.sel]);
+  for (const side of ['left', 'right']) $('cmp-' + side).querySelector('.cmp-list').scrollTop = Math.max(0, res.at * CMP_ROW - CMP_ROW * 2);
+  drawCmpPanels();
+  cmpFocus();
+}
+
+// The keyboard goes back to the panels (after a menu, a dialog, a copy).
+function cmpFocus() {
+  const box = $('cmp-left').querySelector('.cmp-list');
+  if (isCompareOnly() && box && document.activeElement !== box && !document.querySelector('.ov.open')) box.focus({ preventScroll: true });
 }
 
 function renderCompare() {
   const d = cmp.data;
-  // Pairs, path, up.
   const sel = $('cmp-pair');
   if (d && d.pairs > 1) {
     sel.style.display = '';
     sel.innerHTML = d.labels.map((l, i) => `<option value="${i}"${i === d.p ? ' selected' : ''}>${i + 1}. ${esc(bidiLabel(l))}</option>`).join('');
   } else sel.style.display = 'none';
-  $('cmp-up').disabled = !d || d.parent == null;
-  const crumbs = $('cmp-crumbs');
-  if (!d) {
-    crumbs.innerHTML = '';
-  } else {
-    const parts = d.rel ? d.rel.split('/') : [];
-    const root = (d.labels && d.labels[d.p]) || 'Top';
-    let acc = '';
-    crumbs.innerHTML = `<button class="cr${parts.length ? '' : ' cur'}" data-rel="">${esc(bidiLabel(root))}</button>` +
-      parts.map((seg, i) => { acc = acc ? acc + '/' + seg : seg; return `<span class="sep">›</span><button class="cr${i === parts.length - 1 ? ' cur' : ''}" data-rel="${esc(acc)}">${esc(seg)}</button>`; }).join('');
-  }
-  $('cmp-diff').classList.toggle('on', cmp.diffOnly);
-  $('cmp-diff').setAttribute('aria-pressed', cmp.diffOnly ? 'true' : 'false');
-  // The two lists.
+  // (0.9.7) The pair's name, as a title: hidden until there is one.
+  $('cmp-where').textContent = d && d.pairs <= 1 ? bidiLabel((d.labels && d.labels[d.p]) || '') : '';
+  $('cmp-where').style.display = d && d.pairs <= 1 ? '' : 'none';
+  for (const b of document.querySelectorAll('#cmp-view button')) b.classList.toggle('on', b.dataset.v === cmp.view);
+  $('cmp-expand').disabled = !d;
+  $('cmp-collapse').disabled = !d;
+  const t = d && d.pairTotals;
   for (const side of ['left', 'right']) {
     const panel = $('cmp-' + side);
-    const key = side === 'left' ? 'l' : 'r';
     const info = d && d[side];
     // Cut from the left when too long (the end of a path is what tells
     // folders apart); the marks keep the slashes where they belong.
-    panel.querySelector('.cmp-path').textContent = info ? '\u200e' + info.path + '\u200e' : '';
+    panel.querySelector('.cmp-path').textContent = info ? '‎' + info.path + '‎' : '';
     panel.querySelector('.cmp-path').dataset.tip = info ? info.path : '';
-    const list = d ? d.items.filter(it => it[key]) : [];
-    cmp.lists[side] = list;
     const empty = panel.querySelector('.cmp-empty');
     let msg = '';
     if (!d) msg = state.stats ? '' : 'Press <b>COMPARE</b> to see the two sides.';
-    else if (info && !info.exists) msg = `This folder is not in the ${side === 'left' ? 'source' : 'destination'}.`;
-    else if (!list.length) msg = (cmp.cat || cmp.diffOnly || cmp.search) ? 'Nothing here matches the filter.' : 'Empty folder.';
+    else if (!cmp.count) msg = (cmp.cat || cmp.view !== 'all' || cmp.search) ? 'Nothing here matches the filter.' : 'Both folders are empty.';
     empty.innerHTML = msg;
     empty.style.display = msg ? 'block' : 'none';
-    panel.querySelector('.cmp-spacer').style.height = (list.length * CMP_ROW) + 'px';
-    const o = list.filter(it => cmpMark(it, side) === 'o').length;
-    const n = list.filter(it => cmpMark(it, side) === 'n').length;
-    panel.querySelector('.cmp-foot').innerHTML = d && (!info || info.exists)
-      ? `${fmtCount(list.length, true)} item${list.length === 1 ? '' : 's'}` +
-        (o ? ` · <span class="o"><b>${fmtCount(o, true)}</b> only here</span>` : '') +
-        (n ? ` · <span class="n"><b>${fmtCount(n, true)}</b> newer here</span>` : '')
-      : '';
+    panel.querySelector('.cmp-spacer').style.height = (cmp.count * CMP_ROW) + 'px';
+    // (0.9.7) The pair on screen only; "newer" without "different", which
+    // has its own figure (they matched neither the chips nor each other).
+    const L = side === 'left';
+    const o = t ? (L ? t.onlyL : t.onlyR) : 0, n = t ? (L ? t.newL : t.newR) : 0, df = t ? t.diff : 0;
+    const parts = [];
+    if (o) parts.push(`<span class="o"><b>${fmtCount(o, true)}</b> only here</span>`);
+    if (n) parts.push(`<span class="n"><b>${fmtCount(n, true)}</b> newer here</span>`);
+    if (df) parts.push(`<span class="n"><b>${fmtCount(df, true)}</b> different</span>`);
+    let foot = !d ? '' : parts.length ? parts.join(' · ') : 'Nothing only here, nothing newer here.';
+    if (d && d.truncated) foot += ` · <span>list cut at ${fmtCount(cmp.count, true)} rows: close some folders</span>`;
+    panel.querySelector('.cmp-foot').innerHTML = foot;
   }
   drawCmpPanels();
 }
 
+const CMP_CH_R = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>';
+const CMP_CH_D = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
+function cmpDiffCount(c) { return c ? c.onlyL + c.onlyR + c.newL + c.newR + c.diff : 0; }
+
+// (0.9.6) One row of one side. Manuel López: the status must be readable at a
+// glance, name AND icon. filo's codes stay (Noar): yellow = only on this side,
+// green = newer on this side; equal fades to grey; a folder with differences
+// inside is blue and says how many. A row the side does not have is left
+// blank (hatched), so the two sides stay aligned.
 function cmpRowHtml(it, side) {
-  const L = side === 'left';
-  const st = L ? it.l : it.r;
-  const m = cmpMark(it, side);
+  const st = side === 'left' ? it.l : it.r;
+  const sel = cmp.picked.has(it.idx) ? ' sel' : '';
+  if (!st) return `<div class="cmp-row miss${sel}" data-idx="${it.idx}"></div>`;
+  // (0.9.7) Details not here yet: an empty row of the right height.
+  if (it.name == null) return `<div class="cmp-row ph${sel}" data-idx="${it.idx}"></div>`;
   const folder = it.type === 'folder';
-  const dot = folder && !m && cmpDiffersInside(it.inside) ? '<span class="dot"></span>' : '';
-  const name = m ? `<span class="hl ${m}">${esc(it.name)}</span>` : esc(it.name);
-  return `<div class="cmp-row${folder ? ' fold' : ''}${cmp.picked.has(it.idx) ? ' sel' : ''}${it.active ? '' : ' off'}" data-idx="${it.idx}" data-tip="${esc(cmpTip(it, side))}">` +
-    `${folder ? ICON_FOLDER : ICON_FILE}<span class="nm">${name}${dot}</span>` +
+  const m = cmpMark(it, side);
+  const cls = m === 'o' ? 'only' : m === 'n' ? 'new'
+    : folder ? (cmpDiffersInside(it.inside) ? 'diffin' : 'same')
+    : it.cmp === 'same' ? 'same' : 'plain';
+  const tw = folder && it.kids ? `<span class="tw">${it.open ? CMP_CH_D : CMP_CH_R}</span>` : '<span class="tw no"></span>';
+  const name = cls === 'only' || cls === 'new' ? `<span class="hl">${esc(it.name)}</span>` : esc(it.name);
+  const badge = cls === 'diffin' ? `<span class="badge">${fmtCount(cmpDiffCount(it.inside), true)}</span>` : '';
+  return `<div class="cmp-row ${cls}${folder ? ' fold' : ''}${sel}${it.active ? '' : ' off'}" data-idx="${it.idx}" data-tip="${esc(cmpTip(it, side))}">` +
+    `<span class="nmc" style="padding-left:${it.depth * 18}px">${tw}${folder ? ICON_FOLDER : ICON_FILE}<span class="nm">${name}</span>${badge}</span>` +
     `<span class="sz">${folder ? '' : esc(fmtBytes(st.size))}</span><span class="dt">${folder ? '' : esc(fmtDate(st.mtime))}</span></div>`;
 }
 function cmpDiffersInside(c) { return !!(c && (c.onlyL || c.onlyR || c.newL || c.newR || c.diff)); }
 
-// Each panel draws the rows in view, as the grid does: a folder of 30 000
-// clips scrolls like one of thirty.
-function drawCmpPanels(reveal) {
-  for (const side of ['left', 'right']) {
-    const panel = $('cmp-' + side);
-    const box = panel.querySelector('.cmp-list');
-    const list = cmp.lists[side];
-    if (reveal && cmp.sel != null) {
-      const at = list.findIndex(it => it.idx === cmp.sel);
-      if (at >= 0) {
-        const top = at * CMP_ROW;
-        if (top < box.scrollTop) box.scrollTop = top;
-        else if (top + CMP_ROW > box.scrollTop + box.clientHeight) box.scrollTop = top + CMP_ROW - box.clientHeight;
-      }
-    }
-    const first = Math.max(0, Math.floor(box.scrollTop / CMP_ROW) - 10);
-    const last = Math.min(list.length, first + Math.ceil((box.clientHeight || 600) / CMP_ROW) + 20);
-    const body = panel.querySelector('.cmp-body');
-    body.style.transform = `translateY(${first * CMP_ROW}px)`;
-    body.innerHTML = list.slice(first, last).map(it => cmpRowHtml(it, side)).join('');
-  }
+// The details of rows [a, b), asked for once, then the panels drawn again.
+async function cmpFetch(a, b) {
+  if (!cmp.data) return;
+  const id = cmp.data.id;
+  const key = id + ':' + a + ':' + b;
+  if (cmp.want === key) return;
+  cmp.want = key;
+  const res = await ipc(API.compareRows(id, a, b - a));
+  if (!cmp.data || cmp.data.id !== id) return;
+  if (cmp.want === key) cmp.want = null;
+  if (!res || res.stale) { cmpLoad(true); return; }
+  for (const r of res.rows || []) cmp.det.set(r.pos, r);
+  drawCmpPanels();
 }
 
-function cmpItem(idx) { return cmp.data && cmp.data.items.find(it => it.idx === idx); }
+// Both panels draw the same rows in view, as the grid does: a tree of
+// 100 000 rows scrolls like one of thirty.
+function drawCmpPanels(reveal) {
+  const n = cmp.count;
+  const boxes = ['left', 'right'].map(side => $('cmp-' + side).querySelector('.cmp-list'));
+  if (reveal && cmp.sel != null) {
+    const at = cmp.pos.get(cmp.sel);
+    if (at != null) {
+      const box = boxes[0];
+      const top = at * CMP_ROW;
+      let to = box.scrollTop;
+      if (top < box.scrollTop) to = top;
+      else if (top + CMP_ROW > box.scrollTop + box.clientHeight) to = top + CMP_ROW - box.clientHeight;
+      for (const b of boxes) b.scrollTop = to;
+    }
+  }
+  const box = boxes[0];
+  const first = Math.max(0, Math.floor(box.scrollTop / CMP_ROW) - 10);
+  const last = Math.min(n, first + Math.ceil((box.clientHeight || 600) / CMP_ROW) + 20);
+  let missing = -1, missingEnd = -1;
+  const items = [];
+  for (let k = first; k < last; k++) {
+    const it = cmpAt(k);
+    if (!cmp.det.has(k)) { if (missing < 0) missing = k; missingEnd = k + 1; }
+    items.push(it);
+  }
+  for (const side of ['left', 'right']) {
+    const panel = $('cmp-' + side);
+    const body = panel.querySelector('.cmp-body');
+    body.style.transform = `translateY(${first * CMP_ROW}px)`;
+    body.innerHTML = items.map(it => cmpRowHtml(it, side)).join('');
+  }
+  // A screen and a half around what is shown, so a scroll finds them ready.
+  if (missing >= 0) cmpFetch(Math.max(0, missing - 40), Math.min(n, Math.max(missingEnd, missing) + 80));
+}
 
 // Moves the highlight in both panels without redrawing them, and scrolls
-// only when the clicked entry is out of view (the scroll then redraws).
+// only when the entry is out of view (the scroll then redraws).
 // mode '' selects that entry alone, 'toggle' adds or removes it (Cmd/Ctrl),
 // 'range' takes every entry from the last one clicked (Shift). (0.9.5)
-function cmpSelect(idx, mode, side) {
+// (0.9.7) Positions come from a map: a linear search per selected row froze
+// the window for 30 s on a right-click after Cmd+A over 150 000 rows.
+function cmpSelect(idx, mode) {
   if (mode === 'toggle') {
     if (cmp.picked.has(idx)) cmp.picked.delete(idx); else cmp.picked.add(idx);
     cmp.sel = idx;
-  } else if (mode === 'range' && cmp.sel != null && side) {
-    const list = cmp.lists[side];
-    const a = list.findIndex(it => it.idx === cmp.sel), z = list.findIndex(it => it.idx === idx);
-    if (a >= 0 && z >= 0) cmp.picked = new Set(list.slice(Math.min(a, z), Math.max(a, z) + 1).map(it => it.idx));
-    else { cmp.picked = new Set([idx]); cmp.sel = idx; }
+  } else if (mode === 'range' && cmp.sel != null) {
+    const a = cmp.pos.get(cmp.sel), z = cmp.pos.get(idx);
+    if (a != null && z != null) {
+      cmp.picked = new Set();
+      for (let k = Math.min(a, z); k <= Math.max(a, z); k++) cmp.picked.add(cmp.sk.idx[k]);
+    } else { cmp.picked = new Set([idx]); cmp.sel = idx; }
   } else {
     cmp.picked = new Set([idx]);
     cmp.sel = idx;
   }
+  cmpPaintSel(idx);
+}
+// The highlight drawn again on the rows in place; a scroll when `idx` is out of view.
+function cmpPaintSel(idx) {
   let off = false;
+  const at = cmp.pos.get(idx);
   for (const sd of ['left', 'right']) {
     const panel = $('cmp-' + sd);
     const box = panel.querySelector('.cmp-list');
     for (const r of panel.querySelectorAll('.cmp-row')) r.classList.toggle('sel', cmp.picked.has(Number(r.dataset.idx)));
-    const at = cmp.lists[sd].findIndex(it => it.idx === idx);
-    if (at >= 0) {
+    if (at != null) {
       const top = at * CMP_ROW;
       if (top < box.scrollTop || top + CMP_ROW > box.scrollTop + box.clientHeight) off = true;
     }
@@ -3880,19 +4024,10 @@ function cmpSelect(idx, mode, side) {
   if (off) drawCmpPanels(true);
 }
 
-// What a copy to `to` would carry from this entry: something on the sending
-// side that the other side lacks or holds older. A newer file over there is
-// never replaced (Noar's rule): the engine decides the details. (0.9.5)
-function cmpSendable(it, to) {
-  const R = to === 'right';
-  if (!(R ? it.l : it.r)) return false;
-  if (it.type === 'folder') {
-    if (!(R ? it.r : it.l)) return true;
-    const c = it.inside || {};
-    return !!(R ? (c.onlyL || c.newL || c.diff) : (c.onlyR || c.newR || c.diff));
-  }
-  return it.cmp === (R ? 'onlyL' : 'onlyR') || it.cmp === (R ? 'newL' : 'newR') || it.cmp === 'diff';
-}
+// What a copy to `to` would carry: the engine says it per row (something on
+// the sending side that the other side lacks or holds older). A newer file
+// over there is never replaced (Noar's rule): the engine decides the details.
+function cmpSendable(it, to) { return !!(to === 'right' ? it.sendR : it.sendL); }
 
 const CTX_TO_R = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>';
 const CTX_TO_L = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>';
@@ -3923,6 +4058,7 @@ function openCmpCtx(x, y, it, items) {
     const k = el.dataset.k;
     if (k === 'cp-right' || k === 'cp-left') await cmpCopy(k === 'cp-right' ? 'right' : 'left', items);
     else await revealNode(it.idx, k === 'rv-left' ? 'left' : 'right');
+    cmpFocus();
   });
 }
 
@@ -3934,8 +4070,9 @@ function openCmpCtx(x, y, it, items) {
 function cmpLeftOut(d, where) {
   const bits = [];
   if (d.newer) bits.push(`${fmtCount(d.newer, true)} newer in the ${where}`);
+  if (d.changedBoth) bits.push(`${fmtCount(d.changedBoth, true)} changed on both sides since the last synchronization (resolve them in the grid)`);
   if (d.excluded) bits.push(`${fmtCount(d.excluded, true)} excluded`);
-  if (d.unsure) bits.push(`${fmtCount(d.unsure, true)} with a conflict or an unreadable date`);
+  if (d.unsure) bits.push(`${fmtCount(d.unsure, true)} a file on one side and a folder on the other, or unreadable`);
   return bits.length ? `Left as they are: ${bits.join(', ')}.` : '';
 }
 
@@ -3966,37 +4103,48 @@ function cmpAskCopy(d, where, from) {
 }
 
 async function cmpCopy(to, items) {
-  if (state.busy || !items.length || !isCompareOnly()) return;
+  if (state.busy || !items.length || !isCompareOnly() || !cmp.data) return;
   uiToJob();
-  const idx = items.map(x => x.idx);
+  // (0.9.7) Busy from the first question on, the dialog included: a
+  // comparison started meanwhile (Cmd+R) gave the picked numbers to other
+  // files. The engine also refuses rows picked in an older comparison.
+  state.busy = 'sync';
+  const sel = { gen: cmp.data.gen, idx: items.map(x => x.idx) };
   const where = to === 'right' ? 'destination' : 'source';
   const from = to === 'right' ? 'source' : 'destination';
-  const d = await ipc(API.compareCopy(state.job, idx, to, true));
-  if (!d || !d.ok) { showError('Nothing was copied', (d && d.error) || 'Unknown error.'); return; }
-  if (d.blocked) { showError('Nothing was copied', d.blocked); return; }
-  const left = cmpLeftOut(d, where);
-  if (!d.files && !d.folders) {
-    $('status-note').textContent = `Nothing to copy to the ${where}.` + (left ? ' ' + left : '');
-    return;
+  let res = null, left = '';
+  try {
+    const d = await ipc(API.compareCopy(state.job, sel, to, true));
+    if (!d || !d.ok) { showError('Nothing was copied', (d && d.error) || 'Unknown error.'); return; }
+    if (d.blocked) { showError('Nothing was copied', d.blocked); return; }
+    left = cmpLeftOut(d, where);
+    if (!d.files && !d.folders) {
+      $('status-note').textContent = `Nothing to copy to the ${where}.` + (left ? ' ' + left : '');
+      return;
+    }
+    if ((d.overwrite || d.renames) && !(await cmpAskCopy(d, where, from))) return;
+    state.runKind = 'copy';
+    startRunUi('COPYING');
+    res = await ipc(API.compareCopy(state.job, sel, to, false));
+  } finally {
+    state.busy = null;
+    if (state.runKind) { state.runKind = null; setBusyUi(false); }
+    if (!res) cmpFocus();
   }
-  if ((d.overwrite || d.renames) && !(await cmpAskCopy(d, where, from))) return;
-
-  state.busy = 'sync';
-  state.runKind = 'copy';
-  startRunUi('COPYING');
-  const res = await ipc(API.compareCopy(state.job, idx, to, false));
-  state.busy = null;
-  state.runKind = null;
-  setBusyUi(false);
-  if (res && res.stats) state.stats = res.stats;
+  if (res.stats) state.stats = res.stats;
   await cmpLoad(true);
   refreshOverview().catch(() => {});
-  if (!res || !res.ok) {
-    showError('Copy failed', (res && res.error) || 'Unknown error.');
+  cmpFocus();
+  // (0.9.7) Stopped with STOP: said as such, not as a failure.
+  if (!res.ok && res.cancelled) { $('status-note').textContent = 'Copy cancelled.' + (left ? ' ' + left : ''); return; }
+  if (!res.ok) {
+    showError('Copy failed', res.error || 'Unknown error.');
     $('status-note').textContent = 'The copy did not finish: compare again to see exactly what is on both sides.';
     return;
   }
-  if (res.errors.length || res.cancelled || res.stopped || res.lockLost || (res.notes || []).length) {
+  // (0.9.7) The file being copied when STOP was pressed is not an error.
+  const errs = res.errors.filter(e => !/cancelled/i.test(e.message || ''));
+  if (errs.length || res.stopped || res.lockLost || (res.notes || []).length) {
     showSummary(res);
     setRecheck(null);
   }
@@ -4004,26 +4152,33 @@ async function cmpCopy(to, items) {
   const did = [];
   if (c.files) did.push(`${fmtCount(c.files, true)} file${c.files > 1 ? 's' : ''} (${fmtBytes(c.bytes)})`);
   if (c.folders) did.push(`${fmtCount(c.folders, true)} folder${c.folders > 1 ? 's' : ''}`);
-  $('status-note').textContent = (res.cancelled ? 'Copy cancelled' : `Copied to the ${where}`) +
-    (did.length ? `: ${did.join(', ')}.` : ': nothing.') + (res.errors.length ? ` ${res.errors.length} error${res.errors.length > 1 ? 's' : ''}.` : '') +
-    (left ? ' ' + left : '');
+  $('status-note').textContent = res.cancelled
+    ? 'Copy cancelled' + (did.length ? ` after ${did.join(', ')}.` : '.') + (errs.length ? ` ${errs.length} error${errs.length > 1 ? 's' : ''}.` : '')
+    : `Copied to the ${where}` + (did.length ? `: ${did.join(', ')}.` : ': nothing.') +
+      (errs.length ? ` ${errs.length} error${errs.length > 1 ? 's' : ''}.` : '') + (left ? ' ' + left : '');
 }
 
 function bindCompare() {
   $('cc-cancel').addEventListener('click', () => cmpAskCopy.answer && cmpAskCopy.answer(false));
   $('cc-ok').addEventListener('click', () => cmpAskCopy.answer && cmpAskCopy.answer(true));
-  $('cmp-up').addEventListener('click', cmpUp);
-  $('cmp-diff').addEventListener('click', () => { cmp.diffOnly = !cmp.diffOnly; cmpLoad(true); });
-  $('cmp-pair').addEventListener('change', e => cmpGo(Number(e.target.value) || 0, ''));
-  $('cmp-crumbs').addEventListener('click', e => {
-    const b = e.target.closest('.cr');
-    if (!b || b.classList.contains('cur')) return;
-    cmpGo(cmp.p, b.dataset.rel || '');
+  $('cmp-view').addEventListener('click', e => {
+    const b = e.target.closest('button[data-v]');
+    if (!b || b.dataset.v === cmp.view) return;
+    cmp.view = b.dataset.v;
+    // (0.9.7) A view and a chip at once contradicted each other: one or the other.
+    cmp.cat = '';
+    cmpLoad(true);
   });
-  for (const side of ['left', 'right']) {
-    const box = $('cmp-' + side).querySelector('.cmp-list');
+  $('cmp-expand').addEventListener('click', cmpExpandDiff);
+  $('cmp-collapse').addEventListener('click', cmpCollapseAll);
+  $('cmp-pair').addEventListener('change', e => { cmp.p = Number(e.target.value) || 0; cmpLoad(); });
+  const boxes = ['left', 'right'].map(side => $('cmp-' + side).querySelector('.cmp-list'));
+  for (const box of boxes) {
+    const other = boxes[0] === box ? boxes[1] : boxes[0];
     let pending = false;
+    // The two sides scroll together: they are the same rows.
     box.addEventListener('scroll', () => {
+      if (other.scrollTop !== box.scrollTop) other.scrollTop = box.scrollTop;
       if (pending) return;
       pending = true;
       requestAnimationFrame(() => { pending = false; drawCmpPanels(); });
@@ -4031,47 +4186,89 @@ function bindCompare() {
     // The double click is read from the click's own count, as in the
     // overview (0.9.5): rebuilding the rows on the first click left the second
     // one on a new element, so the browser never fired 'dblclick'. Selecting
-    // now only moves the highlight; the rows stay where they are.
+    // only moves the highlight; the rows stay where they are.
     box.addEventListener('click', e => {
       const row = e.target.closest('.cmp-row');
       if (!row) return;
       const idx = Number(row.dataset.idx);
       const mod = e.metaKey || e.ctrlKey ? 'toggle' : e.shiftKey ? 'range' : '';
+      // (0.9.6) The chevron opens or closes at once. (0.9.7) Its second click
+      // of a double click is ignored: it closed what the first had opened.
+      if (e.target.closest('.tw:not(.no)') && !mod) { if (e.detail < 2) cmpToggle(cmpItem(idx)); return; }
       if (e.detail >= 2 && !mod) { cmpOpen(cmpItem(idx)); return; }
-      cmpSelect(idx, mod, side);
+      cmpSelect(idx, mod);
     });
     box.addEventListener('contextmenu', e => {
       const row = e.target.closest('.cmp-row');
       if (!row) return;
       e.preventDefault();
-      const it = cmpItem(Number(row.dataset.idx));
-      if (!it) return;
-      // A right-click outside the selection selects that row alone, as a file manager does.
-      if (!cmp.picked.has(it.idx)) cmpSelect(it.idx);
-      const items = [...cmp.picked].map(cmpItem).filter(Boolean);
-      openCmpCtx(e.clientX, e.clientY, it, items);
+      cmpMenu(Number(row.dataset.idx), e.clientX, e.clientY);
     });
     box.addEventListener('keydown', e => {
-      const list = cmp.lists[side];
-      const at = list.findIndex(it => it.idx === cmp.sel);
-      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      const n = cmp.count;
+      const at = cmp.sel != null && cmp.pos.has(cmp.sel) ? cmp.pos.get(cmp.sel) : -1;
+      const it = at >= 0 ? cmpAt(at) : null;
+      const page = Math.max(1, Math.floor(box.clientHeight / CMP_ROW) - 1);
+      // (0.9.7) Shift extends the selection from where it started.
+      const go = k => {
+        k = Math.max(0, Math.min(n - 1, k));
+        if (k < 0 || !n) return;
+        const idx = cmp.sk.idx[k];
+        if (e.shiftKey && cmp.sel != null) {
+          const a = cmp.pos.get(cmp.anchor != null && cmp.pos.has(cmp.anchor) ? cmp.anchor : cmp.sel);
+          cmp.anchor = cmp.sk.idx[a];
+          cmp.picked = new Set();
+          for (let j = Math.min(a, k); j <= Math.max(a, k); j++) cmp.picked.add(cmp.sk.idx[j]);
+          cmp.sel = idx;
+          cmpPaintSel(idx);
+        } else { cmp.anchor = null; cmpSelect(idx); }
+      };
+      const parentAt = k => { const d = cmp.sk.depth[k]; for (let j = k - 1; j >= 0; j--) if (cmp.sk.depth[j] < d) return j; return -1; };
+      if (e.key === 'ArrowDown' || (e.key === 'ArrowUp' && !e.altKey)) {
         e.preventDefault();
-        const next = Math.max(0, Math.min(list.length - 1, at < 0 ? 0 : at + (e.key === 'ArrowDown' ? 1 : -1)));
-        if (list[next]) cmpSelect(list[next].idx);
+        go(at < 0 ? 0 : at + (e.key === 'ArrowDown' ? 1 : -1));
+      } else if (e.key === 'Home' || e.key === 'End') {
+        e.preventDefault();
+        go(e.key === 'Home' ? 0 : n - 1);
+      } else if (e.key === 'PageDown' || e.key === 'PageUp') {
+        e.preventDefault();
+        go((at < 0 ? 0 : at) + (e.key === 'PageDown' ? page : -page));
+      } else if (e.key === 'ArrowRight' && it) {
+        e.preventDefault();
+        if (it.type === 'folder' && !it.open && it.kids) cmpToggle(it, true);
+        else if (it.open && at + 1 < n) go(at + 1);
+      } else if ((e.key === 'ArrowLeft' || e.key === 'Backspace' || (e.key === 'ArrowUp' && e.altKey)) && it) {
+        e.preventDefault();
+        if (e.key === 'ArrowLeft' && it.type === 'folder' && it.open) cmpToggle(it, false);
+        else { const up = parentAt(at); if (up >= 0) go(up); }
       } else if ((e.metaKey || e.ctrlKey) && (e.key === 'a' || e.key === 'A')) {
         e.preventDefault();
-        cmp.picked = new Set(list.map(it => it.idx));
+        cmp.picked = new Set(cmp.sk ? cmp.sk.idx : []);
         drawCmpPanels();
-      } else if (e.key === 'Enter') {
+      } else if (e.key === 'Enter' && it) {
         e.preventDefault();
-        if (at >= 0) cmpOpen(list[at]);
-      } else if (e.key === 'Backspace' || (e.key === 'ArrowUp' && e.altKey)) {
+        cmpOpen(it);
+      } else if ((e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) && it) {
+        // (0.9.7) The copy menu from the keyboard, on the selected row.
         e.preventDefault();
-        cmpUp();
+        const row = box.querySelector(`.cmp-row[data-idx="${it.idx}"]`);
+        const r = (row || box).getBoundingClientRect();
+        cmpMenu(it.idx, r.left + 40, r.top + Math.min(r.height, CMP_ROW));
       }
     });
   }
   window.addEventListener('resize', () => { if (isCompareOnly()) drawCmpPanels(); });
+}
+
+// The right-click menu on a row: a row outside the selection is selected
+// alone first, as a file manager does.
+function cmpMenu(idx, x, y) {
+  const it = cmpItem(idx);
+  if (!it) return;
+  if (!cmp.picked.has(it.idx)) cmpSelect(it.idx);
+  const items = [];
+  for (const i of cmp.picked) { const x2 = cmpItem(i); if (x2) items.push(x2); }
+  openCmpCtx(x, y, it, items);
 }
 
 // ── Connect to a server ────────────────────────────────────────────────────

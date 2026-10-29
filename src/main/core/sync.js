@@ -287,6 +287,9 @@ class SyncRunner {
   // as "synchronized", unproven. Left out, those files are simply identical on
   // both sides at the next comparison, which records them then.
   dropUnproven() {
+    // (0.9.7) Once per run: run() also calls it when the run ends early.
+    if (this._unprovenDropped) return 0;
+    this._unprovenDropped = true;
     const unproven = (this.toVerify || []).filter(i => !i.ok);
     for (const i of unproven) this.applied.delete(i.rel);
     if (unproven.length) {
@@ -1262,6 +1265,11 @@ class SyncRunner {
     try { await this._run(); }
     catch (err) {
       if (!/cancelled/i.test(err.message || '')) throw err;
+    } finally {
+      // (0.9.7) STOP during the copy pass ended the run before the read-back,
+      // and the copies nobody read back were recorded as synchronized (the
+      // 0.8.8 fix only covered a STOP during the read-back itself).
+      this.dropUnproven();
     }
     this.emit(true, this.token.cancelled ? 'Cancelled' : (this.stopped ? 'Stopped' : 'Done'));
     return {

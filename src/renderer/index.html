@@ -504,17 +504,17 @@ padding:6px 12px;cursor:pointer;font-family:inherit;}
    list of ten thousand rows still gives you something to hold. */
 #gridscroll::-webkit-scrollbar,#ov-list::-webkit-scrollbar,
 .recent-list::-webkit-scrollbar,.mcard::-webkit-scrollbar,
-.srv-tree::-webkit-scrollbar,.err-body::-webkit-scrollbar{width:13px;height:13px;}
+.srv-tree::-webkit-scrollbar,.err-body::-webkit-scrollbar,.cmp-list::-webkit-scrollbar{width:13px;height:13px;}
 #gridscroll::-webkit-scrollbar-track,#ov-list::-webkit-scrollbar-track,
 .recent-list::-webkit-scrollbar-track,.mcard::-webkit-scrollbar-track,
-.srv-tree::-webkit-scrollbar-track,.err-body::-webkit-scrollbar-track{background:transparent;}
+.srv-tree::-webkit-scrollbar-track,.err-body::-webkit-scrollbar-track,.cmp-list::-webkit-scrollbar-track{background:transparent;}
 #gridscroll::-webkit-scrollbar-thumb,#ov-list::-webkit-scrollbar-thumb,
 .recent-list::-webkit-scrollbar-thumb,.mcard::-webkit-scrollbar-thumb,
-.srv-tree::-webkit-scrollbar-thumb,.err-body::-webkit-scrollbar-thumb{background:#454956;border-radius:8px;
+.srv-tree::-webkit-scrollbar-thumb,.err-body::-webkit-scrollbar-thumb,.cmp-list::-webkit-scrollbar-thumb{background:#454956;border-radius:8px;
 border:3px solid transparent;background-clip:content-box;min-height:40px;}
 #gridscroll::-webkit-scrollbar-thumb:hover,#ov-list::-webkit-scrollbar-thumb:hover,
 .recent-list::-webkit-scrollbar-thumb:hover,.mcard::-webkit-scrollbar-thumb:hover,
-.srv-tree::-webkit-scrollbar-thumb:hover,.err-body::-webkit-scrollbar-thumb:hover{background:#6a6f80;background-clip:content-box;}
+.srv-tree::-webkit-scrollbar-thumb:hover,.err-body::-webkit-scrollbar-thumb:hover,.cmp-list::-webkit-scrollbar-thumb:hover{background:#6a6f80;background-clip:content-box;}
 
 /* ── Status strip ─────────────────────────────── */
 #statusbar{flex-shrink:0;display:flex;align-items:center;gap:7px;padding:8px 16px;
@@ -604,6 +604,9 @@ transform:rotate(45deg);opacity:0;}
 #app.running #syncmodes,#app.running #pairwrap,#app.running #pair-add-row,
 #app.running #seg-cmp,#app.running #btn-filter,#app.running .autorow{pointer-events:none;opacity:.45;}
 #app.running #gridbody{pointer-events:none;}
+/* (0.9.7) Same for the COMPARE panels while a copy runs: they scroll, nothing else. */
+#app.running #cmp-bar{pointer-events:none;opacity:.45;}
+#app.running .cmp-body{pointer-events:none;}
 .pb-track-top{height:4px;background:var(--bg3);overflow:hidden;flex-shrink:0;}
 .pb-fill{height:100%;background:linear-gradient(90deg,var(--pb-color,var(--green)),var(--pb-color2,#00ffaa));
 transition:width .4s ease,background .3s ease;box-shadow:0 0 8px var(--pb-glow,var(--green-g));}
@@ -1351,47 +1354,59 @@ body.cmpmode #cmpview{display:flex;}
 body.cmpmode #scope-bar,body.cmpmode #gridhead,body.cmpmode #gridscroll,body.cmpmode #gridempty{display:none !important;}
 body.cmpmode .viewopt.eq{display:none;}
 body.cmpmode #auto-switch + .slider,body.cmpmode .autorow{opacity:.35;pointer-events:none;}
-#cmp-bar{display:flex;align-items:center;gap:8px;padding:10px 6px 8px;}
-.cmp-ib{width:30px;height:30px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;border:none;
-  border-radius:var(--r-field);background:var(--ins);color:var(--text2);cursor:pointer;}
-.cmp-ib:hover:not(:disabled){color:var(--text);}
-.cmp-ib:disabled{opacity:.4;cursor:default;}
-.cmp-ib svg{width:14px;height:14px;}
-.cmp-ib.on{background:var(--yellow-d);color:var(--yellow);}
+#cmp-bar{display:flex;align-items:center;gap:10px;padding:10px 6px 8px;}
+#cmp-view button{font-size:12px;font-weight:600;}
 #cmp-pair{height:30px;background:var(--ins);border:none;border-radius:var(--r-field);color:var(--text);
-  font-size:12px;padding:0 8px;max-width:30%;}
-#cmp-crumbs{flex:1;min-width:0;height:30px;display:flex;align-items:center;gap:2px;background:var(--ins);
-  border-radius:var(--r-field);padding:0 8px;overflow:hidden;white-space:nowrap;font-family:var(--mono);font-size:12px;color:var(--text3);}
-#cmp-crumbs .cr{background:none;border:none;color:var(--text2);font:inherit;padding:3px 4px;border-radius:5px;cursor:pointer;
-  overflow:hidden;text-overflow:ellipsis;max-width:40ch;}
-#cmp-crumbs .cr:hover{color:var(--text);background:rgba(255,255,255,.05);}
-#cmp-crumbs .cr.cur{color:var(--text);font-weight:700;cursor:default;}
-#cmp-crumbs .sep{color:var(--text4);padding:0 2px;}
+  font-size:12px;padding:0 8px;flex:1;min-width:0;}
+/* (0.9.7) A title, not a field: it looked like an empty input before a comparison. */
+#cmp-where{flex:1;min-width:0;padding:0 4px;font-family:var(--mono);font-size:12px;font-weight:700;color:var(--text2);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+#cmp-pair{flex:1;}
+.cmp-tb{height:30px;flex-shrink:0;padding:0 11px;display:inline-flex;align-items:center;gap:6px;border:none;
+  border-radius:var(--r-field);background:var(--ins);color:var(--text2);font:inherit;font-size:12px;cursor:pointer;}
+.cmp-tb:hover:not(:disabled){color:var(--text);}
+.cmp-tb:disabled{opacity:.4;cursor:default;}
+.cmp-tb svg{width:14px;height:14px;}
 #cmp-panels{flex:1;display:flex;gap:8px;min-height:0;padding-bottom:6px;}
 .cmp-panel{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--ins);border-radius:var(--r-ins);overflow:hidden;}
 .cmp-h{display:flex;align-items:baseline;gap:8px;padding:9px 12px 4px;min-width:0;}
 .cmp-side{font-size:10px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:var(--text3);flex-shrink:0;}
 .cmp-path{font-family:var(--mono);font-size:11px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:rtl;text-align:left;}
-.cmp-cols{display:grid;grid-template-columns:minmax(0,1fr) 84px 124px;gap:10px;padding:4px 14px 6px 40px;
+.cmp-cols{display:grid;grid-template-columns:minmax(0,1fr) 84px 124px;gap:10px;padding:4px 14px 6px 14px;
   font-size:9.5px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--text4);}
 .cmp-cols .r{text-align:right;}
 .cmp-list{flex:1;min-height:0;overflow:auto;position:relative;padding:0 6px;outline:none;}
 .cmp-spacer{position:relative;}
 .cmp-body{position:absolute;left:0;right:0;top:0;}
-.cmp-row{display:grid;grid-template-columns:18px minmax(0,1fr) 84px 124px;gap:10px;align-items:center;height:27px;
+/* (0.9.6) The tree: one row per item on both sides, the status on the name
+   AND the icon (Manuel López). filo's codes: yellow = only on this side,
+   green = newer on this side; identical fades to grey; a folder with
+   differences inside is blue and carries their count. */
+.cmp-row{display:grid;grid-template-columns:minmax(0,1fr) 84px 124px;gap:10px;align-items:center;height:27px;
   padding:0 8px;border-radius:6px;font-size:12.5px;cursor:default;}
 .cmp-row:hover{background:rgba(255,255,255,.03);}
 .cmp-row.sel{background:rgba(255,255,255,.07);}
 .cmp-list:focus .cmp-row.sel{box-shadow:var(--focus);}
 .cmp-row.off{opacity:.45;}
-.cmp-row > svg{width:15px;height:15px;color:var(--text3);}
-.cmp-row.fold > svg{color:#7fa8e8;}
-.cmp-row .nm{font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.cmp-row .nmc{display:flex;align-items:center;gap:6px;min-width:0;}
+.cmp-row .tw{width:14px;height:14px;flex-shrink:0;display:inline-flex;color:var(--text3);cursor:pointer;}
+.cmp-row .tw.no{cursor:default;}
+.cmp-row .tw svg{width:14px;height:14px;}
+.cmp-row .nmc > svg{width:15px;height:15px;flex-shrink:0;color:var(--text2);}
+.cmp-row .nm{font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text);}
 .cmp-row .nm .hl{padding:1px 6px;margin-left:-6px;border-radius:5px;}
-.cmp-row .nm .hl.o{background:var(--yellow-d);color:var(--yellow);}
-.cmp-row .nm .hl.n{background:var(--green-d);color:var(--green);}
-.cmp-row .nm .dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--text2);margin-left:8px;vertical-align:middle;}
 .cmp-row .sz,.cmp-row .dt{font-family:var(--mono);font-size:11.5px;color:var(--text2);text-align:right;white-space:nowrap;overflow:hidden;}
+.cmp-row.same .nm,.cmp-row.same .sz,.cmp-row.same .dt,.cmp-row.same .nmc > svg{color:var(--text4);}
+.cmp-row.diffin .nmc > svg{color:#7fa8e8;}
+.cmp-row .badge{margin-left:8px;padding:0 6px;height:16px;line-height:16px;border-radius:8px;font-size:10px;font-weight:800;
+  background:rgba(127,168,232,.16);color:#9dbcf0;flex-shrink:0;}
+.cmp-row.only .nm,.cmp-row.only .nmc > svg{color:var(--yellow);}
+.cmp-row.only .nm .hl{background:var(--yellow-d);}
+.cmp-row.new .nm,.cmp-row.new .nmc > svg,.cmp-row.new .sz,.cmp-row.new .dt{color:var(--green);}
+.cmp-row.new .nm .hl{background:var(--green-d);}
+.cmp-row.miss{background:repeating-linear-gradient(135deg,rgba(255,255,255,.018) 0 6px,transparent 6px 12px);}
+.cmp-row.miss.sel{background:rgba(255,255,255,.07);}
+.cmp-row.ph{opacity:.35;}
 .cmp-empty{display:none;margin:40px 20px;text-align:center;color:var(--text3);font-size:12.5px;line-height:1.5;}
 .cmp-foot{padding:6px 14px 9px;font-size:11px;color:var(--text3);min-height:14px;}
 .cmp-foot b{font-weight:800;} .cmp-foot .o{color:var(--yellow);} .cmp-foot .n{color:var(--green);}
@@ -1399,6 +1414,27 @@ body.cmpmode #auto-switch + .slider,body.cmpmode .autorow{opacity:.35;pointer-ev
 /* VERIFY: on the modes line, apart from the four. */
 .modes-row .modes-sep{flex:0 0 1px;align-self:stretch;margin:4px 6px;background:var(--text4);opacity:.5;}
 .modes-row #btn-verify{flex:0 0 auto;padding-right:18px;}
+/* (0.9.7) At the narrowest window (1040 px) the four mode names were cut
+   ("2 WA", "MIRI") since COMPARE joined the row: tighter, smaller, whole. */
+@media (max-width:1240px){
+  .modes-row{gap:2px;}
+  #syncmodes .mbtn{padding:8px 7px;gap:7px;}
+  #syncmodes .mbadge{font-size:12.5px;padding:3px 4px;letter-spacing:.02em;}
+  .modes-row #var-compare,.modes-row #btn-verify{padding-right:8px;}
+  .modes-row .modes-sep{margin:4px 2px;}
+  /* The COMPARE panels are narrow there too: the date column goes, the name
+     keeps the room (the tooltip still says which side is newer). */
+  .cmp-row,.cmp-cols{grid-template-columns:minmax(0,1fr) 70px;}
+  .cmp-row .dt,.cmp-cols > :nth-child(3){display:none;}
+}
+@media (max-width:1120px){
+  #syncmodes .mbtn:not(#var-compare):not(#btn-verify) .mico{display:none;}
+}
+/* (0.9.7) A short window left the COMPARE panels 0 px high: they keep room
+   for a dozen rows, and the column scrolls instead. */
+body.cmpmode #content{overflow-y:auto;}
+body.cmpmode #gridwrap{min-height:330px;flex-shrink:0;flex-basis:auto;}
+@media (min-height:900px){ body.cmpmode #gridwrap{flex:1;min-height:330px;} }
 #btn-verify .mico{color:var(--text2);background:rgba(255,255,255,.06);border-radius:var(--r-field);}
 #btn-verify:hover .mbadge{color:var(--text);}
 /* When it finishes: an icon in the title bar and a four-line menu. Grey when
@@ -1674,7 +1710,7 @@ body.lassoing .tooltip-float{display:none !important;}
     <span class="modes-sep" aria-hidden="true"></span>
     <!-- (0.9.5) COMPARE: the job only compares, and is browsed in two panels
          (filo's synchronized browsing). Nothing is ever written. -->
-    <button class="mbtn" id="var-compare" data-tip="COMPARE: browse both sides in two panels and see what differs. Nothing is copied, nothing is written.">
+    <button class="mbtn" id="var-compare" data-tip="COMPARE: browse both sides in two panels and see what differs. Nothing is synchronized; a right-click copies the items you choose.">
       <span class="mico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="7" height="16" rx="1.5"/><rect x="14" y="4" width="7" height="16" rx="1.5"/></svg></span>
       <div class="minfo">
         <div class="mbadge-row"><div class="mbadge">COMPARE</div><span class="msel">Selected</span></div>
@@ -1773,17 +1809,23 @@ body.lassoing .tooltip-float{display:none !important;}
     <div id="ge-sub">Pick two folders, then press <b>Compare</b>.</div>
     <button id="ge-act"></button>
   </div>
-  <!-- (0.9.5) COMPARE mode: two panels, one folder at a time, both sides
-       moving together. Built by app.js (renderCompare). -->
+  <!-- (0.9.5) COMPARE mode: two panels, both sides moving together.
+       (0.9.6) A tree, both sides on the same rows. Built by app.js
+       (renderCompare). -->
   <div id="cmpview" aria-label="Compare">
     <div id="cmp-bar">
-      <button class="cmp-ib" id="cmp-up" aria-label="Up one folder" data-tip="Up one folder (Backspace)">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>
-      </button>
+      <div class="seg" id="cmp-view" role="group" aria-label="Show">
+        <button data-v="all" class="on" data-tip="ALL: everything on both sides">All</button>
+        <button data-v="equal" data-tip="EQUAL: only what is identical on both sides">Equal</button>
+        <button data-v="diff" data-tip="DIFFERENT: every kind of difference (only on one side, newer, different)">Different</button>
+      </div>
       <select id="cmp-pair" aria-label="Folder pair" style="display:none"></select>
-      <div id="cmp-crumbs"></div>
-      <button class="cmp-ib" id="cmp-diff" aria-label="Differences only" aria-pressed="false" data-tip="DIFFERENCES ONLY: show only what differs between the two sides">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M7 12h10"/><path d="M10 18h4"/></svg>
+      <div id="cmp-where"></div>
+      <button class="cmp-tb" id="cmp-expand" data-tip="Open every folder present on both sides that has differences inside">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>Expand differences
+      </button>
+      <button class="cmp-tb" id="cmp-collapse" data-tip="Close every folder">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>Collapse all
       </button>
     </div>
     <div id="cmp-panels">
@@ -2039,7 +2081,7 @@ body.lassoing .tooltip-float{display:none !important;}
       <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 20a1 1 0 0 0 .553.895l2 1A1 1 0 0 0 14 21v-7a2 2 0 0 1 .517-1.341L21.74 4.67A1 1 0 0 0 21 3H3a1 1 0 0 0-.742 1.67l7.225 7.989A2 2 0 0 1 10 14z"/></svg>
       Filter: this job only
     </div>
-    <div class="m-sub">These patterns belong to the current job and travel with its .syncto file. Right-clicking any row in the grid or the overview adds patterns here too.</div>
+    <div class="m-sub">These patterns belong to the current job and travel with its .syncto file. Right-clicking any row in the grid or the overview adds patterns here too (not in the COMPARE panels).</div>
     <div class="set-row"><label>Include</label><textarea id="st-include" spellcheck="false" style="min-height:90px">*</textarea></div>
     <div class="set-row"><label>Exclude</label><textarea id="st-exclude" spellcheck="false" style="min-height:130px"></textarea></div>
     <div class="set-hint">One pattern per line (or separated by <code>|</code>).
@@ -2053,7 +2095,8 @@ body.lassoing .tooltip-float{display:none !important;}
       <code>/Rushes/A001/</code> are the same pattern, and neither one reaches
       <code>DAY2/Rushes/A001</code>. Use <code>*/Rushes/A001/</code> for that.</div>
     <div class="m-btns">
-      <button class="m-btn" id="filter-close">Apply</button>
+      <button class="m-btn" id="filter-cancel">Cancel</button>
+      <button class="m-btn primary" id="filter-close">Apply</button>
     </div>
   </div>
 </div>

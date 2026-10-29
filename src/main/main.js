@@ -592,9 +592,24 @@ function openJobFile(p) {
 // Every native folder this job names, stat'ed. Called when a job is opened —
 // the moment a stale path can still be fixed for the price of one dialog,
 // rather than after a comparison has planned a full copy against it.
+// (0.9.7) One engine operation at a time: comparing, synchronizing, copying
+// from the COMPARE panels (its dry run included), clearing leftovers, the
+// check before a run. Only the window's own "busy" flag kept them apart, and
+// a comparison started during a copy (Cmd+R while its dialog was open) got
+// the copy's operations put back onto the NEW rows: a MIRROR run afterwards
+// deleted files that were identical on both sides.
+let engineJob = null;
+async function exclusive(what, fn) {
+  if (engineJob) return { ok: false, busy: true, error: `${engineJob} is running: wait for it to finish.` };
+  engineJob = what;
+  try { return await fn(); } finally { engineJob = null; }
+}
+// The manual edits of the plan wait too: they change the rows a run reads.
+const editPlan = fn => (engineJob ? session.stats : fn());
+
 // Removing a lock a previous run left behind. Never done on the way past: this
 // can mean watching the file for a full minute to be sure nobody is feeding it.
-ipcMain.handle('clear-locks', async (_, job, items) => {
+ipcMain.handle('clear-locks', (_, job, items) => exclusive('Clearing leftovers', async () => {
   // (0.9.5) COMPARE mode writes nothing, leftovers included.
   if (job && job.compareOnly) return { ok: false, error: 'This job is in COMPARE mode: nothing is written. Choose a synchronization mode to clear leftovers.' };
   try {
@@ -607,7 +622,7 @@ ipcMain.handle('clear-locks', async (_, job, items) => {
   } catch (err) {
     return { ok: false, error: err.message || String(err) };
   }
-});
+}));
 
 ipcMain.handle('check-job-paths', async (_, job) => {
   try { return await checkJobPaths(job); }
@@ -710,7 +725,7 @@ ipcMain.handle('job-save', async (_, job, saveAs) => {
 });
 
 // ── IPC: comparison ────────────────────────────────────────────────────────
-ipcMain.handle('compare', async (_, job) => {
+ipcMain.handle('compare', (_, job) => exclusive('A comparison', async () => {
   tokens.compare.cancelled = false;
   try {
     const res = await session.compare(job, {
@@ -722,14 +737,16 @@ ipcMain.handle('compare', async (_, job) => {
   } catch (err) {
     return { ok: false, error: err.message || String(err), offline: err.offline || null };
   }
-});
+}));
 
 ipcMain.handle('compare-cancel', () => { tokens.compare.cancelled = true; return true; });
 
 ipcMain.handle('get-rows', (_, offset, limit, view) => session.rows(offset, limit, view));
 ipcMain.handle('get-overview', (_, view, open, sort) => session.overview(view, open, sort));
-// (0.9.5) The COMPARE view: one folder of one pair, both sides. Read only.
-ipcMain.handle('compare-browse', (_, p, rel, f) => session.browse(Number(p) || 0, String(rel || ''), f && typeof f === 'object' ? f : {}));
+// (0.9.6) The COMPARE tree. (0.9.7) The engine keeps the open folders and
+// sends a skeleton; the window asks for the details of the rows it draws.
+ipcMain.handle('compare-tree', (_, p, ops, f) => session.cmpTree(Number(p) || 0, ops && typeof ops === 'object' ? ops : {}, f && typeof f === 'object' ? f : {}));
+ipcMain.handle('compare-rows', (_, id, start, count) => session.cmpRows(Number(id), Number(start), Number(count)));
 
 // Right-click → Reveal. The window sends a row index and a side; the path is
 // resolved here, where the pairs, the two roots and each side's own spelling of
@@ -751,18 +768,18 @@ ipcMain.handle('reveal-node', (_, idx, side) => {
 // Asked by the confirmation dialog. Anything that would make the run refuse is
 // better said here, with the folders on screen and the settings one click
 // away, than as an error after a run that did nothing.
-ipcMain.handle('preflight', async (_, job) => {
+ipcMain.handle('preflight', (_, job) => exclusive('Another operation', async () => {
   try { return { ok: true, warnings: await session.preflight(job, { trashItem }) }; }
   catch (err) { return { ok: false, error: err.message || String(err) }; }
-});
+}));
 ipcMain.handle('visible-indices', (_, view) => session.visibleIndices(view));
-ipcMain.handle('set-direction', (_, indices, dir) => session.setDirection(indices, dir));
-ipcMain.handle('set-active',    (_, indices, act) => session.setActive(indices, act));
-ipcMain.handle('toggle-active', (_, indices) => session.toggleActive(indices));
-ipcMain.handle('invert-all',    () => session.invertAll());
+ipcMain.handle('set-direction', (_, indices, dir) => editPlan(() => session.setDirection(indices, dir)));
+ipcMain.handle('set-active',    (_, indices, act) => editPlan(() => session.setActive(indices, act)));
+ipcMain.handle('toggle-active', (_, indices) => editPlan(() => session.toggleActive(indices)));
+ipcMain.handle('invert-all',    () => editPlan(() => session.invertAll()));
 
 // ── IPC: synchronization ───────────────────────────────────────────────────
-ipcMain.handle('sync', async (_, job) => {
+ipcMain.handle('sync', (_, job) => exclusive('A synchronization', async () => {
   tokens.sync.cancelled = false;
   tokens.sync.paused = false;
   holdSleep(true);
@@ -778,32 +795,34 @@ ipcMain.handle('sync', async (_, job) => {
   } finally {
     holdSleep(false);
   }
-});
+}));
 
 // (0.9.5) Copy from the COMPARE panels: the rows picked there, to one side.
-// `dryRun` only answers what would be copied and replaced.
-ipcMain.handle('compare-copy', async (_, job, indices, to, dryRun) => {
-  if (!Array.isArray(indices) || indices.length > 1e6) return { ok: false, error: 'Nothing to copy.' };
+// `dryRun` only answers what would be copied and replaced. (0.9.7) `sel` is
+// { gen, idx }: the comparison the rows were picked in, and their indices.
+ipcMain.handle('compare-copy', (_, job, sel, to, dryRun) => exclusive(dryRun ? 'Another operation' : 'A copy', async () => {
+  const idx = sel && Array.isArray(sel.idx) ? sel.idx : null;
+  if (!idx || !idx.length || idx.length > 1e6) return { ok: false, error: 'Nothing to copy.' };
   if (dryRun) {
-    try { return { ok: true, ...(await session.copyItems(job, indices, to, { dryRun: true, trashItem })) }; }
+    try { return { ok: true, ...(await session.copyItems(job, sel, to, { dryRun: true, trashItem })) }; }
     catch (err) { return { ok: false, error: err.message || String(err) }; }
   }
   tokens.sync.cancelled = false;
   tokens.sync.paused = false;
   holdSleep(true);
   try {
-    const res = await session.copyItems(job, indices, to, {
+    const res = await session.copyItems(job, sel, to, {
       token: tokens.sync,
       trashItem,
       onProgress: p => send('sync-progress', p),
     });
     return { ok: true, ...res, stats: session.stats };
   } catch (err) {
-    return { ok: false, error: err.message || String(err), stats: session.stats };
+    return { ok: false, error: err.message || String(err), cancelled: /cancelled/i.test(err.message || ''), stats: session.stats };
   } finally {
     holdSleep(false);
   }
-});
+}));
 
 ipcMain.handle('sync-cancel', () => { tokens.sync.cancelled = true; tokens.sync.paused = false; return true; });
 ipcMain.handle('sync-pause',  () => { tokens.sync.paused = true;  return true; });

@@ -4,6 +4,122 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.9.7] — 2026-10-28
+
+A full review of 0.9.6 (engine, security, window, speed), every finding
+reproduced, and the fixes Noar chose: all four lots.
+
+### Fixed: files
+
+- **A comparison started during a copy from the COMPARE panels** (Cmd+R
+  while its dialog was open, or while it waited for a server) got the
+  copy's operations put back onto its new rows: a MIRROR run afterwards could
+  delete files that were equal on both sides. The engine now runs one
+  operation at a time (compare, synchronize, copy, clear leftovers, the check
+  before a run), and a copy keeps to the comparison it started from.
+- **The same race could replace another file than the one picked**: the
+  rows a copy works on now belong to one comparison, and are refused after a
+  new one ("pick them again").
+- **Compared by content or size, a copy replaced a newer file** at the other
+  side: no date was looked at. It is kept, as with time and size.
+- **STOP during the copy pass** recorded the files copied but not yet read
+  back as synchronized (only a STOP during the read-back was handled). This
+  was true of every synchronization, not only the copies.
+- **Two copies in a row in a TWO WAY job** could undo what the first had
+  recorded when the dates could not be kept, and turn it into a false "both
+  sides changed" conflict.
+- **The first copy in a TWO WAY or UPDATE job never synchronized** wrote a
+  database of the few rows it copied, and every other difference became a
+  conflict. It writes none now; the first synchronization does.
+- After a copy, the copied rows take the direction a new comparison gives
+  them, and a name renamed for Windows has nothing left to rename.
+- The same folder sent many times to a copy walked its contents each time.
+
+### Changed
+
+- **A file with the same date and another size can be copied** from the
+  panels (Noar), after the dialog. It was offered, then never copied.
+- **Files changed on both sides since the last TWO WAY run are left alone**
+  by a copy and counted, to be resolved in the grid (Noar).
+
+### Fixed: window
+
+- A comparison cancelled in COMPARE mode showed the part scanned as if it
+  were everything.
+- At the smallest window size the COMPARE panels had no room left (0 rows):
+  they keep a dozen rows and the column scrolls; the date column goes when the
+  panels are narrow; the four mode names were cut ("2 WA", "MIRI").
+- After a change of mode or folders, the grid went on showing the old plan
+  (red deletions of a MIRROR under UPDATE): it shows "Compare again".
+- STOP during a copy said "Copy failed"; it says "Copy cancelled".
+- A double click on a chevron opened the folder and closed it again.
+- With several pairs, the panel footers counted every pair; "newer here"
+  included "different" files.
+- In COMPARE mode the overview listed the plan of the synchronization mode
+  kept for later; it lists what differs.
+- The keyboard: Shift+arrows extend the selection; Home, End, Page Up and Page
+  Down; the menu key or Shift+F10 opens the copy menu; the focus comes back to
+  the panels after the menu and after a copy.
+- The menu shortcuts (Cmd+R...) do nothing while a dialog waits; "Invert all
+  directions" does nothing in COMPARE mode; another job opens unfiltered; a
+  folder hidden by the filter, opened from the overview, brings everything
+  back and says so.
+- Dark scrollbars in the panels; "equal" everywhere (the chip said
+  "identical"); the COMPARE tooltip no longer says "nothing is written"; the
+  pair's name is a title, not an empty field; no "Removed" tile during a copy;
+  the panels do not change while a copy runs.
+
+### Speed (COMPARE mode, large NAS)
+
+- **Cmd+A then right-click froze the window** (2.5 s on a folder of 50 000
+  clips, 30 s after "Expand differences"): a few milliseconds now.
+- **Every click sent the whole tree to the window** (10 to 30 MB, up to 0.8 s):
+  the engine keeps the open folders and sends a skeleton of a few bytes per
+  row; the details come for the rows on screen. About 2 MB at most.
+- First display 0.25 s faster and 14 MB lighter (an index nobody used); the
+  folder counts take a few hundred KB instead of 10 to 18 MB; a search no
+  longer works out the hidden grid at every key, nor lowers 400 000 names.
+- A dry run (the question before a copy) no longer throws away the counts
+  kept for the panels and the grid.
+
+### Security
+
+- The push script also keeps back App Store Connect API keys (`.p8`), SSH
+  keys, `.netrc` and Java keystores.
+
+## [0.9.6] — 2026-10-28
+
+Manuel López's second round on the COMPARE mode, with Beyond Compare as his
+reference. Mockup validated by Noar.
+
+### Changed
+
+- **COMPARE is a tree.** Both sides on the same rows: an item missing on one
+  side leaves a blank, hatched row there, so the two sides always line up.
+  Folders open and close in place (chevron, double-click, Enter, Left and
+  Right arrows) and the rest of the structure stays visible. *Expand
+  differences* opens every folder present on both sides that has differences
+  inside (a folder on one side only stays closed: all of it differs, its line
+  says so); *Collapse all* closes everything. The two sides scroll together.
+  The overview on the left opens a folder in the tree and brings it on screen.
+  A search shows what matches and opens the folders on the way to it.
+- **Status readable at a glance**, on the name and the icon. filo's codes stay:
+  yellow = only on this side, green = newer on this side (the older copy in
+  front stays plain). Identical items fade to grey. A folder with differences
+  inside is blue and shows how many, in place of the small dot.
+- **All / Equal / Different** at the top, in place of "Differences only".
+  Different gathers every kind of difference; the chips at the bottom still
+  narrow to one kind.
+
+### Fixed
+
+- **Opening Filter or Settings emptied both COMPARE panels** (Manuel López):
+  those windows reload the job on screen, and that reset the view although
+  the comparison was still good. Only a comparison that no longer matches
+  the folders resets it now.
+- **Filter has a Cancel button**, beside Apply. Escape already left without
+  applying; nothing on screen said so.
+
 ## [0.9.5] — 2026-10-27
 
 ### Added
