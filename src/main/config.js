@@ -77,6 +77,7 @@ function defaultJob() {
       timeShifts    : [],               // whole-hour shifts, e.g. [60] for DST
       symlinks      : 'exclude',        // exclude | asLink
       detectMoves   : true,             // rename instead of copy+delete (needs 1 prior run)
+      detectMovesByName: false,         // MIRROR: also pair moves by name, size and date, no history needed
       includeFilter : '*',
       excludeFilter : '',
       softFilter    : {

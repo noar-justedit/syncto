@@ -4,6 +4,23 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [0.9.8] — 2026-11-04
+
+### Added
+
+- **Moves without history** (Manuel López; Settings › Main, off by default,
+  MIRROR only). A drive reorganized by hand had to be copied again: moves were
+  only recognized from the history of a previous run. Now a file only in the
+  source and a file only in the destination with the same name, size and date,
+  each without another such twin, are one file moved: the destination copy is
+  renamed into place, from the first run, nothing travels again. Anything
+  ambiguous (twins of the same name, size and date; another date) is copied
+  and deleted as before. The moves show in the grid and the confirmation as
+  "Move (rename)".
+- **A move checks the file it renames is still the one compared** (size and
+  date): one changed meanwhile is not renamed over the new name. This applies
+  to the moves found from the history too.
+
 ## [0.9.7] — 2026-10-28
 
 A full review of 0.9.6 (engine, security, window, speed), every finding

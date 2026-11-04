@@ -1970,6 +1970,9 @@ body.lassoing .tooltip-float{display:none !important;}
       <div class="set-row"><label>Detect moved files</label>
         <label class="switch"><input type="checkbox" id="st-moves" checked><span class="slider"></span></label>
         <span class="set-desc">rename instead of copying again</span></div>
+      <div class="set-row"><label>Moves without history</label>
+        <label class="switch"><input type="checkbox" id="st-moves-name"><span class="slider"></span></label>
+        <span class="set-desc" data-tip="For a folder reorganized by hand or by another tool, from the very first run: a file only in the source and a file only in the destination with the same name, size and date are taken as one file moved, when neither has another such twin. The destination copy is renamed instead of copied again. Anything ambiguous is copied as usual.">MIRROR: same name, size and date</span></div>
       <div class="set-row"><label>Lock folders</label>
         <label class="switch"><input type="checkbox" id="st-lock" checked><span class="slider"></span></label>
         <span class="set-desc">one machine at a time on the same folders</span></div>

@@ -1164,6 +1164,12 @@ class SyncRunner {
 
     const st = await fsx.stat(from);
     if (!st) throw new Error('The file to move vanished before it could be renamed.');
+    // The file renamed must still be the one compared: a move found by name,
+    // size and date rests on nothing else.
+    const seen = fromNode && fromNode[side];
+    if (seen && seen.exists && (st.size !== seen.size || Math.abs((st.mtime || 0) - (seen.mtime || 0)) > 2000)) {
+      throw new Error('The file to move changed since the comparison: not moved. Compare again.');
+    }
 
     // (0.8.8) A move is a write too: not through a link planted on the way.
     await this.assertNoLinkOnTheWay(side, n, false);

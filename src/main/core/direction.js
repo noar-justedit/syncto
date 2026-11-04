@@ -318,16 +318,64 @@ function detectMoves(nodes, db) {
   return pairs;
 }
 
+// Moves found without any history, from the comparison alone: a file only in
+// the source and a file only in the destination with the same name, the same
+// size and the same date are one file that was moved, provided neither of
+// them has another such twin. The destination copy is then renamed into place
+// instead of copied again and deleted (Manuel López: a drive reorganized by
+// hand, 5 TB that need not travel again). Anything ambiguous keeps its copy
+// and its deletion. MIRROR only: without history there is no telling which
+// side moved in TWO WAY, and UPDATE never deletes.
+// `sameDate(a, b)` is the comparison's own date rule (tolerance, DST shifts).
+const NAME_MOVE_GROUP_MAX = 200;   // twins per name and size beyond which nothing is guessed
+function detectMovesByName(nodes, sameDate) {
+  const groups = new Map();
+  const add = (n, k, which) => {
+    let g = groups.get(k);
+    if (!g) { g = { to: [], from: [] }; groups.set(k, g); }
+    g[which].push(n);
+  };
+  for (const n of nodes) {
+    if (n.type !== 'file' || n.active === false || n.movePair != null) continue;
+    // A file only in the source, about to be created in the destination...
+    if (n.op === OP.CREATE_RIGHT && n.left.exists && !n.right.exists) add(n, n.name + '\u0000' + n.left.size, 'to');
+    // ...and a file only in the destination, about to be deleted there.
+    else if (n.op === OP.DELETE_RIGHT && n.right.exists && !n.left.exists) add(n, n.name + '\u0000' + n.right.size, 'from');
+  }
+  let pairs = 0;
+  for (const g of groups.values()) {
+    if (!g.to.length || !g.from.length) continue;
+    if (g.to.length > NAME_MOVE_GROUP_MAX || g.from.length > NAME_MOVE_GROUP_MAX) continue;
+    // Which twins have the same date; a pair is kept only when each of the
+    // two has exactly one such twin.
+    const fit = (t, f) => sameDate(t.left.mtime, f.right.mtime);
+    const count = new Map();
+    for (const t of g.to) for (const f of g.from) if (fit(t, f)) { count.set(t, (count.get(t) || 0) + 1); count.set(f, (count.get(f) || 0) + 1); }
+    for (const t of g.to) {
+      if (count.get(t) !== 1) continue;
+      const f = g.from.find(x => fit(t, x));
+      if (count.get(f) !== 1) continue;
+      t.preMoveOp = t.op; f.preMoveOp = f.op;
+      t.op = OP.MOVE_RIGHT_TO; f.op = OP.MOVE_RIGHT_FROM;
+      t.movePair = f.idx; f.movePair = t.idx;
+      t.moveByName = true; f.moveByName = true;
+      pairs++;
+    }
+  }
+  if (pairs) applyFolderRules(nodes);
+  return pairs;
+}
+
 // Dissolves a move pair back into its original copy + delete, e.g. when the
 // user manually overrides one of the two rows.
 function dissolveMove(nodes, node) {
   if (node.movePair == null) return;
   const mate = nodes[node.movePair];
   node.op = node.preMoveOp || node.op;
-  node.movePair = null; node.preMoveOp = null;
+  node.movePair = null; node.preMoveOp = null; delete node.moveByName;
   if (mate) {
     mate.op = mate.preMoveOp || mate.op;
-    mate.movePair = null; mate.preMoveOp = null;
+    mate.movePair = null; mate.preMoveOp = null; delete mate.moveByName;
   }
 }
 
@@ -468,6 +516,6 @@ function sizeOf(n, side) {
 
 module.exports = {
   applyDirections, computeStats, operationFor, applyFolderRules, plannedRenames,
-  detectMoves, dissolveMove,
+  detectMoves, detectMovesByName, dissolveMove,
   diffDefaults, changeDefaults, usesDatabase, stillInSync, sideChange,
 };

@@ -24,7 +24,7 @@ const fs = require('fs');
 const { Comparer, CAT, OP, CHECKSUM_FILE, DEFAULT_TOLERANCE_SEC, sameTime, compareTime } = require('./compare');
 const { PathFilter } = require('./filter');
 const { applyDirections, computeStats, operationFor, applyFolderRules,
-        detectMoves, dissolveMove, usesDatabase, plannedRenames } = require('./direction');
+        detectMoves, detectMovesByName, dissolveMove, usesDatabase, plannedRenames } = require('./direction');
 const { SyncDb, loadPairDb, savePairDb, buildSession, pairIdFor, readSideSession } = require('./db');
 const { SyncRunner } = require('./sync');
 const { FsPool, parseLocation, redactLocation, isServerAddress } = require('../fs/afs');
@@ -230,6 +230,10 @@ class Session {
     const applied = applyDirections(this.nodes, job.sync, cmp, this.db);
     this.byChange = applied.byChange;
     this.movesFound = this.wantMoves ? detectMoves(this.nodes, this.db) : 0;
+    // Moves found by name, size and date, without history (MIRROR, opt-in).
+    if (cmp.detectMovesByName === true && (job.sync.variant || 'mirror') === 'mirror') {
+      this.movesFound += detectMovesByName(this.nodes, (a, b) => sameTime(a, b, cmp.timeTolerance, cmp.timeShifts));
+    }
     this.stats = computeStats(this.nodes);
     // A cancelled comparison stopped somewhere in the middle of the tree.
     // Stamping it as compared let the interface re-enable SYNCHRONIZE on a

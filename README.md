@@ -271,6 +271,18 @@ file ids). When in doubt — the file changed as well as moved, ids are ambiguou
 because of hard links — syncto falls back to a plain copy, which is always
 safe. Switchable off in the settings.
 
+**Moves without history** (Settings › Main, off by default, MIRROR only). For
+a destination reorganized by hand or by another tool, or a first run: a file
+only in the source and a file only in the destination with the same name, the
+same size and the same date are taken as one file that was moved, provided
+neither has another such twin. The destination copy is then renamed into place
+instead of copied again and deleted, from the very first run, on disks and
+servers alike. Twins (generic camera names such as `C0001.MP4` of the same
+size and date in several folders), another date or another size: copied as
+usual. Before renaming, syncto checks that the file is still the one it
+compared. The one case it cannot tell apart: two different files with the same
+name, size and date, each alone of its kind; that is why it is a choice.
+
 ### How a copy is verified
 
 **syncto has one copy mode.** There is no faster setting that skips the check,

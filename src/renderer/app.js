@@ -301,6 +301,7 @@ function jobToUi() {
   if (isCompareOnly()) { renderCompare(); renderStats(); }
 
   $('st-moves').checked  = j.compare.detectMoves !== false;
+  $('st-moves-name').checked = j.compare.detectMovesByName === true;
   $('st-include').value  = j.compare.includeFilter;
   $('st-exclude').value  = j.compare.excludeFilter;
   renderFilterBtn();
@@ -347,6 +348,7 @@ function uiToJob() {
   // Time tolerance (2 s), DST shifts, symlink policy and the size filter keep
   // their engine defaults — deliberately not exposed in the settings.
   j.compare.detectMoves   = $('st-moves').checked;
+  j.compare.detectMovesByName = $('st-moves-name').checked;
   j.compare.includeFilter = $('st-include').value || '*';
   j.compare.excludeFilter = $('st-exclude').value || '';
 
@@ -1070,7 +1072,7 @@ function invalidateIfPlanChanged() {
 // (pointer-events), so Tab + Enter still swapped a pair or changed the mode
 // in the middle of a run. `inert` takes the keyboard away too.
 const PLAN_REGIONS = ['syncmodes', 'pairwrap', 'pair-add-row', 'seg-cmp', 'btn-filter'];
-const PLAN_INPUTS  = ['st-moves', 'st-include', 'st-exclude', 'st-fixdates', 'st-safenames'];
+const PLAN_INPUTS  = ['st-moves', 'st-moves-name', 'st-include', 'st-exclude', 'st-fixdates', 'st-safenames'];
 function lockPlan(on, run) {
   for (const id of PLAN_REGIONS) { const el = $(id); if (el) el.inert = !!on; }
   for (const el of document.querySelectorAll('.autorow')) el.inert = !!on;
