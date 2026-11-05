@@ -303,6 +303,7 @@ function jobToUi() {
   $('st-moves').checked  = j.compare.detectMoves !== false;
   $('st-moves-name').checked = j.compare.detectMovesByName === true;
   $('st-finder').checked = j.compare.skipFinderFiles !== false;
+  $('st-office').checked = j.compare.skipOfficeTemp !== false;
   $('st-include').value  = j.compare.includeFilter;
   $('st-exclude').value  = j.compare.excludeFilter;
   renderFilterBtn();
@@ -351,6 +352,7 @@ function uiToJob() {
   j.compare.detectMoves   = $('st-moves').checked;
   j.compare.detectMovesByName = $('st-moves-name').checked;
   j.compare.skipFinderFiles = $('st-finder').checked;
+  j.compare.skipOfficeTemp = $('st-office').checked;
   j.compare.includeFilter = $('st-include').value || '*';
   j.compare.excludeFilter = $('st-exclude').value || '';
 
@@ -1120,7 +1122,7 @@ function invalidateIfPlanChanged() {
 // (pointer-events), so Tab + Enter still swapped a pair or changed the mode
 // in the middle of a run. `inert` takes the keyboard away too.
 const PLAN_REGIONS = ['syncmodes', 'pairwrap', 'pair-add-row', 'seg-cmp', 'btn-filter'];
-const PLAN_INPUTS  = ['st-moves', 'st-moves-name', 'st-finder', 'st-include', 'st-exclude', 'st-fixdates', 'st-safenames'];
+const PLAN_INPUTS  = ['st-moves', 'st-moves-name', 'st-finder', 'st-office', 'st-include', 'st-exclude', 'st-fixdates', 'st-safenames'];
 function lockPlan(on, run) {
   for (const id of PLAN_REGIONS) { const el = $(id); if (el) el.inert = !!on; }
   for (const el of document.querySelectorAll('.autorow')) el.inert = !!on;
@@ -2223,6 +2225,7 @@ function cancelFilter() {
   $('st-include').value = state.job.compare.includeFilter || '*';
   $('st-exclude').value = state.job.compare.excludeFilter || '';
   $('st-finder').checked = state.job.compare.skipFinderFiles !== false;
+  $('st-office').checked = state.job.compare.skipOfficeTemp !== false;
   $('ov-filter').classList.remove('open');
 }
 
@@ -2350,14 +2353,15 @@ function bind() {
     if (btn.dataset.act === 'undo-add') await removeFilterPattern(btn.dataset.kind, btn.dataset.p);
     else if (btn.dataset.act === 'undo-remove') await addFilterPattern(btn.dataset.kind, btn.dataset.p);
   });
+  // What the Filter window decides: when it changes, the comparison is redone.
+  const filterKey = () => { const c = state.job.compare; return JSON.stringify([c.includeFilter, c.excludeFilter, c.skipFinderFiles !== false, c.skipOfficeTemp !== false]); };
   $('filter-close').addEventListener('click', async () => {
-    const before = state.job.compare.includeFilter + '\u0000' + state.job.compare.excludeFilter + '\u0000' + (state.job.compare.skipFinderFiles !== false);
+    const before = filterKey();
     uiToJob();
     $('ov-filter').classList.remove('open');
     renderFilterBtn();
     persist();
-    const after = state.job.compare.includeFilter + '\u0000' + state.job.compare.excludeFilter + '\u0000' + (state.job.compare.skipFinderFiles !== false);
-    if (state.stats && after !== before) await doCompare();
+    if (state.stats && filterKey() !== before) await doCompare();
   });
 
   $('scope-clear').addEventListener('click', async () => {

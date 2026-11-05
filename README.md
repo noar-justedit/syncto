@@ -546,6 +546,14 @@ the Explorer rewrite them whenever a folder is opened and every comparison
 would list them as changed. Turn off **Filter › Finder files** for an exact
 mirror, for example when the result is checked with another tool.
 
+**Office temp files** are ignored by default as well: the owner file Word,
+Excel and PowerPoint put beside an open document (`~$Keynote.pptx`), Word's
+working files while it saves (`~WRL0001.tmp`, `~WRD0002.tmp`) and LibreOffice's
+lock (`.~lock.Budget.ods#`). They only say that someone has the document open:
+copied, they make the other side believe it too. Turn off **Filter › Office
+temp files** to copy them like any file. When a folder being removed still
+holds one, it is left in place: the document may still be open.
+
 When a folder holding one of them has to be **removed**, the operating system's
 own bookkeeping folders go with it — `System Volume Information` and friends are
 recreated by the volume on the spot if it still wants them. **`.Trashes` and

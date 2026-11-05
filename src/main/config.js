@@ -79,6 +79,7 @@ function defaultJob() {
       detectMoves   : true,             // rename instead of copy+delete (needs 1 prior run)
       detectMovesByName: false,         // MIRROR: also pair moves by name, size and date, no history needed
       skipFinderFiles: true,            // ignore .DS_Store, Thumbs.db, desktop.ini (false = exact mirror)
+      skipOfficeTemp: true,             // ignore ~$*, ~WRL*.tmp, ~WRD*.tmp, .~lock.*# (Office and LibreOffice)
       includeFilter : '*',
       excludeFilter : '',
       softFilter    : {

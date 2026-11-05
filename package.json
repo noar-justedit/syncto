@@ -1,6 +1,6 @@
 {
   "name": "syncto",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "desktopName": "syncto.desktop",
   "description": "Folder comparison and synchronization for video professionals",
   "main": "src/main/main.js",

@@ -255,6 +255,10 @@ function buildMenu() {
         IS_MAC ? { role: 'close' } : { role: 'quit' },
       ],
     },
+    // Undo, cut, copy, paste and select all in the text fields. On macOS the
+    // keyboard shortcuts for them come from this menu: without it, Cmd+V
+    // does nothing in any field (issue #1).
+    { role: 'editMenu' },
     {
       label: 'Actions',
       submenu: [

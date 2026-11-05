@@ -4,6 +4,23 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [1.1.1] — 2026-11-05
+
+### Added
+
+- **Filter › Office temp files**, on by default. syncto ignores the owner file
+  Word, Excel and PowerPoint put beside an open document (`~$Keynote.pptx`),
+  Word's working files (`~WRL0001.tmp`, `~WRD0002.tmp`) and LibreOffice's lock
+  (`.~lock.Budget.ods#`). Copied, they made the other side believe the document
+  was open. Turn the switch off to copy them like any file.
+
+### Fixed
+
+- **Paste works in the text fields on macOS** (issue #1). Cmd+V did nothing
+  in the server, user name and password fields, or anywhere else: the menu had
+  no Edit menu, and on macOS that is where the keyboard shortcuts for undo,
+  cut, copy, paste and select all come from. The menu now has Edit.
+
 ## [1.1.0] — 2026-11-05
 
 ### Added

@@ -96,6 +96,16 @@ const SYSTEM_SKIP = new Set([
 // comparison would list them as changed. Ignored unless the job asks for an
 // exact mirror (compare.skipFinderFiles false).
 const FINDER_FILES = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini']);
+// Office's own temporary files: the owner file Word, Excel and PowerPoint put
+// beside an open document (~$Budget.xlsx), Word's working files while it saves
+// (~WRL0001.tmp, ~WRD0002.tmp) and LibreOffice's lock (.~lock.Budget.ods#).
+// They only say "someone has this open"; copied, they make the other side
+// believe it too, and they vanish as soon as the document is closed. Ignored
+// unless the job turns it off (compare.skipOfficeTemp false). Never swept
+// with a folder being removed: while one exists, the document may be open.
+function isOfficeTemp(name) {
+  return name.startsWith('~$') || /^~WR[LD]\d+\.tmp$/i.test(name) || /^\.~lock\..+#$/.test(name);
+}
 // Everything that may be swept out of a folder being removed.
 const ALWAYS_SKIP = new Set([...SYSTEM_SKIP, ...FINDER_FILES]);
 
@@ -219,6 +229,7 @@ class Comparer {
     this.stats  = { scanned: 0, comparedBytes: 0 };
     this.symlinks = this.cfg.symlinks || 'exclude';   // exclude | asLink
     this.skipFinder = this.cfg.skipFinderFiles !== false;
+    this.skipOffice = this.cfg.skipOfficeTemp !== false;
     // (0.8.9) Windows-safe names: off | destination (right side) | both.
     this.safe = safeNamesMode(this.cfg);
     // How many items these two folders held at the end of the last run, read
@@ -354,6 +365,7 @@ class Comparer {
         // every other run (tried and reverted during the 0.8.8 review).
         if (SYSTEM_SKIP.has(e.name) || isSyncToInternal(e.name)) continue;
         if (this.skipFinder && FINDER_FILES.has(e.name)) continue;
+        if (this.skipOffice && e.type === 'file' && isOfficeTemp(e.name)) continue;
         // (0.8.9) A Mac's custom-icon file ("Icon" + carriage return): with
         // Windows-safe names on, it is neither copied, renamed nor deleted.
         if (this.safe !== 'off' && isMacIconFile(e.name)) continue;
@@ -742,7 +754,7 @@ class Comparer {
 
 module.exports = {
   Comparer, CAT, OP, compareTime, sameTime, equalContent,
-  TEMP_EXT, OLD_EXT, DB_NAME, LOCK_NAME, CHECKSUM_FILE, ALWAYS_SKIP, SYSTEM_SKIP, FINDER_FILES, OS_LITTER_FOLDERS,
+  TEMP_EXT, OLD_EXT, DB_NAME, LOCK_NAME, CHECKSUM_FILE, ALWAYS_SKIP, SYSTEM_SKIP, FINDER_FILES, isOfficeTemp, OS_LITTER_FOLDERS,
   isSyncToInternal,
   DEFAULT_TOLERANCE_SEC,
 };
