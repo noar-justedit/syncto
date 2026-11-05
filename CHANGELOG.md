@@ -4,6 +4,58 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [1.1.0] — 2026-11-05
+
+### Added
+
+- **Remote control for Bitfocus Companion.** Settings › Remote control turns on
+  a small HTTP server (port 7531, this computer only unless *Other machines* is
+  on, protected by a key). It can start a saved job (compare, or compare then
+  synchronize), stop, pause, resume, and send the state, the progress and the
+  last result as they change.
+- **Companion module** in `companion/`, built by `build_companion.command`:
+  actions, button colors (comparing, synchronizing, paused, error), variables
+  (progress, time left, speed, last result) and one preset button per job.
+- A run started from Companion is refused when it would remove more than half
+  of the files, while a dialog is open, or while syncto is busy. It never shows
+  the end-of-run window, so nothing waits for a click at the console.
+
+## [1.0.0] — 2026-11-05
+
+### Added
+
+- **Filters are easy to undo.** The right-click menu now lists the patterns
+  in the filters under *Remove from the exclude filter* (and *… include
+  filter*): one click takes a pattern out and compares again. After a pattern
+  is added or removed by right-click, the status bar says so, with **Undo**
+  and **Edit filter**. A file hidden by the exclude filter is not in the
+  comparison, so there was no row to right-click to bring it back.
+
+### Changed
+
+- **Buttons say what they do.** *Replace* (copy from the COMPARE panels, it
+  was *Copy*), *Sleep now* / *Shut down now* / *Quit now* (was *Do it now*),
+  *Keep paths* / *Update paths* for a missing folder (was *Leave them as they
+  are* / *Apply*), *Download* for an update (was *Get it*), *Apply filter*
+  (was *Apply*), *Use folder* (was *Use this folder*).
+- The publishing script is no longer sent to GitHub.
+
+## [0.9.9] — 2026-11-04
+
+### Added
+
+- **Finder files, an option** (Manuel López). `.DS_Store`, `Thumbs.db` and
+  `desktop.ini` were always ignored, and nothing in the app said so: a MIRROR
+  checked with another tool seemed to miss files. **Filter › Finder files**
+  (on by default, so nothing changes) can now be turned off for an exact
+  mirror. The Filter window also lists what is always ignored: the volume's
+  own folders, the recycle bins and syncto's own files.
+
+### Changed
+
+- **The Filter window is short and plain**: three examples instead of a page
+  of syntax rules (the full syntax stays in the README).
+
 ## [0.9.8] — 2026-11-04
 
 ### Added

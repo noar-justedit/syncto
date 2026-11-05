@@ -19,6 +19,7 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, Menu, powerSaveBlocker, clipboard } = require('electron');
 const path  = require('path');
 const fs    = require('fs');
+const os = require('os');
 const https = require('https');
 
 // ── Update check — reads a small shared JSON hosted on GitHub ──────────────
@@ -317,6 +318,7 @@ app.whenReady().then(() => {
   session = new MultiSession();
   buildMenu();
   createWindow();
+  startRemote().catch(() => {});
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 
@@ -326,7 +328,11 @@ app.on('window-all-closed', async () => {
 });
 
 // ── Small helpers ──────────────────────────────────────────────────────────
-function send(channel, payload) { if (win && !win.isDestroyed()) win.webContents.send(channel, payload); }
+function send(channel, payload) {
+  if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
+  // (1.1.0) The progress of a run also goes to remote control (Companion).
+  if (channel === 'sync-progress' || channel === 'compare-progress') remoteProgress(payload);
+}
 
 function holdSleep(on) {
   if (on && powerBlockId == null) powerBlockId = powerSaveBlocker.start('prevent-app-suspension');
@@ -508,6 +514,110 @@ ipcMain.handle('after-sync', async (_, action, clean) => {
 });
 
 // ── IPC: phone notifications (ntfy) ────────────────────────────────────────
+// ── (1.1.0) Remote control: Companion starts saved jobs ────────────────────
+// The server (remote.js) only reaches the engine through the window, which
+// runs a remote job the way auto-sync does: compare, then synchronize with no
+// dialog, refused when it would delete more than half of the files. What runs
+// is said on screen. Off by default; this machine only unless asked.
+const { createRemoteServer, newKey: newRemoteKey, jobId } = require('./remote');
+const remote = { srv: null, port: 0, error: '', progress: null, last: null, job: '', by: '', pending: new Map(), seq: 0, sentAt: 0, timer: null };
+
+function remoteJobs() {
+  return (prefs.data.recent || []).filter(r => r && r.path && fs.existsSync(r.path))
+    .map(r => ({ id: jobId(r.path), name: r.name, file: r.path }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function remoteStatus() {
+  const busy = engineJob;
+  const state = !busy ? 'idle' : /comparison/i.test(busy) ? 'comparing'
+    : /synchronization|copy/i.test(busy) ? (tokens.sync.paused ? 'paused' : 'syncing') : 'busy';
+  const p = remote.progress;
+  const pct = p && p.bytesTotal ? Math.min(100, Math.round(100 * (p.bytesDone || 0) / p.bytesTotal))
+    : p && p.itemsTotal ? Math.min(100, Math.round(100 * (p.itemsDone || 0) / p.itemsTotal)) : null;
+  return {
+    version: appVersion(), state, job: busy ? remote.job : '', by: busy ? remote.by : '',
+    progress: busy && p ? { pct, pass: p.pass || p.phase || '', filesDone: p.filesDone || 0, filesTotal: p.filesTotal || 0,
+      bytesPerSec: Math.round(p.bytesPerSec || 0), etaSec: p.etaSec != null ? Math.round(p.etaSec) : null } : null,
+    last: remote.last,
+  };
+}
+
+function remoteBroadcast(now) {
+  if (!remote.srv) return;
+  const t = Date.now();
+  // At most two updates a second: a Stream Deck does not need sixty.
+  if (!now && t - remote.sentAt < 500) {
+    if (!remote.timer) remote.timer = setTimeout(() => { remote.timer = null; remoteBroadcast(true); }, 500);
+    return;
+  }
+  remote.sentAt = t;
+  remote.srv.broadcast(remoteStatus());
+}
+function remoteProgress(p) { remote.progress = p; remoteBroadcast(false); }
+function remoteResult(r) { remote.last = Object.assign({ at: new Date().toISOString() }, r); remoteBroadcast(true); }
+
+// Asks the window to run a job; it answers at once whether it accepted.
+function remoteRun(file, action) {
+  if (engineJob) return Promise.resolve({ ok: false, error: `${engineJob} is running: wait for it to finish.` });
+  if (!win || win.isDestroyed()) return Promise.resolve({ ok: false, error: 'The syncto window is closed.' });
+  const req = ++remote.seq;
+  return new Promise(resolve => {
+    const timer = setTimeout(() => { remote.pending.delete(req); resolve({ ok: false, error: 'syncto did not answer.' }); }, 15000);
+    remote.pending.set(req, r => { clearTimeout(timer); resolve(r); });
+    send('remote-run', { req, file, action });
+  });
+}
+function remoteControl(act) {
+  if (!engineJob) return Promise.resolve({ ok: false, error: 'Nothing is running.' });
+  send('remote-control', { act });
+  return Promise.resolve({ ok: true });
+}
+
+async function startRemote() {
+  if (remote.srv) { try { await remote.srv.close(); } catch (_) {} remote.srv = null; remote.port = 0; }
+  remote.error = '';
+  const cfg = prefs.remoteConfig();
+  if (!cfg.enabled || !cfg.key) return;
+  const srv = createRemoteServer({
+    key: () => prefs.remoteConfig().key,
+    status: remoteStatus,
+    jobs: remoteJobs,
+    run: remoteRun,
+    stop: () => remoteControl('stop'),
+    pause: () => remoteControl('pause'),
+    resume: () => remoteControl('resume'),
+  }, { port: cfg.port, lan: cfg.lan });
+  try { remote.port = await srv.listen(); remote.srv = srv; }
+  catch (err) { remote.error = err.code === 'EADDRINUSE' ? `Port ${cfg.port} is already used by another program: choose another.` : (err.message || String(err)); }
+}
+
+// What Settings shows: the switches, the key, the addresses to type in Companion.
+function remoteForUi() {
+  const cfg = prefs.remoteConfig();
+  const addrs = [];
+  if (cfg.lan) {
+    for (const list of Object.values(os.networkInterfaces())) for (const a of list || []) if (a.family === 'IPv4' && !a.internal) addrs.push(a.address);
+  } else addrs.push('127.0.0.1');
+  return Object.assign({}, cfg, { running: !!remote.srv, error: remote.error, addresses: addrs });
+}
+
+ipcMain.handle('remote-get', () => remoteForUi());
+ipcMain.handle('remote-save', async (_, patch) => {
+  prefs.saveRemote(patch && typeof patch === 'object' ? patch : {}, newRemoteKey);
+  await startRemote();
+  return remoteForUi();
+});
+ipcMain.handle('remote-ack', (_, req, r) => {
+  const done = remote.pending.get(Number(req));
+  if (done) { remote.pending.delete(Number(req)); done(r && typeof r === 'object' ? { ok: !!r.ok, error: r.error ? String(r.error) : '' } : { ok: false }); }
+  return true;
+});
+// The window took a remote job, or refused it after the comparison (too many
+// deletions, nothing to do): said to Companion as the last result.
+ipcMain.handle('remote-started', (_, job, by) => { remote.job = String(job || ''); remote.by = String(by || ''); remote.progress = null; remoteBroadcast(true); return true; });
+ipcMain.handle('remote-report', (_, r) => { if (r && typeof r === 'object') remoteResult({ result: String(r.result || ''), job: String(r.job || remote.job), message: String(r.message || '') }); return true; });
+
 ipcMain.handle('ntfy-get',  () => prefs.ntfyForUi());
 ipcMain.handle('ntfy-save', (_, patch) => prefs.saveNtfy(patch || {}));
 
@@ -602,7 +712,8 @@ let engineJob = null;
 async function exclusive(what, fn) {
   if (engineJob) return { ok: false, busy: true, error: `${engineJob} is running: wait for it to finish.` };
   engineJob = what;
-  try { return await fn(); } finally { engineJob = null; }
+  remoteBroadcast(true);
+  try { return await fn(); } finally { engineJob = null; remote.progress = null; remote.by = ''; remoteBroadcast(true); }
 }
 // The manual edits of the plan wait too: they change the rows a run reads.
 const editPlan = fn => (engineJob ? session.stats : fn());
@@ -727,6 +838,7 @@ ipcMain.handle('job-save', async (_, job, saveAs) => {
 // ── IPC: comparison ────────────────────────────────────────────────────────
 ipcMain.handle('compare', (_, job) => exclusive('A comparison', async () => {
   tokens.compare.cancelled = false;
+  remote.job = (job && job.name) || '';
   try {
     const res = await session.compare(job, {
       token: tokens.compare,
@@ -781,6 +893,7 @@ ipcMain.handle('invert-all',    () => editPlan(() => session.invertAll()));
 // ── IPC: synchronization ───────────────────────────────────────────────────
 ipcMain.handle('sync', (_, job) => exclusive('A synchronization', async () => {
   tokens.sync.cancelled = false;
+  remote.job = (job && job.name) || '';
   tokens.sync.paused = false;
   holdSleep(true);
   try {
@@ -789,8 +902,14 @@ ipcMain.handle('sync', (_, job) => exclusive('A synchronization', async () => {
       trashItem,
       onProgress: p => send('sync-progress', p),
     });
+    remoteResult({
+      result: res.cancelled ? 'cancelled' : res.errors.length || res.stopped || res.lockLost ? 'error' : 'done',
+      job: job && job.name, files: res.counters.files, bytes: res.counters.bytes, deleted: res.counters.deleted,
+      moved: res.counters.moved, errors: res.errors.length, message: res.errors[0] ? res.errors[0].message : '',
+    });
     return { ok: true, ...res };
   } catch (err) {
+    remoteResult({ result: 'error', job: job && job.name, message: err.message || String(err) });
     return { ok: false, error: err.message || String(err) };
   } finally {
     holdSleep(false);

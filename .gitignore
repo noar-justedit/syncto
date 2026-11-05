@@ -8,3 +8,7 @@ dist/
 # macOS / editors
 .DS_Store
 Icon?
+
+# Companion module build output (build_companion.command puts the .tgz in dist/)
+companion/pkg/
+companion/*.tgz

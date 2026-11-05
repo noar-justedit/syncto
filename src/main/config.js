@@ -78,6 +78,7 @@ function defaultJob() {
       symlinks      : 'exclude',        // exclude | asLink
       detectMoves   : true,             // rename instead of copy+delete (needs 1 prior run)
       detectMovesByName: false,         // MIRROR: also pair moves by name, size and date, no history needed
+      skipFinderFiles: true,            // ignore .DS_Store, Thumbs.db, desktop.ini (false = exact mirror)
       includeFilter : '*',
       excludeFilter : '',
       softFilter    : {
@@ -171,6 +172,9 @@ function defaultPrefs() {
     // off — sent after every run. (The access token and "only when there is a
     // problem" went in 0.8.3.)
     ntfy: { enabled: false, server: 'https://ntfy.sh', topic: '' },
+    // (1.1.0) Remote control (Companion): off; this machine only unless `lan`;
+    // the key is made the first time it is switched on.
+    remote: { enabled: false, port: 7531, lan: false, key: '' },
     // The identity of each SFTP server, learnt at the first connection and
     // compared at every one after. { "host:port": "SHA256:…" }. Not a secret —
     // a public key fingerprint — so it lives in the file in clear, which is
@@ -563,6 +567,33 @@ class Prefs {
 
   // ── ntfy ─────────────────────────────────────────────────────────────────
   ntfyForUi() { return this.ntfyConfig(); }
+
+  // (1.1.0) Remote control settings. The key is not a password to anything
+  // else: it only lets a Companion on the network start saved jobs here.
+  remoteConfig() {
+    const r = this.data.remote || {};
+    const port = Number(r.port);
+    return {
+      enabled: !!r.enabled,
+      port   : Number.isInteger(port) && port >= 1024 && port <= 65535 ? port : 7531,
+      lan    : !!r.lan,
+      key    : typeof r.key === 'string' ? r.key : '',
+    };
+  }
+
+  saveRemote(patch, newKey) {
+    const r = Object.assign({}, this.remoteConfig());
+    if (patch.enabled !== undefined) r.enabled = !!patch.enabled;
+    if (patch.lan !== undefined) r.lan = !!patch.lan;
+    if (patch.port !== undefined) {
+      const p = Number(patch.port);
+      if (Number.isInteger(p) && p >= 1024 && p <= 65535) r.port = p;
+    }
+    if (patch.renewKey || (r.enabled && !r.key)) r.key = newKey();
+    this.data.remote = r;
+    this.save();
+    return r;
+  }
 
   ntfyConfig() {
     const n = this.data.ntfy || {};

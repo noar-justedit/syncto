@@ -1,0 +1,22 @@
+{
+	"$schema": "../node_modules/@companion-module/base/assets/manifest.schema.json",
+	"id": "justedit-syncto",
+	"name": "justedit-syncto",
+	"shortname": "syncto",
+	"description": "Start syncto folder synchronizations from Companion, and follow them on the buttons.",
+	"version": "0.0.0",
+	"license": "GPL-3.0",
+	"repository": "git+https://github.com/noar-justedit/syncto.git",
+	"bugs": "https://github.com/noar-justedit/syncto/issues",
+	"maintainers": [{ "name": "Just Edit" }],
+	"legacyIds": [],
+	"runtime": {
+		"type": "node18",
+		"api": "nodejs-ipc",
+		"apiVersion": "0.0.0",
+		"entrypoint": "../main.js"
+	},
+	"manufacturer": "Just Edit",
+	"products": ["syncto"],
+	"keywords": ["sync", "backup", "copy", "files"]
+}

@@ -80,16 +80,24 @@ const PREFETCH_MAX = 8;
 
 const CHECKSUM_FILE = 'syncto-checksums.txt';
 
-// Items syncto always ignores: its own scaffolding plus the usual OS litter.
-// The checksum list is deliberately visible — a DIT should be able to find it —
-// so it has to be excluded by name, otherwise the next mirror run would treat
-// it as a stray file on the target and delete it.
-const ALWAYS_SKIP = new Set([
+// Items syncto always ignores: its own checksum list and what belongs to the
+// volume itself (search index, change journal, document versions, recycle
+// bins). Copying them makes no sense on another disk, they are often locked,
+// and a MIRROR would delete the destination's own. The checksum list is
+// deliberately visible (a DIT should be able to find it), so it has to be
+// excluded by name, or the next mirror run would delete it as a stray file.
+const SYSTEM_SKIP = new Set([
   CHECKSUM_FILE,
-  '.DS_Store', '.Spotlight-V100', '.Trashes', '.fseventsd', '.TemporaryItems',
-  '.DocumentRevisions-V100',
-  'Thumbs.db', 'desktop.ini', '$RECYCLE.BIN', 'System Volume Information',
+  '.Spotlight-V100', '.Trashes', '.fseventsd', '.TemporaryItems', '.DocumentRevisions-V100',
+  '$RECYCLE.BIN', 'System Volume Information',
 ]);
+// The Finder's and the Explorer's own files: icon layout, folder view,
+// thumbnails. Harmless, but rewritten whenever a folder is opened, so every
+// comparison would list them as changed. Ignored unless the job asks for an
+// exact mirror (compare.skipFinderFiles false).
+const FINDER_FILES = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini']);
+// Everything that may be swept out of a folder being removed.
+const ALWAYS_SKIP = new Set([...SYSTEM_SKIP, ...FINDER_FILES]);
 
 // The skipped names that are FOLDERS, and whose contents belong to the
 // operating system rather than to anyone: Windows indexing and restore data,
@@ -210,6 +218,7 @@ class Comparer {
     this.locks = [];          // lock files a run that never finished left behind
     this.stats  = { scanned: 0, comparedBytes: 0 };
     this.symlinks = this.cfg.symlinks || 'exclude';   // exclude | asLink
+    this.skipFinder = this.cfg.skipFinderFiles !== false;
     // (0.8.9) Windows-safe names: off | destination (right side) | both.
     this.safe = safeNamesMode(this.cfg);
     // How many items these two folders held at the end of the last run, read
@@ -343,7 +352,8 @@ class Comparer {
         // the proof list of a nested or overlapping job, which that job
         // rewrites — treated as a user file, an outer MIRROR deleted it at
         // every other run (tried and reverted during the 0.8.8 review).
-        if (ALWAYS_SKIP.has(e.name) || isSyncToInternal(e.name)) continue;
+        if (SYSTEM_SKIP.has(e.name) || isSyncToInternal(e.name)) continue;
+        if (this.skipFinder && FINDER_FILES.has(e.name)) continue;
         // (0.8.9) A Mac's custom-icon file ("Icon" + carriage return): with
         // Windows-safe names on, it is neither copied, renamed nor deleted.
         if (this.safe !== 'off' && isMacIconFile(e.name)) continue;
@@ -732,7 +742,7 @@ class Comparer {
 
 module.exports = {
   Comparer, CAT, OP, compareTime, sameTime, equalContent,
-  TEMP_EXT, OLD_EXT, DB_NAME, LOCK_NAME, CHECKSUM_FILE, ALWAYS_SKIP, OS_LITTER_FOLDERS,
+  TEMP_EXT, OLD_EXT, DB_NAME, LOCK_NAME, CHECKSUM_FILE, ALWAYS_SKIP, SYSTEM_SKIP, FINDER_FILES, OS_LITTER_FOLDERS,
   isSyncToInternal,
   DEFAULT_TOLERANCE_SEC,
 };

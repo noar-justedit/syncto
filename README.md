@@ -59,6 +59,10 @@ Go to **https://nodejs.org**, click the green **LTS** button, run the installer.
 For Windows, **double-click `build_windows.command`** — it cross-builds from
 your Mac.
 
+For the Bitfocus Companion module, **double-click `build_companion.command`**:
+it writes `dist/justedit-syncto-X.Y.Z.tgz`, one file that works with Companion
+on Mac, Windows and Linux.
+
 Double-click only ever works on a `.command` file: macOS opens a `.sh` in a text
 editor. And if a launcher ever answers **"you do not have appropriate access
 privileges"**, the folder travelled somewhere that drops file permissions (a
@@ -353,7 +357,10 @@ One rule to remember:
 | `/Rushes/A001/` · `/notes.txt` | starts with `/` → one exact path from the pair's root |
 | `…/` | folders only · `…:` files only |
 
-Right-clicking any row (grid or overview) offers ready-made patterns; Space
+Right-clicking any row (grid or overview) offers ready-made patterns, and
+lists the patterns already in the filters under *Remove from the exclude
+filter*: one click takes one out. After a right-click change, the status bar
+offers **Undo** and **Edit filter**. Space
 excludes the selection temporarily.
 
 ### Servers (SFTP, FTP, FTPS)
@@ -476,6 +483,41 @@ settings, compared and synchronized in one go.
 
 ---
 
+## Remote control (Bitfocus Companion)
+
+syncto can be driven from a Stream Deck through
+[Bitfocus Companion](https://bitfocus.io/companion): start a saved job, stop,
+pause, resume, and see on the button whether syncto is comparing,
+synchronizing, done or in error. Off by default.
+
+1. In syncto, **Settings › Remote control**: turn on **Companion**. If Companion
+   runs on another computer, also turn on **Other machines** (the system may
+   ask to let syncto accept connections: allow it).
+2. In Companion (3.5 or later), **Modules › Import module package**: choose
+   `justedit-syncto-X.Y.Z.tgz` from the syncto Release.
+3. Add a **syncto** connection and copy the address, the port and the key shown
+   in syncto. The presets give one button per job, plus Stop and Status.
+
+What it can and cannot do:
+
+- It runs **jobs saved in syncto** (the recent jobs on the left), never paths it
+  is sent. syncto has to be open.
+- A run started from Companion is **refused when it would remove more than half
+  of the files** (and at least 10): check the folders in syncto first.
+- It is refused while a dialog is open in syncto or a run is going on.
+- Every request carries the key (`Authorization: Bearer <key>` or
+  `X-Syncto-Key`). **New key** in Settings cuts off every connection made with
+  the old one. Without **Other machines**, only this computer can connect.
+- The traffic is plain HTTP: on the local network only, never open the port to
+  the internet.
+
+The HTTP interface, for other tools: `GET /api/status`, `GET /api/jobs`,
+`GET /api/events` (server-sent events), `POST /api/jobs/<id>/sync`,
+`POST /api/jobs/<id>/compare`, `POST /api/stop`, `/api/pause`, `/api/resume`.
+The module's source is in `companion/`.
+
+---
+
 ## Files syncto writes
 
 | File | Where | Why |
@@ -491,10 +533,18 @@ settings, compared and synchronized in one go.
 
 ## Files syncto never touches
 
-Neither side of a comparison ever shows these, and they are never copied:
-`.DS_Store`, `Thumbs.db`, `desktop.ini`, `.Spotlight-V100`, `.fseventsd`,
-`.TemporaryItems`, `.DocumentRevisions-V100`, `System Volume Information`,
-`$RECYCLE.BIN`, `.Trashes`, and syncto's own `.syncto.*` files.
+Neither side of a comparison ever shows these, and they are never copied: the
+volume's own folders (`.Spotlight-V100`, `.fseventsd`, `.TemporaryItems`,
+`.DocumentRevisions-V100`, `System Volume Information`), the recycle bins
+(`.Trashes`, `$RECYCLE.BIN`), and syncto's own `.syncto.*` files. They belong
+to each disk: copied elsewhere they mean nothing, they are often locked, and a
+MIRROR would delete the destination's own.
+
+**Finder files** (`.DS_Store`, `Thumbs.db`, `desktop.ini`: icon positions,
+folder views, thumbnails) are ignored too by default, because the Finder and
+the Explorer rewrite them whenever a folder is opened and every comparison
+would list them as changed. Turn off **Filter › Finder files** for an exact
+mirror, for example when the result is checked with another tool.
 
 When a folder holding one of them has to be **removed**, the operating system's
 own bookkeeping folders go with it — `System Volume Information` and friends are

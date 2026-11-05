@@ -302,6 +302,7 @@ function jobToUi() {
 
   $('st-moves').checked  = j.compare.detectMoves !== false;
   $('st-moves-name').checked = j.compare.detectMovesByName === true;
+  $('st-finder').checked = j.compare.skipFinderFiles !== false;
   $('st-include').value  = j.compare.includeFilter;
   $('st-exclude').value  = j.compare.excludeFilter;
   renderFilterBtn();
@@ -349,6 +350,7 @@ function uiToJob() {
   // their engine defaults — deliberately not exposed in the settings.
   j.compare.detectMoves   = $('st-moves').checked;
   j.compare.detectMovesByName = $('st-moves-name').checked;
+  j.compare.skipFinderFiles = $('st-finder').checked;
   j.compare.includeFilter = $('st-include').value || '*';
   j.compare.excludeFilter = $('st-exclude').value || '';
 
@@ -743,6 +745,36 @@ async function addFilterPattern(kind, pattern) {
   renderFilterBtn();
   persist();
   await doCompare();   // re-apply the filter right away, like FFS
+  filterNote(kind === 'exclude' ? 'Excluded from now on' : 'Kept from now on', kind, pattern, 'add');
+}
+
+// The patterns of one filter field, one per entry (lines and "|" both separate them).
+function filterPatterns(kind) {
+  const raw = kind === 'exclude' ? state.job.compare.excludeFilter : state.job.compare.includeFilter;
+  return String(raw || '').split(/[|\n\r]+/).map(s => s.trim()).filter(s => s && !(kind === 'include' && s === '*'));
+}
+
+// Takes one pattern out of a filter field and compares again. A colleague of
+// Noar's added one by right-click and found no way to take it back.
+async function removeFilterPattern(kind, pattern) {
+  uiToJob();
+  const left = filterPatterns(kind).filter(p => p !== pattern);
+  if (kind === 'exclude') state.job.compare.excludeFilter = left.join('\n');
+  else state.job.compare.includeFilter = left.length ? left.join('\n') : '*';
+  jobToUi();
+  renderFilterBtn();
+  persist();
+  await doCompare();
+  filterNote(kind === 'exclude' ? 'No longer excluded' : 'No longer in the include filter', kind, pattern, 'remove');
+}
+
+// What a right-click did to the filter, said in the status bar with the way back.
+function filterNote(text, kind, pattern, did) {
+  const note = $('status-note');
+  if (!note) return;
+  note.innerHTML = `${esc(text)}: <code>${esc(pattern)}</code>. ` +
+    `<button class="note-act" data-act="${did === 'add' ? 'undo-add' : 'undo-remove'}" data-kind="${kind}" data-p="${esc(pattern)}">Undo</button> ` +
+    `<button class="note-act" data-act="edit-filter">Edit filter</button>`;
 }
 
 async function toggleExcludeTemp(idx) {
@@ -768,6 +800,19 @@ async function revealNode(idx, side) {
   const res = await API.revealNode(idx, side);
   if (res && !res.ok) $('status-note').textContent = res.error;
   else if (res && res.note) $('status-note').textContent = res.note;
+}
+
+// The patterns already in the filters, each one removable from the menu. A
+// row the exclude filter hides is not in the comparison at all, so there is
+// no row to right-click on: the way back is offered from any row.
+function removeMenu() {
+  const list = (kind, k) => filterPatterns(kind).map(p =>
+    `<div class="ctx-it pat-it" data-k="${k}" data-p="${esc(p)}"><span class="lbl"><code>${esc(p)}</code></span></div>`).join('');
+  const ex = list('exclude', 'unexclude'), inc = list('include', 'uninclude');
+  if (!ex && !inc) return '';
+  return `<div class="ctx-sep"></div>` +
+    (ex ? `<div class="ctx-it">${CTX_SQ}<span class="lbl">Remove from the exclude filter</span><span class="sub-arrow">▶</span><div class="ctx-sub"><div class="ctx-head">Stop excluding…</div>${ex}</div></div>` : '') +
+    (inc ? `<div class="ctx-it">${CTX_SQ}<span class="lbl">Remove from the include filter</span><span class="sub-arrow">▶</span><div class="ctx-sub"><div class="ctx-head">Stop keeping only…</div>${inc}</div></div>` : '');
 }
 
 function openCtx(x, y, r) {
@@ -798,7 +843,8 @@ function openCtx(x, y, r) {
     `<div class="ctx-it" data-k="temp">${r.active ? CTX_SQ : CTX_SQ_CHK}<span class="lbl">Exclude temporarily</span><span class="key">Space</span></div>` +
     `<div class="ctx-sep"></div>` +
     `<div class="ctx-it">${CTX_OK}<span class="lbl">Keep: add to the include filter</span><span class="sub-arrow">▶</span><div class="ctx-sub"><div class="ctx-head">Keep, from now on…</div>${sub('include')}</div></div>` +
-    `<div class="ctx-it">${CTX_KO}<span class="lbl">Skip: add to the exclude filter</span><span class="sub-arrow">▶</span><div class="ctx-sub"><div class="ctx-head">Skip, from now on…</div>${sub('exclude')}</div></div>`;
+    `<div class="ctx-it">${CTX_KO}<span class="lbl">Skip: add to the exclude filter</span><span class="sub-arrow">▶</span><div class="ctx-sub"><div class="ctx-head">Skip, from now on…</div>${sub('exclude')}</div></div>` +
+    removeMenu();
   document.body.appendChild(m);
 
   // Keep it on screen.
@@ -818,6 +864,8 @@ function openCtx(x, y, r) {
     if (it.dataset.k === 'rv-left')       await revealNode(r.idx, 'left');
     else if (it.dataset.k === 'rv-right') await revealNode(r.idx, 'right');
     else if (it.dataset.k === 'temp')     await toggleExcludeTemp(r.batch && r.batch.length > 1 ? r.batch : r.idx);
+    else if (it.dataset.k === 'unexclude') await removeFilterPattern('exclude', it.dataset.p);
+    else if (it.dataset.k === 'uninclude') await removeFilterPattern('include', it.dataset.p);
     else await addFilterPattern(it.dataset.k, it.dataset.p);
   });
 }
@@ -1072,7 +1120,7 @@ function invalidateIfPlanChanged() {
 // (pointer-events), so Tab + Enter still swapped a pair or changed the mode
 // in the middle of a run. `inert` takes the keyboard away too.
 const PLAN_REGIONS = ['syncmodes', 'pairwrap', 'pair-add-row', 'seg-cmp', 'btn-filter'];
-const PLAN_INPUTS  = ['st-moves', 'st-moves-name', 'st-include', 'st-exclude', 'st-fixdates', 'st-safenames'];
+const PLAN_INPUTS  = ['st-moves', 'st-moves-name', 'st-finder', 'st-include', 'st-exclude', 'st-fixdates', 'st-safenames'];
 function lockPlan(on, run) {
   for (const id of PLAN_REGIONS) { const el = $(id); if (el) el.inert = !!on; }
   for (const el of document.querySelectorAll('.autorow')) el.inert = !!on;
@@ -1532,7 +1580,9 @@ async function doSync() {
   showSummary(res);
   setRecheck('busy', 'Comparing both folders again to confirm the result…');
   await doCompareQuiet();
-  // Last, so the countdown is drawn over the summary.
+  // Last, so the countdown is drawn over the summary. (1.1.0) Not after a run
+  // started from Companion: nobody here asked for this machine to sleep.
+  if (state.remoteRun) { API.ntfyRun(res, state.job.name).catch(() => {}); return; }
   await afterRun(res);
 }
 
@@ -2172,6 +2222,7 @@ document.addEventListener('click', async e => {
 function cancelFilter() {
   $('st-include').value = state.job.compare.includeFilter || '*';
   $('st-exclude').value = state.job.compare.excludeFilter || '';
+  $('st-finder').checked = state.job.compare.skipFinderFiles !== false;
   $('ov-filter').classList.remove('open');
 }
 
@@ -2291,13 +2342,21 @@ function bind() {
   }, true);
   // (0.9.6) Escape already left without applying; now a button says so.
   $('filter-cancel').addEventListener('click', cancelFilter);
+  // The way back after a right-click changed the filter.
+  $('status-note').addEventListener('click', async e => {
+    const btn = e.target.closest('.note-act');
+    if (!btn || state.busy) return;
+    if (btn.dataset.act === 'edit-filter') { $('btn-filter').click(); return; }
+    if (btn.dataset.act === 'undo-add') await removeFilterPattern(btn.dataset.kind, btn.dataset.p);
+    else if (btn.dataset.act === 'undo-remove') await addFilterPattern(btn.dataset.kind, btn.dataset.p);
+  });
   $('filter-close').addEventListener('click', async () => {
-    const before = state.job.compare.includeFilter + '\u0000' + state.job.compare.excludeFilter;
+    const before = state.job.compare.includeFilter + '\u0000' + state.job.compare.excludeFilter + '\u0000' + (state.job.compare.skipFinderFiles !== false);
     uiToJob();
     $('ov-filter').classList.remove('open');
     renderFilterBtn();
     persist();
-    const after = state.job.compare.includeFilter + '\u0000' + state.job.compare.excludeFilter;
+    const after = state.job.compare.includeFilter + '\u0000' + state.job.compare.excludeFilter + '\u0000' + (state.job.compare.skipFinderFiles !== false);
     if (state.stats && after !== before) await doCompare();
   });
 
@@ -2571,6 +2630,7 @@ function bind() {
   bindServerDialog();
   bindAfterAndNtfy();
   bindCompare();
+  bindRemote();
   installTooltips();
 }
 
@@ -3468,7 +3528,7 @@ function showUpdateNotice({ version, url }) {
     `<div class="m-sub">syncto v${esc(version)} is available. You're on v${esc(state.version || '')}.</div>` +
     `<div class="m-btns">` +
     `<button class="m-btn" id="upd-later">Later</button>` +
-    `<button class="m-btn primary" id="upd-go">Get it</button></div>` +
+    `<button class="m-btn primary" id="upd-go">Download</button></div>` +
     `</div>`;
   document.body.appendChild(ov);
   const dismiss = () => {
@@ -3514,10 +3574,11 @@ async function fireAfterAction() {
 }
 
 function startAfterCountdown(action) {
+  // Title, line under it, and the button that does it at once (it says what happens).
   const WHAT = {
-    quit    : ['syncto will quit',       'The synchronization finished with no errors.'],
-    sleep   : ['This machine will sleep', 'The synchronization finished with no errors.'],
-    shutdown: ['This machine will shut down', 'The synchronization finished with no errors.'],
+    quit    : ['syncto will quit',       'The synchronization finished with no errors.', 'Quit now'],
+    sleep   : ['This machine will sleep', 'The synchronization finished with no errors.', 'Sleep now'],
+    shutdown: ['This machine will shut down', 'The synchronization finished with no errors.', 'Shut down now'],
   };
   const w = WHAT[action];
   if (!w) return;
@@ -3526,6 +3587,7 @@ function startAfterCountdown(action) {
   afterState.left = AFTER_SECONDS;
   $('after-what').textContent = w[0];
   $('after-sub').textContent  = w[1];
+  $('after-now').textContent  = w[2];
   $('after-count').textContent = String(afterState.left);
   $('ov-after').classList.add('open');
   afterState.timer = setInterval(() => {
@@ -4271,6 +4333,106 @@ function cmpMenu(idx, x, y) {
   const items = [];
   for (const i of cmp.picked) { const x2 = cmpItem(i); if (x2) items.push(x2); }
   openCmpCtx(x, y, it, items);
+}
+
+// ── (1.1.0) Remote control (Companion) ─────────────────────────────────────
+// Companion asks for a saved job; this window runs it the way auto-sync does:
+// open the job, compare, then synchronize without the confirmation. Refused
+// when a decision is waiting on screen, when the job is in COMPARE mode, and
+// after the comparison when it would delete more than half of the files.
+const REMOTE_BY = 'Companion';
+// Dialogs that wait for someone's decision: a remote run never goes past one.
+const REMOTE_BLOCKING = ['ov-confirm', 'ov-cmpcopy', 'ov-relink', 'ov-auto', 'ov-after', 'ov-filter', 'ov-settings', 'ov-server', 'update-ov'];
+
+// Would this plan remove too much to run with nobody looking? (Noar: more than
+// half of the files, and at least ten.)
+function remoteGuard(s) {
+  if (!s) return 'The comparison did not finish.';
+  const removals = (s.deleteLeft || 0) + (s.deleteRight || 0);
+  if (removals >= 10 && removals > 0.5 * (s.rows || 0)) {
+    return `It would remove ${removals} of ${s.rows} items. Check the folders in syncto: a run started from Companion never removes more than half.`;
+  }
+  return '';
+}
+
+async function remoteRun({ req, file, action }) {
+  const ack = r => API.remoteAck(req, r);
+  if (state.busy) return ack({ ok: false, error: 'syncto is busy.' });
+  const waiting = REMOTE_BLOCKING.find(id => { const e = document.getElementById(id); return e && e.classList.contains('open'); });
+  if (waiting) return ack({ ok: false, error: 'syncto is waiting for an answer on screen.' });
+  // A summary or an error card left open is closed: it only told something.
+  $('ov-summary').classList.remove('open');
+  if (state.jobPath !== file) {
+    const res = await API.jobOpenPath(file);
+    if (!res || res.error) return ack({ ok: false, error: (res && res.message) || 'The job file could not be opened.' });
+    if (res.recent) state.recent = res.recent;
+    state.job = res.job;
+    state.jobPath = res.path;
+    cmp.view = 'all'; cmp.cat = '';
+    jobToUi();
+    renderRecent();
+    onPathChanged();
+  }
+  if (!completePairs().length) return ack({ ok: false, error: 'This job has no complete folder pair.' });
+  if (action === 'sync' && isCompareOnly()) return ack({ ok: false, error: 'This job is in COMPARE mode: it never synchronizes.' });
+  ack({ ok: true });
+
+  const name = state.job.name || 'Untitled';
+  const report = (result, message) => { API.remoteReport({ result, job: name, message }); $('status-note').textContent = message; };
+  state.remoteRun = true;
+  try {
+    await API.remoteStarted(name, REMOTE_BY);
+    await doCompare();
+    $('status-note').textContent = `Compared from ${REMOTE_BY}.`;
+    if (!state.comparedPairs || !state.stats) return report('refused', 'Started from Companion: the comparison did not finish.');
+    if (action === 'compare') return report('compared', `Compared from ${REMOTE_BY}: ${fmtCount(state.stats.filesToProcess, true)} item${state.stats.filesToProcess === 1 ? '' : 's'} to process.`);
+    const stop = remoteGuard(state.stats);
+    if (stop) return report('refused', `Not synchronized from ${REMOTE_BY}. ${stop}`);
+    if (!state.stats.filesToProcess) return report('nothing', `Started from ${REMOTE_BY}: both sides already match.`);
+    await API.remoteStarted(name, REMOTE_BY);
+    await doSync();
+  } finally {
+    state.remoteRun = false;
+  }
+}
+
+// Stop, pause and resume from Companion go through the same buttons as here.
+function remoteControl({ act }) {
+  if (act === 'stop') $('btn-abort').click();
+  else if (act === 'pause' && !state.paused) $('btn-pause').click();
+  else if (act === 'resume' && state.paused) $('btn-pause').click();
+}
+
+// Settings › Remote control.
+async function loadRemoteUi() {
+  renderRemoteUi(await API.remoteGet());
+}
+function renderRemoteUi(r) {
+  if (!r) return;
+  $('st-remote-en').checked = r.enabled;
+  $('st-remote-lan').checked = r.lan;
+  $('st-remote-port').value = r.port;
+  $('st-remote-key').textContent = r.key || '';
+  const on = r.enabled && r.running;
+  $('st-remote-detail').style.display = r.enabled ? '' : 'none';
+  $('st-remote-addr').textContent = on ? r.addresses.map(a => `http://${a}:${r.port}`).join('   ') : '';
+  $('st-remote-res').textContent = r.error ? r.error : on ? (r.lan ? 'Local network' : 'This machine only') : '';
+  $('st-remote-res').style.color = r.error ? 'var(--red)' : 'var(--green)';
+}
+function bindRemote() {
+  API.onRemoteRun(r => { remoteRun(r).catch(err => API.remoteAck(r.req, { ok: false, error: err.message || String(err) })); });
+  API.onRemoteControl(remoteControl);
+  const save = async patch => renderRemoteUi(await API.remoteSave(patch));
+  $('st-remote-en').addEventListener('change', () => save({ enabled: $('st-remote-en').checked }));
+  $('st-remote-lan').addEventListener('change', () => save({ lan: $('st-remote-lan').checked }));
+  $('st-remote-port').addEventListener('change', () => save({ port: Number($('st-remote-port').value) }));
+  $('st-remote-newkey').addEventListener('click', () => save({ renewKey: true }));
+  $('st-remote-copy').addEventListener('click', async () => {
+    const ok = await API.copyText($('st-remote-key').textContent);
+    $('st-remote-copy').textContent = ok ? 'Copied' : 'Copy key';
+    setTimeout(() => { $('st-remote-copy').textContent = 'Copy key'; }, 1500);
+  });
+  loadRemoteUi().catch(() => {});
 }
 
 // ── Connect to a server ────────────────────────────────────────────────────

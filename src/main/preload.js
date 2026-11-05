@@ -53,6 +53,12 @@ const api = {
   // finish cleanly", and the machine never slept or shut down on any platform.
   afterSync : (action, clean) => ipcRenderer.invoke('after-sync', action, clean),
   ntfyGet   : ()            => ipcRenderer.invoke('ntfy-get'),
+  // (1.1.0) Remote control (Companion).
+  remoteGet    : ()          => ipcRenderer.invoke('remote-get'),
+  remoteSave   : (patch)     => ipcRenderer.invoke('remote-save', patch),
+  remoteAck    : (req, r)    => ipcRenderer.invoke('remote-ack', req, r),
+  remoteStarted: (job, by)   => ipcRenderer.invoke('remote-started', job, by),
+  remoteReport : (r)         => ipcRenderer.invoke('remote-report', r),
   ntfySave  : (patch)       => ipcRenderer.invoke('ntfy-save', patch),
   ntfyTest  : (patch)       => ipcRenderer.invoke('ntfy-test', patch),
   ntfyRun   : (res, name)   => ipcRenderer.invoke('ntfy-run', res, name),
@@ -89,6 +95,8 @@ const api = {
   onCompareProgress: cb => sub('compare-progress', cb),
   onLockProgress   : cb => sub('lock-progress', cb),
   onSyncProgress   : cb => sub('sync-progress', cb),
+  onRemoteRun      : cb => sub('remote-run', cb),
+  onRemoteControl  : cb => sub('remote-control', cb),
   onVerifyProgress : cb => sub('verify-progress', cb),
   onMenu           : cb => sub('menu', cb),
   onUpdateAvailable: cb => sub('update-available', cb),

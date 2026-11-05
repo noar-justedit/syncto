@@ -529,6 +529,9 @@ cursor:pointer;transition:all .13s;white-space:nowrap;}
 .stat.o{color:var(--orange);} .stat.r{color:var(--red);}
 .status-spacer{flex:1;}
 .status-note{font-size:11.5px;color:var(--text3);font-family:var(--mono);}
+.status-note code{font-family:var(--mono);color:var(--text2);}
+.status-note .note-act{background:none;border:none;padding:0 2px;font:inherit;color:var(--blue);cursor:pointer;text-decoration:underline;}
+.status-note .note-act:hover{color:var(--text);}
 
 /* ── Progress ─────────────────────────────────── */
 #bottombar{height:0;overflow:hidden;border-top:1px solid rgba(255,255,255,.09);
@@ -691,6 +694,9 @@ font-size:12.5px;color:var(--text);font-family:var(--mono);outline:none;}
 padding:8px 10px;font-size:12.5px;color:var(--text);font-family:var(--mono);outline:none;
 min-height:74px;resize:vertical;}
 .set-hint{font-size:11.5px;color:var(--text3);line-height:1.55;margin:2px 0 12px 162px;}
+.remote-key{font-family:var(--mono);font-size:11px;color:var(--text2);background:var(--ins);padding:6px 8px;border-radius:var(--r-field);user-select:all;white-space:nowrap;}
+.set-hint.flt-ex{line-height:1.9;}
+.set-hint.flt-ex code.ex{display:inline-block;min-width:110px;}
 .set-hint code{font-family:var(--mono);color:var(--text2);background:var(--bg3);
 padding:1px 4px;border-radius:3px;}
 .switch{position:relative;display:inline-block;width:28px;height:16px;flex-shrink:0;}
@@ -2059,6 +2065,26 @@ body.lassoing .tooltip-float{display:none !important;}
       </div>
     </div>
 
+    <div class="set-section">
+      <div class="set-sec-title">Remote control</div>
+      <div class="set-row"><label>Companion</label>
+        <label class="switch"><input type="checkbox" id="st-remote-en"><span class="slider"></span></label>
+        <span class="set-desc">start saved jobs from Bitfocus Companion</span></div>
+      <div id="st-remote-detail" style="display:none">
+        <div class="set-row"><label>Other machines</label>
+          <label class="switch"><input type="checkbox" id="st-remote-lan"><span class="slider"></span></label>
+          <span class="set-desc">allow Companion on another computer</span></div>
+        <div class="set-row"><label>Port</label>
+          <input type="number" id="st-remote-port" min="1024" max="65535" style="max-width:110px"></div>
+        <div class="set-row" style="flex-wrap:wrap;gap:6px 8px"><label style="margin-right:4px">Key</label>
+          <code id="st-remote-key" class="remote-key"></code>
+          <button class="br-btn" id="st-remote-copy">Copy key</button>
+          <button class="br-btn" id="st-remote-newkey">New key</button></div>
+        <div class="set-row"><label>Address</label><code id="st-remote-addr" class="remote-key"></code>
+          <span class="set-test-res" id="st-remote-res"></span></div>
+      </div>
+    </div>
+
     <div class="set-section" id="custom-section" style="display:none">
       <div class="set-sec-title">Custom directions</div>
       <div class="set-row"><label>Only in source</label>
@@ -2084,22 +2110,23 @@ body.lassoing .tooltip-float{display:none !important;}
       <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 20a1 1 0 0 0 .553.895l2 1A1 1 0 0 0 14 21v-7a2 2 0 0 1 .517-1.341L21.74 4.67A1 1 0 0 0 21 3H3a1 1 0 0 0-.742 1.67l7.225 7.989A2 2 0 0 1 10 14z"/></svg>
       Filter: this job only
     </div>
-    <div class="m-sub">These patterns belong to the current job and travel with its .syncto file. Right-clicking any row in the grid or the overview adds patterns here too (not in the COMPARE panels).</div>
-    <div class="set-row"><label>Include</label><textarea id="st-include" spellcheck="false" style="min-height:90px">*</textarea></div>
-    <div class="set-row"><label>Exclude</label><textarea id="st-exclude" spellcheck="false" style="min-height:130px"></textarea></div>
-    <div class="set-hint">One pattern per line (or separated by <code>|</code>).
-      <code>*</code> is any run of characters inside one name, <code>?</code> is exactly one.
-      End with <code>/</code> to mean folders only, with <code>:</code> to mean files only.<br>
-      <b>No <code>/</code> anywhere</b> → it matches the item's <i>name</i>, at any depth:
-      <code>*.tmp</code> · <code>thumbs.db</code> · <code>Proxies/</code> (the trailing slash
-      only means "folders only", it does not count).<br>
-      <b>A <code>/</code> anywhere in it</b> → it matches the path from the top of the pair, and
-      only there. A leading <code>/</code> changes nothing: <code>Rushes/A001/</code> and
-      <code>/Rushes/A001/</code> are the same pattern, and neither one reaches
-      <code>DAY2/Rushes/A001</code>. Use <code>*/Rushes/A001/</code> for that.</div>
+    <div class="m-sub">Saved with this job. Tip: right-click a row in the grid to add it here.</div>
+    <div class="set-row"><label>Include</label><textarea id="st-include" spellcheck="false" style="min-height:70px">*</textarea></div>
+    <div class="set-row"><label>Exclude</label><textarea id="st-exclude" spellcheck="false" style="min-height:90px"></textarea></div>
+    <!-- (0.9.9) Kept short on purpose: the full pattern syntax (?, |, files
+         only with ":", leading "/") is in the README. -->
+    <div class="set-hint flt-ex">One per line. <code>*</code> means anything.<br>
+      <code class="ex">*.tmp</code> all .tmp files<br>
+      <code class="ex">Proxies/</code> every folder named Proxies<br>
+      <code class="ex">Rushes/A001/</code> this folder only, from the top</div>
+    <div class="set-row"><label>Finder files</label>
+      <label class="switch"><input type="checkbox" id="st-finder" checked><span class="slider"></span></label>
+      <span class="set-desc">ignore <code>.DS_Store</code>, <code>Thumbs.db</code>, <code>desktop.ini</code></span></div>
+    <div class="set-hint">Off for an exact copy.</div>
+    <div class="set-hint" data-tip="Always ignored: .Spotlight-V100, .fseventsd, .TemporaryItems, .DocumentRevisions-V100, System Volume Information, .Trashes, $RECYCLE.BIN, .syncto.*">Always ignored: system folders, recycle bins, syncto's own files.</div>
     <div class="m-btns">
       <button class="m-btn" id="filter-cancel">Cancel</button>
-      <button class="m-btn primary" id="filter-close">Apply</button>
+      <button class="m-btn primary" id="filter-close">Apply filter</button>
     </div>
   </div>
 </div>
@@ -2133,7 +2160,7 @@ body.lassoing .tooltip-float{display:none !important;}
     <div class="after-sub" id="after-sub"></div>
     <div class="m-btns">
       <button class="m-btn primary" id="after-cancel">Cancel</button>
-      <button class="m-btn" id="after-now">Do it now</button>
+      <button class="m-btn" id="after-now">Sleep now</button>
     </div>
   </div>
 </div>
@@ -2237,7 +2264,7 @@ body.lassoing .tooltip-float{display:none !important;}
       <div class="srv-picked" id="srv-picked"></div>
       <div class="m-btns">
         <button class="m-btn" id="srv-back">Back</button>
-        <button class="m-btn primary" id="srv-use">Use this folder</button>
+        <button class="m-btn primary" id="srv-use">Use folder</button>
       </div>
     </div>
   </div>
@@ -2280,7 +2307,7 @@ body.lassoing .tooltip-float{display:none !important;}
     </div>
     <div class="m-btns">
       <button class="m-btn" id="cc-cancel">Cancel</button>
-      <button class="m-btn primary" id="cc-ok">Copy</button>
+      <button class="m-btn primary" id="cc-ok">Replace</button>
     </div>
   </div>
 </div>
@@ -2294,8 +2321,8 @@ body.lassoing .tooltip-float{display:none !important;}
     <div class="m-sub" id="rl-sub"></div>
     <div id="rl-list"></div>
     <div class="m-btns">
-      <button class="m-btn" id="rl-ignore">Leave them as they are</button>
-      <button class="m-btn primary" id="rl-apply" disabled>Apply</button>
+      <button class="m-btn" id="rl-ignore">Keep paths</button>
+      <button class="m-btn primary" id="rl-apply" disabled>Update paths</button>
     </div>
   </div>
 </div>
