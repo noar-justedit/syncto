@@ -310,7 +310,7 @@ function jobToUi() {
 
   // Versioning is no longer exposed: a job that carried it falls back to trash.
   $('st-lanes').value = String(Math.min(10, Math.max(1, j.sync.transferLanes || 4)));
-  $('st-verify-remote').checked = j.sync.verifyRemote !== false;
+  $('st-readback').checked = j.sync.readBack !== false;
   $('st-deletion').value  = j.sync.deletion === 'versioning' ? 'recycler' : j.sync.deletion;
 
   $('st-cksum').checked    = !!j.sync.writeChecksumList;
@@ -357,7 +357,7 @@ function uiToJob() {
   j.compare.excludeFilter = $('st-exclude').value || '';
 
   j.sync.transferLanes = Number($('st-lanes').value) || 1;
-  j.sync.verifyRemote  = $('st-verify-remote').checked;
+  j.sync.readBack      = $('st-readback').checked;
   j.sync.deletion = $('st-deletion').value;
   // No trash on that disk: the file is deleted anyway, and the confirmation
   // says so before the run (0.8.3 — no longer a setting).
@@ -1480,17 +1480,11 @@ async function checkBeforeSync() {
 // (0.8.8) Spelt as on the buttons.
 const VARIANT_LABEL = { twoWay: '2 WAYS', mirror: 'MIRROR', update: 'UPDATE', custom: 'CUSTOM' };
 
-// What the run will really do about proof, for THESE folders. The read-back
-// can be turned off for servers, so promising "verified copy" whatever the
-// pairs are is a promise the summary then takes back two hours later.
+// What the run will really do about proof. The read-back can be turned off
+// for the job, so promising "verified copy" regardless is a promise the
+// summary then takes back two hours later.
 function verificationPhrase() {
-  const servers = completePairs().some(p => isServerAddress(p.left) || isServerAddress(p.right));
-  const off = state.job.sync.verifyRemote === false;
-  if (!servers) return 'verified copy (xxHash64)';
-  if (!off) return 'verified copy (xxHash64)';
-  const bothRemote = completePairs().every(p => isServerAddress(p.left) && isServerAddress(p.right));
-  return bothRemote ? 'copied, NOT read back (server)'
-                    : 'verified on disk, NOT read back on the server';
+  return state.job.sync.readBack === false ? 'copied, NOT read back' : 'verified copy (xxHash64)';
 }
 
 function askConfirm() {
@@ -1564,6 +1558,7 @@ async function doSync() {
   if (state.busy) return;
   uiToJob();
   state.busy = 'sync';
+  state.checkSkipped = false;
   startRunUi('Synchronizing…');
 
   const res = await ipc(API.sync(state.job));
@@ -1631,7 +1626,7 @@ async function doCompareQuiet() {
     $('btn-pause').style.display = '';
     setBusyUi(false);
   }
-  // (0.9.0) Stopped with CANCEL is not a failure, and is not said as one.
+  // (0.9.0) Stopped with STOP is not a failure, and is not said as one.
   if (res && res.cancelled) {
     invalidateComparison('The check after the run was stopped: compare again to synchronize.');
     setRecheck(null);
@@ -1714,6 +1709,7 @@ function setBusyUi(on, title, steps) {
   $('btn-compare').disabled = on;
   $('btn-sync').disabled = on || isCompareOnly() || (isAutoOn() ? false : (!state.stats || state.stats.filesToProcess === 0));
   $('btn-abort').style.display = on ? '' : 'none';
+  if (!on) $('btn-skipcheck').style.display = 'none';
   if (on) {
     $('pb-pct').textContent = '0%';
     $('pb-ring').setAttribute('stroke-dashoffset', RING_LEN);
@@ -1938,6 +1934,9 @@ API.onSyncProgress(p => {
   // mistaken for a stall. The colour variables live on #bottombar because the
   // top fill bar is a sibling of .pb-inner and would not inherit them otherwise.
   const verifying = p.pass === 'verify';
+  // SKIP CHECK exists during the read-back only, and once it was clicked the
+  // read-back is ending: it is not offered again in this run.
+  $('btn-skipcheck').style.display = verifying && state.busy === 'sync' && !state.checkSkipped ? '' : 'none';
   const bar = $('bottombar');
   bar.style.setProperty('--pb-color',  verifying ? 'var(--blue)' : 'var(--green)');
   bar.style.setProperty('--pb-color2', verifying ? 'var(--blue)' : 'var(--green)');
@@ -2076,11 +2075,21 @@ function renderVerifyLine(res) {
   const verifyFailures = (res.errors || []).filter(e => /checksum mismatch/i.test(e.message || '')).length;
   let kind, ico, head, sub;
 
+  const unread = res.notReadBack || 0;
   if (verifyFailures) {
     kind = 'bad'; ico = ICO_X;
     head = `${verifyFailures} file${verifyFailures > 1 ? 's' : ''} failed verification`;
     sub = 'They were read back and did not match what was written. They are listed below, left '
         + 'out of the checksum list, and will be looked at again on the next run.';
+  } else if (res.checkSkipped && unread) {
+    // (1.1.2) SKIP CHECK during the read-back: part of the run has its proof,
+    // the rest does not, and both numbers are said.
+    kind = 'warn'; ico = ICO_WARN;
+    head = `${verified ? `${verified} file${verified > 1 ? 's' : ''} verified, ` : ''}${unread} not read back`;
+    sub = 'The check was skipped during the run. '
+        + (verified === 1 ? 'The file read back matched. ' : verified ? `The ${verified} files read back matched. ` : '')
+        + `The other ${unread} ${unread > 1 ? 'were' : 'was'} copied and checked for size only: `
+        + 'the next comparison will look at them again.';
   } else if (verified && byServer) {
     // (0.9.4) A server that computes checksums is asked, not read back: the
     // line said "read back (xxHash64)" for files no one read back.
@@ -2095,15 +2104,14 @@ function renderVerifyLine(res) {
     head = `${verified} file${verified > 1 ? 's' : ''} read back and verified`;
     sub = 'Every file was copied, then read from its final location and compared with the '
         + 'xxHash64 fingerprint taken while writing. Not one differed.';
-  } else if (copied) {
+  } else if (copied && !res.checkSkipped) {
     // Files were copied and nothing read them back: the read-back is off for
-    // servers in the settings. This line is the one people trust after a long
-    // backup, so it has to say plainly that there is no proof this time.
+    // this job. This line is the one people trust after a long backup, so it
+    // has to say plainly that there is no proof this time.
     kind = 'warn'; ico = ICO_WARN;
     head = `${copied} file${copied > 1 ? 's' : ''} copied, not read back`;
-    sub = 'Reading files back is turned off for servers in the settings, so these copies were '
-        + 'checked for their size only, like any ordinary transfer. Turn it back on for a run '
-        + 'you need proof of.';
+    sub = 'Reading files back is turned off for this job, so these copies were checked for their '
+        + 'size only, like any ordinary transfer. Turn it back on for a run you need proof of.';
   } else {
     kind = 'good'; ico = ICO_SHIELD;
     head = 'Nothing needed copying';
@@ -2384,6 +2392,12 @@ function bind() {
   $('sum-close').addEventListener('click', () => $('ov-summary').classList.remove('open'));
   $('vf-close').addEventListener('click', () => { API.verifyCancel(); $('ov-verify').classList.remove('open'); });
 
+  $('btn-skipcheck').addEventListener('click', async () => {
+    if (state.busy !== 'sync') return;
+    state.checkSkipped = true;
+    $('btn-skipcheck').style.display = 'none';
+    await API.syncSkipCheck();
+  });
   $('btn-abort').addEventListener('click', async () => {
     if (state.busy === 'compare') await API.compareCancel();
     if (state.busy === 'sync')    await API.syncCancel();
@@ -3331,7 +3345,7 @@ async function autoRun() {
     $('footer-auto').textContent = `auto-sync ${stamp()}: comparison failed: ${cmp.error}`;
     return;
   }
-  // (0.9.0) CANCEL during auto-sync's comparison: this cycle ends there. It
+  // (0.9.0) STOP during auto-sync's comparison: this cycle ends there. It
   // used to go on to a synchronization the engine refused, then report a
   // failure and send a "run failed" notification for a stop asked for.
   if (cmp.cancelled) {
@@ -3364,6 +3378,7 @@ async function autoRun() {
   }
 
   state.busy = 'sync';
+  state.checkSkipped = false;
   startRunUi('Auto-sync: synchronizing…');
   const res = await ipc(API.sync(state.job));
   state.busy = null;
@@ -4177,6 +4192,7 @@ async function cmpCopy(to, items) {
   // comparison started meanwhile (Cmd+R) gave the picked numbers to other
   // files. The engine also refuses rows picked in an older comparison.
   state.busy = 'sync';
+  state.checkSkipped = false;
   const sel = { gen: cmp.data.gen, idx: items.map(x => x.idx) };
   const where = to === 'right' ? 'destination' : 'source';
   const from = to === 'right' ? 'source' : 'destination';

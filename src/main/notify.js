@@ -166,6 +166,10 @@ function forRun(res, jobName) {
     } else if (!files) {
       lines.push('Both sides already matched');
     }
+    // (1.1.2) No proof, or only part of it: said, since this is often the
+    // only thing anyone reads after a run.
+    if (res.notReadBack) lines.push(`${res.notReadBack} not read back (check skipped)`);
+    else if (files && !res.verified) lines.push('Not read back');
     tags = 'white_check_mark'; priority = 3;
   }
   return { title, message: lines.join('\n'), tags, priority };

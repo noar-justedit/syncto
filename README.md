@@ -289,9 +289,18 @@ name, size and date, each alone of its kind; that is why it is a choice.
 
 ### How a copy is verified
 
-**syncto has one copy mode.** There is no faster setting that skips the check,
-because the reason to run a folder synchroniser over rushes is to know the
-second copy is the same as the first.
+**syncto has one copy mode, and it reads every copy back.** The reason to run a
+folder synchroniser over rushes is to know the second copy is the same as the
+first. If you check the copies yourself (on the NAS, with another tool), a job
+can do without it: **Settings › Read files back**, on by default. Off, nothing
+is read back, no checksum list is written, and the summary and the phone
+notification say *copied, not read back*.
+
+During the read-back of a run, **SKIP CHECK** (under PAUSE and STOP) ends the
+read-back and lets the run finish: folders a MIRROR removes are still removed.
+The files read back so far are verified; the others are copied but unproven,
+the summary gives both numbers, and the next comparison looks at them again.
+STOP ends the whole run.
 
 Every run works in two passes, like ingesto: everything is copied first, then
 everything is read back from its final location and compared to the xxHash64

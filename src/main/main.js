@@ -897,6 +897,7 @@ ipcMain.handle('invert-all',    () => editPlan(() => session.invertAll()));
 // ── IPC: synchronization ───────────────────────────────────────────────────
 ipcMain.handle('sync', (_, job) => exclusive('A synchronization', async () => {
   tokens.sync.cancelled = false;
+  tokens.sync.skipCheck = false;
   remote.job = (job && job.name) || '';
   tokens.sync.paused = false;
   holdSleep(true);
@@ -931,6 +932,7 @@ ipcMain.handle('compare-copy', (_, job, sel, to, dryRun) => exclusive(dryRun ? '
     catch (err) { return { ok: false, error: err.message || String(err) }; }
   }
   tokens.sync.cancelled = false;
+  tokens.sync.skipCheck = false;
   tokens.sync.paused = false;
   holdSleep(true);
   try {
@@ -949,6 +951,8 @@ ipcMain.handle('compare-copy', (_, job, sel, to, dryRun) => exclusive(dryRun ? '
 
 ipcMain.handle('sync-cancel', () => { tokens.sync.cancelled = true; tokens.sync.paused = false; return true; });
 ipcMain.handle('sync-pause',  () => { tokens.sync.paused = true;  return true; });
+// Skip check (1.1.2): stops the read-back only; the run goes on to its end.
+ipcMain.handle('sync-skip-check', () => { tokens.sync.skipCheck = true; return true; });
 ipcMain.handle('sync-resume', () => { tokens.sync.paused = false; return true; });
 
 // ── IPC: verification ──────────────────────────────────────────────────────

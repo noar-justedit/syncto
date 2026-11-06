@@ -225,7 +225,7 @@ font-size:11.5px;font-weight:600;padding:4px 10px;cursor:pointer;}
 /* ── Folder pair ──────────────────────────────── */
 #pairwrap{flex-shrink:0;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--bg2);}
 /* (0.9.0) Many pairs scroll inside their card: twelve of them pushed COMPARE,
-   SYNCHRONIZE and CANCEL below the bottom of the window. */
+   SYNCHRONIZE and STOP below the bottom of the window. */
 #pairwrap{max-height:28vh;overflow-y:auto;min-height:0;}
 .br-btn{flex-shrink:0;padding:0 12px;border-radius:var(--rs);border:1px solid var(--border);
 background:var(--bg3);color:var(--text3);font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font);}
@@ -647,7 +647,8 @@ overflow:hidden;text-overflow:ellipsis;margin-top:3px;}
 transition:stroke-dashoffset .3s ease,stroke .3s ease;}
 .ring-txt{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
 font-size:16px;font-weight:800;font-family:var(--mono);color:var(--text);}
-.pb-btns{display:flex;gap:8px;flex-shrink:0;}
+.pb-btns{display:grid;grid-template-columns:auto auto;gap:8px;flex-shrink:0;align-content:center;}
+.pb-btns #btn-skipcheck{grid-column:1 / -1;justify-content:center;}
 .pb-stats{display:flex;gap:8px;margin-top:6px;}
 .sbox{flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:var(--rs);
 padding:6px 9px;min-width:0;position:relative;overflow:hidden;}
@@ -1265,6 +1266,7 @@ html,body{background:var(--page);}
 .pb-btns .tbtn:hover:not(:disabled){color:var(--text);}
 .pb-btns .tbtn.go{background:#0f2c1d;color:var(--green);}
 .pb-btns .tbtn.stop{background:rgba(242,85,90,.14);color:var(--red);}
+.pb-btns .tbtn.skip{background:rgba(77,144,240,.14);color:var(--blue);}
 .vf-ring-fill{stroke:var(--blue);}
 
 /* ── Windows: a card on a black veil ───────────────────────────────────── */
@@ -1543,13 +1545,13 @@ body.lassoing .tooltip-float{display:none !important;}
 .srow .s-name{flex:1 1 auto;min-width:40px;}
 .srow .host{flex-shrink:1;min-width:0;max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 /* Run strip: the steps wrap instead of pushing the file line under PAUSE and
-   CANCEL; the file line is cut with an ellipsis. */
+   STOP; the file line is cut with an ellipsis. */
 #bottombar.run .pb-hd-text{min-width:0;}
 #bottombar.run .pb-steps{flex-wrap:wrap;row-gap:4px;min-width:0;}
 #bottombar.run .pb-file{min-width:0;overflow:hidden;text-overflow:ellipsis;}
 /* Top bar in the colours of the charter. */
 .pb-fill{background:linear-gradient(90deg,var(--pb-color,var(--green)),var(--pb-color2,var(--green)));}
-/* "Reduce motion": the spinning ring and CANCEL's glow stop too. */
+/* "Reduce motion": the spinning ring and STOP's glow stop too. */
 @media (prefers-reduced-motion:reduce){
   .ring-fill.spin{animation:none;}
   .tbtn.stop{animation:none;}
@@ -1924,7 +1926,13 @@ body.lassoing .tooltip-float{display:none !important;}
         </button>
         <button class="tbtn stop" id="btn-abort">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg>
-          CANCEL
+          STOP
+        </button>
+        <!-- (1.1.2) During the read-back only: stops it, the run goes on to
+             its end. Under PAUSE and STOP, which act on the whole run. -->
+        <button class="tbtn skip" id="btn-skipcheck" style="display:none">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 17 5-5-5-5"/><path d="m13 17 5-5-5-5"/></svg>
+          SKIP CHECK
         </button>
       </div>
     </div>
@@ -2008,6 +2016,9 @@ body.lassoing .tooltip-float{display:none !important;}
       <div class="set-row"><label>Continue on error</label>
         <label class="switch"><input type="checkbox" id="st-ignore"><span class="slider"></span></label>
         <span class="set-desc">skip a failed file and carry on</span></div>
+      <div class="set-row"><label>Read files back</label>
+        <label class="switch"><input type="checkbox" id="st-readback" checked><span class="slider"></span></label>
+        <span class="set-desc">every copy read again and compared (xxHash)</span></div>
       <div class="set-row"><label>Write checksum</label>
         <label class="switch"><input type="checkbox" id="st-cksum"><span class="slider"></span></label>
         <span class="set-desc">syncto-checksums.txt in each destination</span></div>
@@ -2029,9 +2040,6 @@ body.lassoing .tooltip-float{display:none !important;}
           <option value="10">10</option>
         </select>
         <span class="set-desc">one connection each</span></div>
-      <div class="set-row"><label>Read files back (xxHash)</label>
-        <label class="switch"><input type="checkbox" id="st-verify-remote" checked><span class="slider"></span></label>
-        <span class="set-desc">the proof, at the price of a second transfer</span></div>
     </div>
 
     <div class="set-section">

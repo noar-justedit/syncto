@@ -4,6 +4,23 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [1.1.2] — 2026-11-06
+
+### Added
+
+- **Settings › Read files back**, for every destination: local disks, mounted
+  NAS and servers. On by default. Off, nothing is read back, no checksum list
+  is written, and the summary and the phone notification say so. It replaces
+  the servers-only switch; a job that had it off for its servers keeps it off.
+- **SKIP CHECK** during the read-back: it ends the read-back and lets the run
+  finish (a MIRROR still removes its folders). The summary says how many files
+  were verified and how many were not read back; the next comparison looks at
+  those again.
+
+### Changed
+
+- The run's **CANCEL** button is now **STOP**: it stops the run.
+
 ## [1.1.1] — 2026-11-05
 
 ### Added

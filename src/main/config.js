@@ -109,10 +109,10 @@ function defaultJob() {
         maxAgeDays : 0, countMin: 0, countMax: 0,
       },
       lockFolders    : true,            // .syncto.lock — one machine at a time
-      // Reading every file back is what syncto is for. Over SFTP it is also
-      // the whole file travelling a second time, in the other direction, which
-      // is why it can be turned off for servers alone — and only for servers.
-      verifyRemote   : true,
+      // Reading every file back is what syncto is for. To a server or a NAS it
+      // is also the whole file travelling a second time, which is why a job
+      // can turn it off (1.1.2: every side; before, servers only).
+      readBack       : true,
       // Files copied at the same time, on a server. Each one needs its own
       // connection: the SSH channel window is 2 MB and a single connection
       // cannot go faster than that window divided by the round trip, whatever
@@ -738,6 +738,11 @@ function migrateJob(raw) {
     raw.sync.copyLevel = 'secure';
     // Versioning has no interface. A job asking for it with no revision folder
     // configured could only ever fail; the trash is the honest equivalent.
+    // (1.1.2) "Read files back" covers every side now. A job that had turned
+    // it off for its servers keeps it off: it was turned off for speed, and
+    // the summary says plainly when nothing was read back.
+    if (raw.sync.readBack === undefined && raw.sync.verifyRemote === false) raw.sync.readBack = false;
+    delete raw.sync.verifyRemote;
     if (raw.sync.deletion === 'versioning') {
       const v = raw.sync.versioning || {};
       if (!v.leftFolder && !v.rightFolder) raw.sync.deletion = 'recycler';

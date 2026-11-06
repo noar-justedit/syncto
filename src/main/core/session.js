@@ -1042,6 +1042,8 @@ class Session {
     return {
       counters : run.counters,
       verified : run.verified || 0,
+      notReadBack: run.notReadBack || 0,
+      checkSkipped: !!run.checkSkipped,
       serverChecked: run.serverChecked || 0,
       plan     : run.plan,
       errors   : run.errors,
@@ -1906,7 +1908,7 @@ class MultiSession {
     const perPair = [];
     let doneBytes = 0, doneFiles = 0, doneItems = 0, cancelled = false;
     const counters = { files: 0, bytes: 0, deleted: 0, folders: 0, moved: 0, renamed: 0, errors: 0, failed: 0, dated: 0 };
-    let verified = 0, serverChecked = 0;
+    let verified = 0, serverChecked = 0, notReadBack = 0, checkSkipped = false;
     const allErrors = [], allNotes = [], checksumFiles = [];
     const dbSaved = [];
 
@@ -1993,6 +1995,8 @@ class MultiSession {
       for (const k of Object.keys(counters)) counters[k] += res.counters[k] || 0;
       verified += res.verified || 0;
       serverChecked += res.serverChecked || 0;
+      notReadBack += res.notReadBack || 0;
+      checkSkipped = checkSkipped || !!res.checkSkipped;
       allErrors.push(...res.errors.map(e => Object.assign({}, e, {
         rel: multi ? `[${pairLabel(pr)}] ${e.rel}` : e.rel,
       })));
@@ -2039,6 +2043,8 @@ class MultiSession {
     return {
       counters,
       verified,
+      notReadBack,
+      checkSkipped,
       serverChecked,
       errors: allErrors,
       notes : allNotes,

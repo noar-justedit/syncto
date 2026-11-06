@@ -440,16 +440,13 @@ class SyncRunner {
 
   // Whether a copy landing on this side will be read back and compared.
   //
-  // On a server the read-back is the whole file crossing the link a second
-  // time, in the other direction — the single biggest reason a run takes twice
-  // as long as the same transfer in an FTP client. It can be turned off for
-  // servers, and for servers only: a local disk keeps its proof whatever the
-  // setting says, because there the read costs almost nothing.
+  // On a server or a mounted NAS the read-back is the whole file crossing the
+  // network a second time. Some users check on the NAS itself and do not want
+  // it twice (Noar, 05/11/2026), so the job can turn it off, for every side.
+  // On by default: the read-back is the proof syncto exists to give.
   verifies(side) {
-    const s = this.side(side);
-    if (!s) return true;
-    if (s.kind === 'native') return true;
-    return this.cfg.verifyRemote !== false;
+    if (!this.side(side)) return true;
+    return this.cfg.readBack !== false;
   }
 
   emit(force, current) {
@@ -1275,7 +1272,7 @@ class SyncRunner {
       // (0.9.7) STOP during the copy pass ended the run before the read-back,
       // and the copies nobody read back were recorded as synchronized (the
       // 0.8.8 fix only covered a STOP during the read-back itself).
-      this.dropUnproven();
+      this.notReadBack = this.notReadBack || this.dropUnproven();
     }
     this.emit(true, this.token.cancelled ? 'Cancelled' : (this.stopped ? 'Stopped' : 'Done'));
     return {
@@ -1284,6 +1281,8 @@ class SyncRunner {
       notes    : this.notes,
       checksums: this.checksums,
       verified : this.toVerify.filter(v => v.ok).length,
+      notReadBack: this.notReadBack || 0,
+      checkSkipped: !!this.checkSkipped,
       serverChecked: this.serverChecked || 0,
       counters : this.done,
       plan     : this.plan,
@@ -1568,13 +1567,9 @@ class SyncRunner {
     // there is no list to write — and saying so is the point: a sidecar full
     // of fingerprints nobody verified is exactly the false proof this program
     // exists to avoid.
-    if (this.cfg.writeChecksumList && !this.stopped) {
-      for (const which of ['left', 'right']) {
-        if (this.verifies(which)) continue;
-        if (!plan.copy.some(c => c.to === which)) continue;
-        this.notes.push('No checksum list was written for the server side: reading files back is ' +
-          'turned off for servers, so nothing was checked there. Turn it back on to get a list.');
-      }
+    if (this.cfg.writeChecksumList && !this.stopped && plan.copy.some(c => !this.verifies(c.to))) {
+      this.notes.push('No checksum list was written: reading files back is turned off for this job, ' +
+        'so nothing was checked. Turn it back on to get a list.');
     }
 
     // 4. verify — one pass over everything that was copied, exactly like
@@ -1590,9 +1585,14 @@ class SyncRunner {
       // keepGoing: a mismatch on one file used to end the pass, leaving every
       // file after it copied but never read back — and recorded as
       // synchronized all the same.
+      // Skip check (1.1.2): the read-back stops, the file being read included,
+      // and the run goes on to its end. What was not read back is left out of
+      // the database by dropUnproven() below, like any unproven copy.
+      const t = this.token;
+      const vToken = { get cancelled() { return !!(t.cancelled || t.skipCheck); }, get paused() { return t.paused; } };
       await this.runLanes(this.toVerify, vLanes, async (item, lane) => {
         await this.gate();
-        if (this.token.cancelled) return;
+        if (vToken.cancelled) return;
         this.current = item.rel;
         this.way = item.side;
         this.inFlight++;
@@ -1624,7 +1624,7 @@ class SyncRunner {
           if (!viaServer) {
             const verifier = await this._hasher('verify', lane, item.algo);
             const back = await hashStream(fsx, item.path, verifier,
-              b => { this.done.workBytes += b; this.meter.add(b); this.emit(false); }, this.token, item.size);
+              b => { this.done.workBytes += b; this.meter.add(b); this.emit(false); }, vToken, item.size);
             if (back !== item.digest) throw new Error(`Checksum mismatch (${item.algo}).`);
           }
           item.ok = true;
@@ -1661,7 +1661,13 @@ class SyncRunner {
       // Anything copied but NOT read back must not be recorded as
       // synchronized: the database is what makes the next run skip a file, so
       // a file whose proof was never taken has to be looked at again.
-      this.dropUnproven();
+      if (t.skipCheck && !t.cancelled) {
+        this.checkSkipped = true;
+        if (this.cfg.writeChecksumList) {
+          this.notes.push('The check was skipped: the checksum list names only the files that were read back.');
+        }
+      }
+      this.notReadBack = this.dropUnproven();
       // Not back to 'copy': what follows writes nothing, and the interface
       // must not flash green again as if a new file were being transferred.
       this.phase = 'cleanup';
