@@ -686,7 +686,7 @@ class SyncRunner {
   async rmdirClean(fsx, path) {
     // Try the plain removal FIRST. The sweep below deletes real files — the
     // checksum list among them — and it used to run unconditionally: a folder
-    // held back by one filtered file lost its syncto-checksums.txt and then
+    // held back by one filtered file lost its checksum list and then
     // survived anyway, so the manifest was destroyed for nothing, outside any
     // deletion policy, with only an ENOTEMPTY to show for it.
     try { await fsx.rmdir(path); return; } catch (_) { /* not empty */ }

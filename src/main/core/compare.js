@@ -78,7 +78,12 @@ const DEFAULT_TOLERANCE_SEC = 2;
 // (0.9.3) Folder listings asked for ahead of the walk, at most (see _readdir).
 const PREFETCH_MAX = 8;
 
-const CHECKSUM_FILE = 'syncto-checksums.txt';
+// (1.1.3) Named for its algorithm, like the files xxhsum writes, so another
+// program knows what it holds (Stefan Girres). The .txt of older versions is
+// still read, and still kept out of every comparison: a MIRROR must never
+// delete the proof an older run left in a destination.
+const CHECKSUM_FILE = 'syncto-checksums.xxh64';
+const OLD_CHECKSUM_FILE = 'syncto-checksums.txt';
 
 // Items syncto always ignores: its own checksum list and what belongs to the
 // volume itself (search index, change journal, document versions, recycle
@@ -87,7 +92,7 @@ const CHECKSUM_FILE = 'syncto-checksums.txt';
 // deliberately visible (a DIT should be able to find it), so it has to be
 // excluded by name, or the next mirror run would delete it as a stray file.
 const SYSTEM_SKIP = new Set([
-  CHECKSUM_FILE,
+  CHECKSUM_FILE, OLD_CHECKSUM_FILE,
   '.Spotlight-V100', '.Trashes', '.fseventsd', '.TemporaryItems', '.DocumentRevisions-V100',
   '$RECYCLE.BIN', 'System Volume Information',
 ]);
@@ -359,7 +364,7 @@ class Comparer {
       // (0.8.8) Keys that two names share on this side (see below).
       map.collided = new Set();
       for (const e of list) {
-        // syncto-checksums.txt stays out at every depth: below the root it is
+        // The checksum list stays out at every depth: below the root it is
         // the proof list of a nested or overlapping job, which that job
         // rewrites — treated as a user file, an outer MIRROR deleted it at
         // every other run (tried and reverted during the 0.8.8 review).
@@ -754,7 +759,7 @@ class Comparer {
 
 module.exports = {
   Comparer, CAT, OP, compareTime, sameTime, equalContent,
-  TEMP_EXT, OLD_EXT, DB_NAME, LOCK_NAME, CHECKSUM_FILE, ALWAYS_SKIP, SYSTEM_SKIP, FINDER_FILES, isOfficeTemp, OS_LITTER_FOLDERS,
+  TEMP_EXT, OLD_EXT, DB_NAME, LOCK_NAME, CHECKSUM_FILE, OLD_CHECKSUM_FILE, ALWAYS_SKIP, SYSTEM_SKIP, FINDER_FILES, isOfficeTemp, OS_LITTER_FOLDERS,
   isSyncToInternal,
   DEFAULT_TOLERANCE_SEC,
 };

@@ -1326,6 +1326,11 @@ html,body{background:var(--page);}
 .ctx-it.pat-it code{color:var(--text2);background:var(--ins);border:none;}
 .tooltip-float{background:var(--raise);border:none;border-radius:9px;padding:8px 11px;
   font-weight:500;line-height:1.5;box-shadow:0 10px 26px rgba(0,0,0,.55);}
+/* (1.1.3) A name or path shown in full: as wide as the window allows, cut
+   anywhere (a path has no spaces to break at). */
+.tooltip-float.cut{max-width:min(720px,calc(100vw - 24px));}
+.tooltip-float .tip-full{font-family:var(--mono);overflow-wrap:anywhere;color:var(--text);}
+.tooltip-float .tip-full + div{margin-top:4px;color:var(--text2);}
 
 /* The drop halves are a state (where the folder will land), so their
    outlines stay. */
@@ -1907,7 +1912,7 @@ body.lassoing .tooltip-float{display:none !important;}
              something you were told about before it starts — not a phase that
              appears out of nowhere and looks like a stall. -->
         <div class="pb-steps" id="pb-steps"></div>
-        <div class="pb-file" id="pb-file">—</div>
+        <div class="pb-file" id="pb-file" data-cut="">—</div>
         <!-- Which way the files are going, right now. In a two-way run the
              direction changes from one file to the next, and no number on
              this screen says which way the last one went. -->
@@ -2021,7 +2026,7 @@ body.lassoing .tooltip-float{display:none !important;}
         <span class="set-desc">every copy read again and compared (xxHash)</span></div>
       <div class="set-row"><label>Write checksum</label>
         <label class="switch"><input type="checkbox" id="st-cksum"><span class="slider"></span></label>
-        <span class="set-desc">syncto-checksums.txt in each destination</span></div>
+        <span class="set-desc">syncto-checksums.xxh64 in each destination</span></div>
     </div>
 
     <div class="set-section">

@@ -4,6 +4,27 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [1.1.3] — 2026-11-07
+
+### Changed
+
+- **A new job takes the settings of the job that is open** (read-back,
+  checksum list, transfers, retries...), not the factory defaults. Its folders,
+  mode and filters are its own.
+- **The checksum list is now `syncto-checksums.xxh64`**: plain xxhsum lines,
+  no comment lines, so `xxhsum -c` and other tools read it. A
+  `syncto-checksums.txt` written before is still read by Verify, never
+  deleted, and its lines are carried into the new list.
+
+### Fixed
+
+- **A name or a path cut short shows in full** when the pointer rests on it:
+  in the COMPARE panels, the list, the two folders of a pair and the file line
+  of a run.
+- **Choosing a folder on a server** no longer reads the folder again at each
+  click: the list no longer empties and comes back. One click selects, a second
+  one goes in, as before.
+
 ## [1.1.2] — 2026-11-06
 
 ### Added

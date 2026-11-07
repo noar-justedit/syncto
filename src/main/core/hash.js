@@ -96,21 +96,17 @@ function hashStream(fsx, filePath, hasher, onBytes, token, size) {
 
 // Sidecar checksum list, in the classic "<hash>  <relative path>" shape that
 // md5sum / xxhsum and every DIT tool can read back.
-function formatChecksumList(algo, entries, meta) {
-  const head = [
-    `# syncto checksum list`,
-    `# algorithm: ${algo}`,
-    `# written: ${new Date().toISOString()}`,
-  ];
-  if (meta && meta.pair) head.push(`# pair: ${meta.pair}`);
-  if (meta && meta.side) head.push(`# side: ${meta.side}`);
+// (1.1.3) Nothing but the lines, as xxhsum writes them: the algorithm is in
+// the file's extension. Older lists began with "# algorithm:" lines; they are
+// still read (parseChecksumList).
+function formatChecksumList(entries) {
   // (0.9.0) A name holding a line break (the Mac's "Icon\r") broke its line in
   // two. Escaped the way md5sum and xxhsum do: the line starts with "\", and
   // "\\", "\n", "\r" stand for a backslash, a line feed, a carriage return.
   const body = entries.map(e => /[\\\n\r]/.test(e.rel)
     ? `\\${e.hash}  ${e.rel.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/\r/g, '\\r')}`
     : `${e.hash}  ${e.rel}`);
-  return head.concat(body).join('\n') + '\n';
+  return body.join('\n') + (body.length ? '\n' : '');
 }
 
 function parseChecksumList(text) {

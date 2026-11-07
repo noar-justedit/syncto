@@ -23,7 +23,7 @@
 // `join` normalises, so a single `..` segment anywhere in `rel` walks OUT of
 // the folder the user chose — and `rel` is not always the engine's own work:
 // it is assembled from names a server sends back, and it is read verbatim out
-// of a `syncto-checksums.txt` that sits inside the folder being checked. Both
+// of a checksum list that sits inside the folder being checked. Both
 // are supplied by the other side.
 //
 // This is the one place that decides what a relative path may look like, so

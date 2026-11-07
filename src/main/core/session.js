@@ -21,7 +21,7 @@
 // sends back edits by index. That keeps a 200 000-file comparison responsive.
 
 const fs = require('fs');
-const { Comparer, CAT, OP, CHECKSUM_FILE, DEFAULT_TOLERANCE_SEC, sameTime, compareTime } = require('./compare');
+const { Comparer, CAT, OP, CHECKSUM_FILE, OLD_CHECKSUM_FILE, DEFAULT_TOLERANCE_SEC, sameTime, compareTime } = require('./compare');
 const { PathFilter } = require('./filter');
 const { applyDirections, computeStats, operationFor, applyFolderRules,
         detectMoves, detectMovesByName, dissolveMove, usesDatabase, plannedRenames } = require('./direction');
@@ -927,7 +927,14 @@ class Session {
           const byRel = new Map();
           let foreign = null;
           try {
-            const prevText = await readText(target.fs, p);
+            // (1.1.3) The first list under the new name takes over the lines
+            // of the old .txt, which is left where it is.
+            let prevText = await readText(target.fs, p);
+            if (prevText == null) {
+              prevText = await readText(target.fs, target.fs.join(target.path, OLD_CHECKSUM_FILE));
+              if (prevText != null) run.notes.push(`The checksum list is now ${CHECKSUM_FILE}, which other programs read ` +
+                `(xxhsum -c). The ${OLD_CHECKSUM_FILE} on the ${side} side was left as is: delete it when you no longer need it.`);
+            }
             if (prevText != null) {
               const prev = parseChecksumList(prevText);
               if (!prev.algo || prev.algo === algo) {
@@ -984,7 +991,7 @@ class Session {
           }
           for (const e of list) byRel.set(e.rel, e);
           const merged = [...byRel.values()].sort((a, b) => a.rel < b.rel ? -1 : 1);
-          await writeText(target.fs, p, formatChecksumList(algo, merged, { pair: job.name, side }));
+          await writeText(target.fs, p, formatChecksumList(merged));
           sidecars.push(p);
         } catch (err) {
           run.notes.push(`Could not write the checksum list on the ${side} side: ${err.message}`);
@@ -2075,14 +2082,15 @@ class MultiSession {
 }
 
 // ── Verification of an existing folder ─────────────────────────────────────
-// Reads back a syncto-checksums.txt sidecar and re-hashes every file it lists.
+// Reads back the checksum list of a folder and re-hashes every file it lists:
+// syncto-checksums.xxh64, or the .txt an older version wrote.
 async function verifyFolder(pool, phrase, opts) {
   const { onProgress, token, credentials } = opts || {};
   const loc = parseLocation(phrase, credentials);
   const { fs: fsx, path: root } = await pool.open(loc);
 
-  const listPath = fsx.join(root, CHECKSUM_FILE);
-  const text = await readText(fsx, listPath);
+  let text = await readText(fsx, fsx.join(root, CHECKSUM_FILE));
+  if (text == null) text = await readText(fsx, fsx.join(root, OLD_CHECKSUM_FILE));
   if (text == null) throw new Error(`No ${CHECKSUM_FILE} found in this folder.`);
 
   const { algo, entries } = parseChecksumList(text);

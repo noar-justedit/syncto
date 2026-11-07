@@ -148,13 +148,13 @@ function renderPairRows() {
               aria-label="Remove pair ${i + 1}"${only ? ' disabled' : ''}>${ICON_TRASH}</button>
       <span class="pr-num" data-tip="Folder pair ${i + 1}">${i + 1}</span>
       <div class="pr-field">
-        <input class="pr-left"${id('left-path')} value="${esc(p.left)}" placeholder="Source folder" spellcheck="false">
+        <input class="pr-left" data-cut=""${id('left-path')} value="${esc(p.left)}" placeholder="Source folder" spellcheck="false">
         <button class="br-btn pr-browse-l">Browse</button>
         <button class="srv-btn pr-server-l${on(p.left)}"${id('left-server')} data-tip="Connect to a server (SFTP, FTP, FTPS)" aria-label="Connect to a server">${ICON_SERVER}</button>
       </div>
       <button class="pr-swap" data-tip="Swap this pair's source and destination" aria-label="Swap pair ${i + 1}">${ICON_SWAP}</button>
       <div class="pr-field">
-        <input class="pr-right"${id('right-path')} value="${esc(p.right)}" placeholder="Destination folder" spellcheck="false">
+        <input class="pr-right" data-cut=""${id('right-path')} value="${esc(p.right)}" placeholder="Destination folder" spellcheck="false">
         <button class="br-btn pr-browse-r">Browse</button>
         <button class="srv-btn pr-server-r${on(p.right)}"${id('right-server')} data-tip="Connect to a server (SFTP, FTP, FTPS)" aria-label="Connect to a server">${ICON_SERVER}</button>
       </div>
@@ -604,7 +604,7 @@ function paneCell(r, side, nameCls, indent) {
   const dir = r.rel.includes('/') ? r.rel.slice(0, r.rel.lastIndexOf('/') + 1) : '';
   return `<div class="c-path${side === 'right' ? ' pane-r' : ''}" style="padding-left:${8 + indent}px">
     <span class="ic">${icon}</span>
-    <span class="nm${nameCls ? ' ' + nameCls : ''}"><span class="dim">${esc(dir)}</span>${esc(r.name)}</span>
+    <span class="nm${nameCls ? ' ' + nameCls : ''}" data-cut=""><span class="dim">${esc(dir)}</span>${esc(r.name)}</span>
   </div>`;
 }
 
@@ -2674,12 +2674,29 @@ function swapAllPairs() {
   onPathChanged();
 }
 
+// The choices made in the Settings window, which a new job takes from the job
+// that is open (1.1.3, Stefan Girres: read-back off came back on with every
+// new job). The folders, the mode and the filters stay the new job's own.
+const JOB_SETTINGS = {
+  compare: ['detectMoves', 'detectMovesByName'],
+  sync: ['readBack', 'writeChecksumList', 'lockFolders', 'failSafe', 'preserveTimes', 'fixDatesOnly',
+    'copyPermissions', 'safeNames', 'retryCount', 'retryDelayMs', 'ignoreErrors', 'transferLanes', 'deletion'],
+};
+function carrySettings(from, to) {
+  for (const part of Object.keys(JOB_SETTINGS)) {
+    if (!from || !from[part] || !to[part]) continue;
+    for (const k of JOB_SETTINGS[part]) if (from[part][k] !== undefined) to[part][k] = from[part][k];
+  }
+  return to;
+}
+
 async function newJob() {
   if (state.busy) return;   // (0.8.8) not under a running run
   autoStop();
   relinkEntries = []; state.missingPaths = []; renderMissingBadge(0);
   noteStaleLocks([]);
-  state.job = await API.jobNew();
+  uiToJob();
+  state.job = carrySettings(state.job, await API.jobNew());
   state.jobPath = '';
   cmp.view = 'all'; cmp.cat = '';   // (0.9.7)
   jobToUi();
@@ -4013,7 +4030,7 @@ function cmpRowHtml(it, side) {
   const name = cls === 'only' || cls === 'new' ? `<span class="hl">${esc(it.name)}</span>` : esc(it.name);
   const badge = cls === 'diffin' ? `<span class="badge">${fmtCount(cmpDiffCount(it.inside), true)}</span>` : '';
   return `<div class="cmp-row ${cls}${folder ? ' fold' : ''}${sel}${it.active ? '' : ' off'}" data-idx="${it.idx}" data-tip="${esc(cmpTip(it, side))}">` +
-    `<span class="nmc" style="padding-left:${it.depth * 18}px">${tw}${folder ? ICON_FOLDER : ICON_FILE}<span class="nm">${name}</span>${badge}</span>` +
+    `<span class="nmc" style="padding-left:${it.depth * 18}px">${tw}${folder ? ICON_FOLDER : ICON_FILE}<span class="nm" data-cut="">${name}</span>${badge}</span>` +
     `<span class="sz">${folder ? '' : esc(fmtBytes(st.size))}</span><span class="dt">${folder ? '' : esc(fmtDate(st.mtime))}</span></div>`;
 }
 function cmpDiffersInside(c) { return !!(c && (c.onlyL || c.onlyR || c.newL || c.newR || c.diff)); }
@@ -4703,20 +4720,35 @@ async function srvDraw() {
 
   for (const f of res.folders) {
     const n = document.createElement('button');
-    n.className = 'tnode' + (f.path === srv.picked ? ' sel' : '');
+    n.className = 'tnode';
     n.setAttribute('role', 'option');
-    n.setAttribute('aria-selected', f.path === srv.picked ? 'true' : 'false');
+    n.dataset.path = f.path;
     n.innerHTML = ICON_FOLDER_SM + '<span></span>';
     n.lastChild.textContent = f.name;         // never innerHTML for a remote name
     // One click selects, a second one goes in — the habit every file dialog has.
+    // (1.1.3) Selecting only moves the highlight: it used to read the folder
+    // from the server again, and the list emptied and came back as if it had
+    // gone in (Stefan Girres).
     n.addEventListener('click', async () => {
-      if (srv.picked === f.path) { srv.cwd = f.path; srv.picked = f.path; await srvDraw(); }
-      else { srv.picked = f.path; await srvDraw(); }
+      if (srv.picked === f.path) { srv.cwd = f.path; await srvDraw(); return; }
+      srv.picked = f.path;
+      srvMarkPicked();
     });
-    n.addEventListener('dblclick', async () => { srv.cwd = f.path; srv.picked = f.path; await srvDraw(); });
+    // No 'dblclick' listener: a double click is two clicks, the second goes
+    // in, and a listener on top read the folder from the server twice.
     tree.appendChild(n);
   }
 
+  srvMarkPicked();
+}
+
+// The highlight and the "Selected:" line, without asking the server anything.
+function srvMarkPicked() {
+  for (const n of $('srv-tree').querySelectorAll('.tnode[role="option"]')) {
+    const on = n.dataset.path === srv.picked;
+    n.classList.toggle('sel', on);
+    n.setAttribute('aria-selected', on ? 'true' : 'false');
+  }
   $('srv-picked').innerHTML = 'Selected: <b></b>';
   $('srv-picked').querySelector('b').textContent = srv.picked;
 }
@@ -4834,8 +4866,17 @@ function bindServerDialog() {
 function installTooltips() {
   let tip = null, owner = null;
   const drop = () => { if (tip) { tip.remove(); tip = null; } owner = null; };
+  // (1.1.3) A name or a path cut short by its column ([data-cut]) shows in
+  // full, above the row's own tooltip if it has one (Stefan Girres, Bilou).
+  const cutText = el => {
+    if (!el || el.scrollWidth <= el.clientWidth + 1) return '';
+    return el.dataset.cut || (el.tagName === 'INPUT' ? el.value : el.textContent) || '';
+  };
   document.addEventListener('mouseover', e => {
-    const el = e.target.closest('[data-tip]');
+    const cutEl = e.target.closest('[data-cut]');
+    const full = cutText(cutEl);
+    const tipEl = e.target.closest('[data-tip]');
+    const el = full ? (tipEl && tipEl.contains(cutEl) ? tipEl : cutEl) : tipEl;
     // (0.9.0) The row a tooltip belongs to can be redrawn under the mouse (the
     // grid is, twice a second during a run): no mouseout ever comes, and the
     // tooltip stayed on screen. It goes as soon as the mouse is elsewhere.
@@ -4845,8 +4886,11 @@ function installTooltips() {
     owner = el;
     if (document.body.classList.contains('lassoing')) return;   // no tooltip while a lasso is drawn
     tip = document.createElement('div');
-    tip.className = 'tooltip-float';
-    tip.textContent = el.dataset.tip;
+    tip.className = 'tooltip-float' + (full ? ' cut' : '');
+    if (full) {
+      const f = document.createElement('div'); f.className = 'tip-full'; f.textContent = full; tip.appendChild(f);
+      if (tipEl && el === tipEl && tipEl.dataset.tip) { const t = document.createElement('div'); t.textContent = tipEl.dataset.tip; tip.appendChild(t); }
+    } else tip.textContent = el.dataset.tip;
     document.body.appendChild(tip);
     const r = el.getBoundingClientRect();
     const tr = tip.getBoundingClientRect();
@@ -4858,7 +4902,7 @@ function installTooltips() {
     tip.style.top  = y + 'px';
   });
   document.addEventListener('mouseout', e => {
-    if (!e.target.closest('[data-tip]')) return;
+    if (!e.target.closest('[data-tip],[data-cut]')) return;
     if (tip) { tip.remove(); tip = null; }
   });
   document.addEventListener('mousedown', drop);

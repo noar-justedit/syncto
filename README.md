@@ -321,9 +321,12 @@ re-examines it. The size check still happens before the rename, so a truncated
 copy never takes a good file's name.
 
 Switch on **Write checksum** in the settings to get
-`syncto-checksums.txt` at the root of each target: the shield button in the
+`syncto-checksums.xxh64` at the root of each target: the shield button in the
 title bar re-checks a folder against it months later, without the original
-source.
+source. It holds plain xxhsum lines (`<XXH64>  <path>`), so other tools read it
+too: `xxhsum -c syncto-checksums.xxh64`. Lists written before 1.1.3 were named
+`syncto-checksums.txt`; they are still read, never deleted, and their lines
+carried into the new list at the next run.
 
 xxHash is not cryptographic — it detects accidental corruption, not tampering.
 That is the right trade-off here: it runs at several GB/s where MD5 crawls.
@@ -533,7 +536,7 @@ The module's source is in `companion/`.
 |---|---|---|
 | `.syncto.db` | root of both folders | the last synchronized state, for two-way sync and move detection. Hidden, gzipped. Delete it and two-way sync restarts from scratch. |
 | `.syncto.lock` | root of each folder, while running | who is synchronizing right now. Removed at the end; reclaimed automatically after a crash. |
-| `syncto-checksums.txt` | root of each target | the checksum list, when **Write checksum** is on (merged run after run) |
+| `syncto-checksums.xxh64` | root of each target | the checksum list, when **Write checksum** is on (merged run after run). An older `syncto-checksums.txt` is left in place and still read. |
 | `*.syncto_tmp` | next to a file being written | fail-safe copy. A leftover means a run was interrupted; the comparison ignores it and the next synchronization removes it, reporting how much space it reclaimed. |
 | `*.syncto_old` | next to a file being replaced, on SFTP and FTP | the previous version, parked for the instant it takes to rename its replacement into place. SFTP and FTP cannot replace a file atomically, and deleting the target first would lose it if the connection dropped. Swept like any leftover. |
 | `install-id` | `~/.syncto/` | identifies this installation to the directory lock, so two machines sharing a hostname cannot mistake each other's lock for their own. Delete it and a new one is generated. |
