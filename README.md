@@ -342,6 +342,15 @@ silently:
 Network shares, SFTP and FTP have no trash. There, syncto deletes permanently — and
 says so in the confirmation, before the run, naming the folders concerned.
 
+On Windows, the recycle bin takes no path longer than 260 characters. A file
+with a longer path is deleted permanently, as Explorer does: the confirmation
+says how many before the run, and the notes after. If the recycle bin refuses
+any other file, syncto leaves it in place, reports it once and goes on, without
+retrying: the recycle bin would give the same answer.
+
+While a run waits to try a file again (**Settings › Retry on error**), the
+strip turns orange and reads **RETRYING**, with the attempt and the wait.
+
 ### Several machines, same folders
 
 While a run lasts, syncto puts a `.syncto.lock` file at the root of each

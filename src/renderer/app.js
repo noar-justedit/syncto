@@ -1656,8 +1656,10 @@ const RING_LEN = 169.6;       // inner ring, r = 27
 const RING_ALL_LEN = 210.5;   // outer ring, r = 33.5: the whole run (0.8.7)
 
 // (0.8.7) The title names the pass going on: copying, then reading back.
-function runTitle(pass, paused) {
+function runTitle(pass, paused, retrying) {
   if (paused) return 'PAUSED';
+  // (1.1.4) Waiting to try a file again: said, or the run looks frozen.
+  if (retrying) return 'RETRYING';
   // (0.8.8) Waiting for another machine's lock: one word, in capitals like
   // every other title; who and how long go on the line below.
   if (pass === 'lock') return 'WAITING';
@@ -1709,7 +1711,7 @@ function setBusyUi(on, title, steps) {
   $('btn-compare').disabled = on;
   $('btn-sync').disabled = on || isCompareOnly() || (isAutoOn() ? false : (!state.stats || state.stats.filesToProcess === 0));
   $('btn-abort').style.display = on ? '' : 'none';
-  if (!on) $('btn-skipcheck').style.display = 'none';
+  if (!on) { $('btn-skipcheck').style.display = 'none'; $('bottombar').classList.remove('retrying'); }
   if (on) {
     $('pb-pct').textContent = '0%';
     $('pb-ring').setAttribute('stroke-dashoffset', RING_LEN);
@@ -1938,8 +1940,9 @@ API.onSyncProgress(p => {
   // read-back is ending: it is not offered again in this run.
   $('btn-skipcheck').style.display = verifying && state.busy === 'sync' && !state.checkSkipped ? '' : 'none';
   const bar = $('bottombar');
-  bar.style.setProperty('--pb-color',  verifying ? 'var(--blue)' : 'var(--green)');
-  bar.style.setProperty('--pb-color2', verifying ? 'var(--blue)' : 'var(--green)');
+  const tint = p.retry ? 'var(--orange)' : verifying ? 'var(--blue)' : 'var(--green)';
+  bar.style.setProperty('--pb-color',  tint);
+  bar.style.setProperty('--pb-color2', tint);
   bar.style.setProperty('--pb-glow',   verifying ? 'rgba(77,144,240,.45)' : 'var(--green-g)');
   renderSteps(p.pass, state.lastWillVerify);   // remembered: not every event carries it (0.8.8)
   renderFlow(p);
@@ -1965,8 +1968,16 @@ API.onSyncProgress(p => {
   // the engine saw the click arrives with paused:false and used to switch the
   // strip back to running while the button said RESUME.
   const paused = !!(p.paused || state.paused);
-  title.textContent = runTitle(p.pass, paused);
+  title.textContent = runTitle(p.pass, paused, !!p.retry);
   bar.classList.toggle('paused', paused);
+  // (1.1.4) A retry waits several seconds with nothing moving: the strip says
+  // which file, which attempt and how long (Manuel López stopped a run that
+  // looked frozen).
+  bar.classList.toggle('retrying', !!(p.retry && !paused));
+  if (p.retry) {
+    // The attempt first: a long path is cut at the end of the line.
+    $('pb-file').textContent = `Attempt ${p.retry.attempt + 1} of ${p.retry.max + 1} in ${p.retry.seconds} s: ${p.retry.label}`;
+  }
   // The colour comes from --pb-color on the strip (green, blue while reading
   // back, grey when paused) — not from an inline style that would outlast it.
   title.style.color = '';

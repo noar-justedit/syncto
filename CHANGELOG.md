@@ -4,6 +4,19 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [1.1.4] — 2026-11-09
+
+### Fixed
+
+- **Windows: files whose path is too long for the recycle bin** (over 260
+  characters) are deleted permanently, as Explorer does, instead of being left
+  in place. The confirmation says how many before the run, the notes after.
+- **A refusal of the recycle bin is no longer retried**: it gives the same
+  answer every time, and each refusal cost two waits of five seconds, so a run
+  with many of them looked frozen.
+- **A run waiting to retry a file says so**: the strip turns orange and reads
+  RETRYING, with the attempt and the wait.
+
 ## [1.1.3] — 2026-11-07
 
 ### Changed

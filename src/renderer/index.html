@@ -1556,6 +1556,8 @@ body.lassoing .tooltip-float{display:none !important;}
 #bottombar.run .pb-file{min-width:0;overflow:hidden;text-overflow:ellipsis;}
 /* Top bar in the colours of the charter. */
 .pb-fill{background:linear-gradient(90deg,var(--pb-color,var(--green)),var(--pb-color2,var(--green)));}
+/* (1.1.4) RETRYING: the strip in orange while it waits to try a file again. */
+#bottombar.retrying .pb-title{color:var(--orange);}
 /* "Reduce motion": the spinning ring and STOP's glow stop too. */
 @media (prefers-reduced-motion:reduce){
   .ring-fill.spin{animation:none;}

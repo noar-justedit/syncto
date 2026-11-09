@@ -663,16 +663,24 @@ class Session {
       nodes: this.nodes,
       config: Object.assign({}, job.sync),
       trashItem: (opts || {}).trashItem,
+      platform: (opts || {}).platform,
       token: { cancelled: false },
     });
     runner.collectNoTrash = true;
     try {
       await runner.preflight(runner.buildPlan());
       // Not a refusal: a notice the confirmation shows before the run.
-      return (runner.noTrash || []).map(t => ({
+      const out = (runner.noTrash || []).map(t => ({
         notice: true, noTrash: true, side: t.side, path: redactLocation(t.path),
         message: `No trash on ${redactLocation(t.path)}: what is removed or replaced there will be deleted permanently.`,
       }));
+      const n = runner.tooLongCount || 0;
+      if (n) {
+        out.push({ notice: true, tooLong: n,
+          message: `${n} item${n > 1 ? 's have paths' : ' has a path'} too long for the Windows recycle bin: ` +
+            `${n > 1 ? 'they' : 'it'} will be deleted permanently.` });
+      }
+      return out;
     } catch (err) {
       return [{ message: err.message, preflight: !!err.preflight }];
     }
@@ -882,7 +890,7 @@ class Session {
       leftovers: this.leftovers || [],
       config: Object.assign({}, job.sync),
       lanes,
-      token, onProgress, trashItem,
+      token, onProgress, trashItem, platform: (opts || {}).platform,
       onRowDone: () => this._landed(),
     });
     let run;
@@ -1937,7 +1945,7 @@ class MultiSession {
       let lastFiles = 0, lastItems = 0, lastBytes = 0;
       try {
         res = await this.sessions[p].sync(pairJob, {
-          token, trashItem,
+          token, trashItem, platform: (opts || {}).platform,
           lockLost: () => !!lockLost,
           onApplied: only ? only.onApplied : undefined,
           onlyCopy: !!only,

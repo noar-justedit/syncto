@@ -43,6 +43,8 @@ const { assertSafeRel } = require('./relpath');
 const { Versioner, runTimestamp, streamCopy } = require('./versioning');
 
 const RETRY_DEFAULT_DELAY = 5000;
+// The longest path Windows' recycle bin accepts (MAX_PATH less its null).
+const TRASH_MAX_PATH = 259;
 
 function now() { return Date.now(); }
 
@@ -464,6 +466,7 @@ class SyncRunner {
       // this payload could tell you which way the last file went.
       way  : this.way || '',
       current: current || this.current || '',
+      retry: this.retrying || null,
       inFlight: this.inFlight || 0,
       // Whether this run will read anything back. With the read-back off for a
       // server there is no second pass, and the window must not draw a step
@@ -539,11 +542,14 @@ class SyncRunner {
       try { return await fn(); }
       catch (err) {
         lastErr = err;
-        if (/cancelled/i.test(err.message || '')) throw err;
+        if (/cancelled/i.test(err.message || '') || err.noRetry) throw err;
         if (attempt < max) {
           this.notes.push(`Retrying ${label} (${attempt + 1}/${max}): ${err.message}`);
+          // (1.1.4) Said on screen while it waits: a run retrying file after
+          // file looked frozen (Manuel López).
+          this.retrying = { label, attempt: attempt + 1, max, seconds: Math.round(delay / 1000) };
           this.emit(true, `Retrying ${label}…`);
-          await new Promise(r => setTimeout(r, delay));
+          try { await new Promise(r => setTimeout(r, delay)); } finally { this.retrying = null; }
         }
       }
     }
@@ -658,6 +664,11 @@ class SyncRunner {
         return 'removed';
       }
       if (fsx.supportsTrash() && this.trashItem) {
+        if (this.tooLongForTrash(side, path)) {
+          await fsx.unlink(path);
+          this.tooLong = (this.tooLong || 0) + 1;
+          return 'deleted';
+        }
         const ok = await this.trashItem(fsx, path);
         if (ok) return 'trashed';
         // (0.8.8) The trash works on this folder (the probe said so) but
@@ -665,7 +676,8 @@ class SyncRunner {
         // fallback is for folders announced as having no trash — using it here
         // deleted the file for good with nothing said, before or after.
         if (await this.trashWorks(side)) {
-          throw new Error('The recycle bin refused this item, so it was left in place (nothing deleted).');
+          // Not retried: the recycle bin gives the same answer every time.
+          throw Object.assign(new Error('The recycle bin refused this item, so it was left in place (nothing deleted).'), { noRetry: true });
         }
       }
       // SFTP and most network shares have no trash.
@@ -1243,12 +1255,14 @@ class SyncRunner {
     }
 
     if (fsx.supportsTrash() && this.trashItem) {
+      // Too long for the recycle bin: the old version is replaced for good.
+      if (this.tooLongForTrash(side, p)) { this.tooLong = (this.tooLong || 0) + 1; this._archived.add(once); return; }
       const ok = await this.trashItem(fsx, p);
       if (ok) { this._archived.add(once); return; }
       // (0.8.8) Same rule as dispose(): a trash that works here but refused
       // this file must not turn into a silent loss of the old version.
       if (await this.trashWorks(side)) {
-        throw new Error('The recycle bin refused the version about to be replaced, so the file was not replaced.');
+        throw Object.assign(new Error('The recycle bin refused the version about to be replaced, so the file was not replaced.'), { noRetry: true });
       }
     }
     // No trash here (SFTP, most network shares).
@@ -1273,6 +1287,10 @@ class SyncRunner {
       // and the copies nobody read back were recorded as synchronized (the
       // 0.8.8 fix only covered a STOP during the read-back itself).
       this.notReadBack = this.notReadBack || this.dropUnproven();
+    }
+    if (this.tooLong) {
+      this.notes.push(`${this.tooLong} item${this.tooLong > 1 ? 's had paths' : ' had a path'} too long for the Windows ` +
+        `recycle bin (over ${TRASH_MAX_PATH} characters): deleted permanently, as Explorer does.`);
     }
     this.emit(true, this.token.cancelled ? 'Cancelled' : (this.stopped ? 'Stopped' : 'Done'));
     return {
@@ -1320,6 +1338,17 @@ class SyncRunner {
   // Doing this once per side, up front, is the whole point. The same failure
   // used to surface as one error per file, mid-run, which with "stop at the
   // first error" meant a NAS job that copied nothing at all.
+  // Windows' recycle bin takes no path longer than MAX_PATH (260 characters,
+  // the final null included): Explorer itself offers a permanent delete for
+  // those. syncto does the same, and says so in the confirmation and in the
+  // notes (1.1.4, Manuel López: a WordPress backup, paths of 250 characters
+  // inside the folder alone).
+  tooLongForTrash(side, absPath) {
+    // `platform` is given by the tests only, to check the Windows rule anywhere.
+    if ((this.platform || process.platform) !== 'win32' || this.side(side).kind !== 'native') return false;
+    return String(absPath).replace(/^\\\\\?\\/, '').length > TRASH_MAX_PATH;
+  }
+
   async trashWorks(side) {
     // (0.8.8) The promise is shared, not just the answer: two lanes asking at
     // the same moment ran two probes, and the loser's "no" stuck for the run.
@@ -1382,6 +1411,15 @@ class SyncRunner {
     }
     if (!sides.size) return;
 
+    // (1.1.4) What is too long for the recycle bin, said before the run.
+    if (this.collectNoTrash) {
+      let n = 0;
+      for (const d of plan.del) if (d.n.type !== 'folder' && this.tooLongForTrash(d.side, this.absNode(d.n, d.side))) n++;
+      for (const c of plan.copy) {
+        if ((c.n.op === OP.OVERWRITE_LEFT || c.n.op === OP.OVERWRITE_RIGHT) && this.tooLongForTrash(c.to, this.absNode(c.n, c.to))) n++;
+      }
+      this.tooLongCount = n;
+    }
     for (const side of sides) {
       if (await this.trashWorks(side)) continue;
       const where = this.side(side).path;
