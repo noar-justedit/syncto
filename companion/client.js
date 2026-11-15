@@ -6,6 +6,10 @@
 
 const http = require('http')
 
+// No byte on the event stream for this long means syncto is gone (it pings
+// every 15 s).
+const STREAM_SILENCE_MS = 40000
+
 class SynctoClient {
 	// opts: { host, port, key, onStatus(status), onState(ok, message) }
 	constructor(opts) {
@@ -58,8 +62,29 @@ class SynctoClient {
 	}
 
 	// Follows the state; reconnects every few seconds while syncto is away.
+	// The stream is taken as lost however it ends (closed cleanly, cut when
+	// syncto quits or crashes, or silent for longer than its 15 s pings allow).
 	connect() {
 		this.closed = false
+		let done = false
+		let watchdog = null
+		const lost = (message) => {
+			if (done) return
+			done = true
+			if (watchdog) clearTimeout(watchdog)
+			if (this.closed) return
+			this.o.onState(false, message)
+			try {
+				req.destroy()
+			} catch (_) {
+				/* already gone */
+			}
+			this.later()
+		}
+		const alive = () => {
+			if (watchdog) clearTimeout(watchdog)
+			watchdog = setTimeout(() => lost('syncto stopped answering.'), STREAM_SILENCE_MS)
+		}
 		const req = http.request(
 			{
 				host: this.o.host,
@@ -70,14 +95,17 @@ class SynctoClient {
 			},
 			(res) => {
 				if (res.statusCode !== 200) {
+					done = true
 					this.o.onState(false, res.statusCode === 401 ? 'Wrong key: copy it from syncto, Settings, Remote control.' : `syncto answered ${res.statusCode}.`, res.statusCode)
 					res.resume()
 					return this.later()
 				}
 				this.o.onState(true, '')
+				alive()
 				let buf = ''
 				res.setEncoding('utf8')
 				res.on('data', (chunk) => {
+					alive()
 					buf += chunk
 					let i
 					while ((i = buf.indexOf('\n\n')) >= 0) {
@@ -92,15 +120,15 @@ class SynctoClient {
 						}
 					}
 				})
-				res.on('end', () => {
-					this.o.onState(false, 'syncto closed the connection.')
-					this.later()
-				})
+				res.on('end', () => lost('syncto closed the connection.'))
+				res.on('close', () => lost('syncto closed the connection.'))
+				res.on('aborted', () => lost('syncto closed the connection.'))
+				res.on('error', () => lost('syncto closed the connection.'))
 			},
 		)
 		req.on('error', (err) => {
-			this.o.onState(false, `syncto is not reachable (${err.code || err.message}). Is it open, with Remote control on?`)
-			this.later()
+			if (done) return
+			lost(`syncto is not reachable (${err.code || err.message}). Is it open, with Remote control on?`)
 		})
 		req.end()
 		this.stream = req

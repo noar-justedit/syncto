@@ -310,7 +310,7 @@ function jobToUi() {
 
   // Versioning is no longer exposed: a job that carried it falls back to trash.
   $('st-lanes').value = String(Math.min(10, Math.max(1, j.sync.transferLanes || 4)));
-  $('st-readback').checked = j.sync.readBack !== false;
+  $('readback-switch').checked = j.sync.readBack !== false;
   $('st-deletion').value  = j.sync.deletion === 'versioning' ? 'recycler' : j.sync.deletion;
 
   $('st-cksum').checked    = !!j.sync.writeChecksumList;
@@ -357,7 +357,7 @@ function uiToJob() {
   j.compare.excludeFilter = $('st-exclude').value || '';
 
   j.sync.transferLanes = Number($('st-lanes').value) || 1;
-  j.sync.readBack      = $('st-readback').checked;
+  j.sync.readBack      = $('readback-switch').checked;
   j.sync.deletion = $('st-deletion').value;
   // No trash on that disk: the file is deleted anyway, and the confirmation
   // says so before the run (0.8.3 — no longer a setting).
@@ -730,7 +730,10 @@ function filterVariants(r) {
   return out;
 }
 
+// Filters change only between runs: a run applies the plan it started with,
+// and saying "excluded" while it copies those files would be untrue.
 async function addFilterPattern(kind, pattern) {
+  if (state.busy) return;
   uiToJob();
   const j = state.job;
   if (kind === 'exclude') {
@@ -746,7 +749,7 @@ async function addFilterPattern(kind, pattern) {
   jobToUi();
   renderFilterBtn();
   persist();
-  await doCompare();   // re-apply the filter right away, like FFS
+  await compareAfterFilter();   // re-apply the filter right away, like FFS
   filterNote(kind === 'exclude' ? 'Excluded from now on' : 'Kept from now on', kind, pattern, 'add');
 }
 
@@ -759,15 +762,32 @@ function filterPatterns(kind) {
 // Takes one pattern out of a filter field and compares again. A colleague of
 // Noar's added one by right-click and found no way to take it back.
 async function removeFilterPattern(kind, pattern) {
+  if (state.busy) return;
   uiToJob();
-  const left = filterPatterns(kind).filter(p => p !== pattern);
-  if (kind === 'exclude') state.job.compare.excludeFilter = left.join('\n');
-  else state.job.compare.includeFilter = left.length ? left.join('\n') : '*';
+  const key = kind === 'exclude' ? 'excludeFilter' : 'includeFilter';
+  const left = withoutPattern(state.job.compare[key], pattern);
+  state.job.compare[key] = left || (kind === 'exclude' ? '' : '*');
   jobToUi();
   renderFilterBtn();
   persist();
-  await doCompare();
+  await compareAfterFilter();
   filterNote(kind === 'exclude' ? 'No longer excluded' : 'No longer in the include filter', kind, pattern, 'remove');
+}
+
+// A filter's text without one of its patterns, the others left as they were
+// written (on one line with "|", or one per line).
+function withoutPattern(raw, pattern) {
+  const parts = String(raw || '').split(/([|\n\r]+)/);   // pattern, separator, pattern...
+  let out = '', sep = null;
+  for (let i = 0; i < parts.length; i += 2) {
+    const text = parts[i].trim();
+    // The separator before a removed pattern goes to the next one kept.
+    if (sep === null) sep = i ? parts[i - 1] : '';
+    if (!text || text === pattern) continue;
+    out += (out ? sep : '') + text;
+    sep = null;
+  }
+  return out;
 }
 
 // What a right-click did to the filter, said in the status bar with the way back.
@@ -780,6 +800,7 @@ function filterNote(text, kind, pattern, did) {
 }
 
 async function toggleExcludeTemp(idx) {
+  if (state.busy) return;
   state.stats = await API.toggleActive(Array.isArray(idx) ? idx : [idx]);
   afterEdit();
   await dropScopeIfEmpty();
@@ -812,9 +833,10 @@ function removeMenu() {
     `<div class="ctx-it pat-it" data-k="${k}" data-p="${esc(p)}"><span class="lbl"><code>${esc(p)}</code></span></div>`).join('');
   const ex = list('exclude', 'unexclude'), inc = list('include', 'uninclude');
   if (!ex && !inc) return '';
+  const off = state.busy ? ' off' : '';
   return `<div class="ctx-sep"></div>` +
-    (ex ? `<div class="ctx-it">${CTX_SQ}<span class="lbl">Remove from the exclude filter</span><span class="sub-arrow">▶</span><div class="ctx-sub"><div class="ctx-head">Stop excluding…</div>${ex}</div></div>` : '') +
-    (inc ? `<div class="ctx-it">${CTX_SQ}<span class="lbl">Remove from the include filter</span><span class="sub-arrow">▶</span><div class="ctx-sub"><div class="ctx-head">Stop keeping only…</div>${inc}</div></div>` : '');
+    (ex ? `<div class="ctx-it${off}">${CTX_SQ}<span class="lbl">Remove from the exclude filter</span><span class="sub-arrow">▶</span><div class="ctx-sub"><div class="ctx-head">Stop excluding…</div>${ex}</div></div>` : '') +
+    (inc ? `<div class="ctx-it${off}">${CTX_SQ}<span class="lbl">Remove from the include filter</span><span class="sub-arrow">▶</span><div class="ctx-sub"><div class="ctx-head">Stop keeping only…</div>${inc}</div></div>` : '');
 }
 
 function openCtx(x, y, r) {
@@ -841,11 +863,13 @@ function openCtx(x, y, r) {
   const m = document.createElement('div');
   m.id = 'ctx-menu';
   m.className = 'ctx';
+  // Greyed during a run (see addFilterPattern).
+  const busy = state.busy ? ' off' : '';
   m.innerHTML = reveal +
-    `<div class="ctx-it" data-k="temp">${r.active ? CTX_SQ : CTX_SQ_CHK}<span class="lbl">Exclude temporarily</span><span class="key">Space</span></div>` +
+    `<div class="ctx-it${busy}" data-k="temp">${r.active ? CTX_SQ : CTX_SQ_CHK}<span class="lbl">Exclude temporarily</span><span class="key">Space</span></div>` +
     `<div class="ctx-sep"></div>` +
-    `<div class="ctx-it">${CTX_OK}<span class="lbl">Keep: add to the include filter</span><span class="sub-arrow">▶</span><div class="ctx-sub"><div class="ctx-head">Keep, from now on…</div>${sub('include')}</div></div>` +
-    `<div class="ctx-it">${CTX_KO}<span class="lbl">Skip: add to the exclude filter</span><span class="sub-arrow">▶</span><div class="ctx-sub"><div class="ctx-head">Skip, from now on…</div>${sub('exclude')}</div></div>` +
+    `<div class="ctx-it${busy}">${CTX_OK}<span class="lbl">Keep: add to the include filter</span><span class="sub-arrow">▶</span><div class="ctx-sub"><div class="ctx-head">Keep, from now on…</div>${sub('include')}</div></div>` +
+    `<div class="ctx-it${busy}">${CTX_KO}<span class="lbl">Skip: add to the exclude filter</span><span class="sub-arrow">▶</span><div class="ctx-sub"><div class="ctx-head">Skip, from now on…</div>${sub('exclude')}</div></div>` +
     removeMenu();
   document.body.appendChild(m);
 
@@ -854,7 +878,7 @@ function openCtx(x, y, r) {
   m.style.left = Math.min(x, window.innerWidth - rct.width - 8) + 'px';
   m.style.top  = Math.min(y, window.innerHeight - rct.height - 8) + 'px';
   for (const sub of m.querySelectorAll('.ctx-sub')) {
-    sub.parentElement.addEventListener('mouseenter', () => placeSub(sub));
+    sub.parentElement.addEventListener('mouseenter', () => { if (!sub.parentElement.classList.contains('off')) placeSub(sub); });
   }
 
   m.addEventListener('click', async e => {
@@ -862,7 +886,7 @@ function openCtx(x, y, r) {
     if (!it) return;
     e.stopPropagation();
     closeCtx();
-    if (it.classList.contains('off')) return;
+    if (it.classList.contains('off') || (it.closest('.ctx-it.off'))) return;
     if (it.dataset.k === 'rv-left')       await revealNode(r.idx, 'left');
     else if (it.dataset.k === 'rv-right') await revealNode(r.idx, 'right');
     else if (it.dataset.k === 'temp')     await toggleExcludeTemp(r.batch && r.batch.length > 1 ? r.batch : r.idx);
@@ -1220,6 +1244,50 @@ async function doCompare() {
   // Lock files nobody cleared. The comparison found them for free — it lists
   // the root of every base folder anyway.
   noteStaleLocks(res.staleLocks || []);
+}
+
+// (1.1.5) After a change of filter. A filter that only narrows the one the
+// comparison on screen was made with (an exclusion added, Finder or Office
+// files turned on...) is applied to it by the engine, without reading the
+// folders again: on an FTP server that took minutes. Anything else, or no
+// comparison to start from, compares again.
+async function compareAfterFilter() {
+  if (state.busy) return;
+  uiToJob();
+  if (!state.stats || !state.comparedPairs) return doCompare();
+  const comparedPairs = pairsKey(completePairs());
+  const comparedPlan  = planKeyOf(state.job);
+  // Locked while the engine works, like a comparison: nothing may be
+  // synchronized from the plan being replaced.
+  state.busy = 'compare';
+  lockPlan(true);
+  $('btn-compare').disabled = true;
+  $('btn-sync').disabled = true;
+  let res = null;
+  try { res = await API.refilter(state.job); } catch (_) { res = null; }
+  if (!res || !res.ok || !res.refiltered) { state.busy = null; setBusyUi(false); return doCompare(); }
+  try {
+    // The row numbers changed: what pointed at the old ones goes.
+    state.selIdx = null;
+    state.view.scope = null;
+    state.ovOpen.clear();
+    clearOvSel();
+    renderScopeBar();
+    cmpClear();
+    state.stats = res.stats;
+    state.comparedPairs = comparedPairs;
+    state.planStale = false;
+    state.comparedPlan  = comparedPlan;
+    state.view.onlyOperation = '';
+    state.view.onlyCategory  = '';
+    renderStats();
+    await refreshGrid(true);
+    await refreshOverview();
+  } finally {
+    state.busy = null;
+    setBusyUi(false);
+  }
+  renderAutoUi();
 }
 
 // ── A folder the job names that is not there ───────────────────────────────
@@ -1675,6 +1743,7 @@ function startRunUi(title) {
   state.paused = false;
   state.speeds = [];
   state.runPass = 'copy';
+  state.runRetry = false;
   state.lastWillVerify = undefined;
   setBusyUi(true, title, true);
   $('pb-title').textContent = runTitle('copy', false);
@@ -1968,15 +2037,16 @@ API.onSyncProgress(p => {
   // the engine saw the click arrives with paused:false and used to switch the
   // strip back to running while the button said RESUME.
   const paused = !!(p.paused || state.paused);
-  title.textContent = runTitle(p.pass, paused, !!p.retry);
+  state.runRetry = !!p.retry;
+  title.textContent = runTitle(p.pass, paused, state.runRetry);
   bar.classList.toggle('paused', paused);
-  // (1.1.4) A retry waits several seconds with nothing moving: the strip says
-  // which file, which attempt and how long (Manuel López stopped a run that
-  // looked frozen).
+  // A retry waits several seconds with nothing moving: the strip says which
+  // file, which attempt and how long, or the run looks frozen.
   bar.classList.toggle('retrying', !!(p.retry && !paused));
   if (p.retry) {
     // The attempt first: a long path is cut at the end of the line.
-    $('pb-file').textContent = `Attempt ${p.retry.attempt + 1} of ${p.retry.max + 1} in ${p.retry.seconds} s: ${p.retry.label}`;
+    const secs = p.retry.until ? Math.max(0, Math.ceil((p.retry.until - Date.now()) / 1000)) : p.retry.seconds;
+    $('pb-file').textContent = `Attempt ${p.retry.attempt + 1} of ${p.retry.max + 1} in ${secs} s: ${p.retry.label}`;
   }
   // The colour comes from --pb-color on the strip (green, blue while reading
   // back, grey when paused) — not from an inline style that would outlast it.
@@ -2337,9 +2407,15 @@ function bind() {
   });
   $('btn-verify').addEventListener('click', doVerify);
   $('btn-settings').addEventListener('click', () => {
-    jobToUi(); $('ov-settings').classList.add('open');
+    jobToUi();
+    settingsTab('job');
+    // (1.1.5) The button says what it does: the job's file is written when it
+    // has one; an untitled job has none yet, so its settings are applied.
+    $('set-close').textContent = state.jobPath ? 'Save & close' : 'Apply & close';
+    $('ov-settings').classList.add('open');
   });
-  $('set-close').addEventListener('click', () => { uiToJob(); $('ov-settings').classList.remove('open'); persist(); });
+  $('set-close').addEventListener('click', () => closeSettings(true));
+  for (const t of document.querySelectorAll('#ov-settings .st-tab')) t.addEventListener('click', () => settingsTab(t.dataset.tab));
   // (0.8.9) The renames are planned by the comparison: a plan made with the
   // other setting must not be run. (0.9.0) Same for every setting that shapes
   // the plan (move detection, date repair, filters, custom directions).
@@ -2380,7 +2456,7 @@ function bind() {
     $('ov-filter').classList.remove('open');
     renderFilterBtn();
     persist();
-    if (state.stats && filterKey() !== before) await doCompare();
+    if (state.stats && filterKey() !== before) await compareAfterFilter();
   });
 
   $('scope-clear').addEventListener('click', async () => {
@@ -2425,7 +2501,7 @@ function bind() {
     // Said at once: a paused engine sends no progress, so waiting for it to
     // say "paused" would leave the strip beating over a run that is stopped.
     $('bottombar').classList.toggle('paused', state.paused);
-    $('pb-title').textContent = runTitle(state.runPass, state.paused);
+    $('pb-title').textContent = runTitle(state.runPass, state.paused, state.runRetry);
     $('pb-title').style.color = '';     // the strip's colour rules take it from here
     if (state.paused) await API.syncPause(); else await API.syncResume();
   });
@@ -2590,6 +2666,9 @@ function bind() {
 
   // Auto-sync: the switch asks for confirmation before arming; disarming is
   // immediate (stopping an automatism should never need a dialog).
+  // (1.1.5) Read back, from the toolbar: kept with the job at once. It changes
+  // no comparison (only what the run does after copying).
+  $('readback-switch').addEventListener('change', () => { uiToJob(); persist(); });
   $('auto-switch').addEventListener('change', e => {
     uiToJob();
     if (e.target.checked) {
@@ -2635,7 +2714,8 @@ function bind() {
       // real work on close (settings persist, the filter modal re-compares,
       // the verify modal cancels the run) — just hiding them would skip that.
       const ESC_CLOSE = {
-        'ov-settings': 'set-close',
+        // (1.1.5) Escape applies the settings and leaves, without writing the file.
+        'ov-settings': () => closeSettings(false),
         // (0.8.8) Filter: Escape leaves WITHOUT applying, wherever the focus is.
         'ov-filter'  : cancelFilter,
         'ov-confirm' : 'cf-cancel',   'ov-summary': 'sum-close',
@@ -2685,9 +2765,9 @@ function swapAllPairs() {
   onPathChanged();
 }
 
-// The choices made in the Settings window, which a new job takes from the job
-// that is open (1.1.3, Stefan Girres: read-back off came back on with every
-// new job). The folders, the mode and the filters stay the new job's own.
+// The choices made in the Settings window and with the Read back switch,
+// which a new job (NEW, or what CLOSE leaves) takes from the job that was open.
+// The folders, the mode and the filters stay the new job's own.
 const JOB_SETTINGS = {
   compare: ['detectMoves', 'detectMovesByName'],
   sync: ['readBack', 'writeChecksumList', 'lockFolders', 'failSafe', 'preserveTimes', 'fixDatesOnly',
@@ -2718,17 +2798,23 @@ async function newJob() {
   await refreshOverview();
 }
 
-async function openJob() {
-  if (state.busy) return;   // (0.8.8)
-  const res = await API.jobOpen();
-  if (!res) return;
+// Puts a job just opened from its file on screen (Open, the JOBS list,
+// Companion): unfiltered, in the JOBS list, its folders checked.
+function showOpenedJob(res) {
   state.job = res.job;
   state.jobPath = res.path;
-  cmp.view = 'all'; cmp.cat = '';   // (0.9.7) another job opens unfiltered
+  cmp.view = 'all'; cmp.cat = '';
   if (res.recent) state.recent = res.recent;
   jobToUi();
   renderRecent();
   onPathChanged();
+}
+
+async function openJob() {
+  if (state.busy) return;   // (0.8.8)
+  const res = await API.jobOpen();
+  if (!res) return;
+  showOpenedJob(res);
   // Opening a saved job is the moment to find out that one of the folders it
   // names is not there any more — while it costs one dialog, rather than after
   // a comparison has planned a full copy into it.
@@ -2744,6 +2830,26 @@ async function saveJobFile(as) {
     if (res.recent) state.recent = res.recent;
     renderJobTitle();
     renderRecent();
+  }
+  return res;
+}
+
+// (1.1.5) The Settings window: its two tabs, and how it closes. `save`
+// writes the job's .syncto file when it has one (Save & close).
+function settingsTab(tab) {
+  for (const t of document.querySelectorAll('#ov-settings .st-tab')) {
+    const on = t.dataset.tab === tab;
+    t.classList.toggle('on', on);
+    t.setAttribute('aria-selected', on ? 'true' : 'false');
+  }
+  for (const p of document.querySelectorAll('#ov-settings .st-pane')) p.style.display = p.dataset.pane === tab ? '' : 'none';
+}
+async function closeSettings(save) {
+  uiToJob();
+  $('ov-settings').classList.remove('open');
+  persist();
+  if (save && state.jobPath && !(await saveJobFile(false))) {
+    $('status-note').textContent = `The settings apply, but the job file could not be saved: ${state.jobPath}`;
   }
 }
 
@@ -2772,7 +2878,8 @@ async function closeJob(p) {
 
   if (res && res.closedCurrent) {
     autoStop();
-    state.job = await API.jobNew();
+    uiToJob();
+    state.job = carrySettings(state.job, await API.jobNew());
     state.jobPath = '';
     jobToUi();
     state.stats = null; state.total = 0; state.comparedPairs = null;
@@ -2865,12 +2972,7 @@ async function openRecent(p) {
     showError('Could not open that job', `${res.path}\n\n${res.message}`);
     return;
   }
-  state.job = res.job;
-  state.jobPath = res.path;
-  cmp.view = 'all'; cmp.cat = '';   // (0.9.7) another job opens unfiltered
-  jobToUi();
-  renderRecent();
-  onPathChanged();
+  showOpenedJob(res);
   await offerRelinkForJob();
 }
 
@@ -3304,6 +3406,8 @@ function renderAutoUi() {
   const count = `${m}:${String(s).padStart(2, '0')}`;
 
   $('auto-switch').checked = on;
+  // Armed, the runs were promised with read-back as it was then: disarm to change it.
+  $('readback-switch').disabled = on;
   $('auto-count').textContent = on ? (state.busy ? 'running' : count) : '';
   document.body.classList.toggle('autosync', on);
 
@@ -4390,57 +4494,86 @@ function cmpMenu(idx, x, y) {
 // after the comparison when it would delete more than half of the files.
 const REMOTE_BY = 'Companion';
 // Dialogs that wait for someone's decision: a remote run never goes past one.
-const REMOTE_BLOCKING = ['ov-confirm', 'ov-cmpcopy', 'ov-relink', 'ov-auto', 'ov-after', 'ov-filter', 'ov-settings', 'ov-server', 'update-ov'];
+const REMOTE_BLOCKING = ['ov-confirm', 'ov-cmpcopy', 'ov-relink', 'ov-auto', 'ov-after', 'ov-filter', 'ov-settings', 'ov-server'];
+function remoteWaiting() {
+  if (vfBusy) return 'syncto is verifying a folder.';
+  const open = REMOTE_BLOCKING.find(id => { const e = document.getElementById(id); return e && e.classList.contains('open'); });
+  return open ? 'syncto is waiting for an answer on screen.' : '';
+}
 
-// Would this plan remove too much to run with nobody looking? (Noar: more than
-// half of the files, and at least ten.)
-function remoteGuard(s) {
-  if (!s) return 'The comparison did not finish.';
-  const removals = (s.deleteLeft || 0) + (s.deleteRight || 0);
-  if (removals >= 10 && removals > 0.5 * (s.rows || 0)) {
-    return `It would remove ${removals} of ${s.rows} items. Check the folders in syncto: a run started from Companion never removes more than half.`;
+// What a run of `j` depends on (its folders, compare and sync settings), in a
+// form in which two copies of one job compare equal.
+function runShape(j) {
+  const sorted = v => Array.isArray(v) ? v.map(sorted)
+    : (v && typeof v === 'object') ? Object.keys(v).sort().filter(k => v[k] !== undefined).reduce((o, k) => { o[k] = sorted(v[k]); return o; }, {})
+    : v;
+  const c = ensurePairs(JSON.parse(JSON.stringify(j || {})));
+  return JSON.stringify(sorted({ pairs: c.pairs.map(p => [p.left, p.right]), compare: c.compare || {}, sync: c.sync || {} }));
+}
+
+// Why the job on screen must not be replaced or run as it is: an untitled job
+// with folders in it, or a saved one changed since it was saved. A remote run
+// always runs the job as saved, and never loses what someone is typing.
+async function unsavedReason() {
+  uiToJob();
+  if (!state.jobPath) {
+    const typed = ensurePairs(state.job).pairs.some(p => p.left || p.right);
+    return typed ? 'An untitled job is open in syncto: save it or close it first.' : '';
+  }
+  const saved = await API.jobRead(state.jobPath);
+  if (!saved || saved.error || runShape(saved.job) !== runShape(state.job)) {
+    return 'The job open in syncto has changes that are not saved: save them first.';
   }
   return '';
 }
 
 async function remoteRun({ req, file, action }) {
-  const ack = r => API.remoteAck(req, r);
-  if (state.busy) return ack({ ok: false, error: 'syncto is busy.' });
-  const waiting = REMOTE_BLOCKING.find(id => { const e = document.getElementById(id); return e && e.classList.contains('open'); });
-  if (waiting) return ack({ ok: false, error: 'syncto is waiting for an answer on screen.' });
-  // A summary or an error card left open is closed: it only told something.
-  $('ov-summary').classList.remove('open');
-  if (state.jobPath !== file) {
-    const res = await API.jobOpenPath(file);
-    if (!res || res.error) return ack({ ok: false, error: (res && res.message) || 'The job file could not be opened.' });
-    if (res.recent) state.recent = res.recent;
-    state.job = res.job;
-    state.jobPath = res.path;
-    cmp.view = 'all'; cmp.cat = '';
-    jobToUi();
-    renderRecent();
-    onPathChanged();
-  }
-  if (!completePairs().length) return ack({ ok: false, error: 'This job has no complete folder pair.' });
-  if (action === 'sync' && isCompareOnly()) return ack({ ok: false, error: 'This job is in COMPARE mode: it never synchronizes.' });
-  ack({ ok: true });
-
-  const name = state.job.name || 'Untitled';
-  const report = (result, message) => { API.remoteReport({ result, job: name, message }); $('status-note').textContent = message; };
+  if (state.busy || state.remoteRun) return API.remoteAck(req, { ok: false, error: 'syncto is busy.' });
+  // Set before the first wait: a second request in the meantime is refused.
   state.remoteRun = true;
+  let accepted = false;
+  const name = () => state.job.name || 'Untitled';
+  const report = (result, message) => { API.remoteReport({ result, job: name(), message }); $('status-note').textContent = message; };
   try {
-    await API.remoteStarted(name, REMOTE_BY);
+    const refuse = async error => { await API.remoteAck(req, { ok: false, error }); };
+    const waiting = remoteWaiting();
+    if (waiting) return refuse(waiting);
+    if (state.auto.tick && state.jobPath !== file) return refuse('Auto-sync is armed on the job open in syncto.');
+    const unsaved = await unsavedReason();
+    if (unsaved) return refuse(unsaved);
+    // Cards that only told something are closed.
+    $('ov-summary').classList.remove('open');
+    const upd = document.getElementById('update-ov');
+    if (upd) upd.remove();
+    if (state.jobPath !== file) {
+      const res = await API.jobOpenPath(file);
+      if (!res || res.error) return refuse((res && res.message) || 'The job file could not be opened.');
+      showOpenedJob(res);
+    }
+    if (!completePairs().length) return refuse('This job has no complete folder pair.');
+    if (action === 'sync' && isCompareOnly()) return refuse('This job is in COMPARE mode: it never synchronizes.');
+    // Companion may have stopped waiting (no answer in 15 s): then nothing runs.
+    accepted = await API.remoteAck(req, { ok: true });
+    if (!accepted) return;
+
+    await API.remoteStarted(name(), REMOTE_BY);
     await doCompare();
     $('status-note').textContent = `Compared from ${REMOTE_BY}.`;
     if (!state.comparedPairs || !state.stats) return report('refused', 'Started from Companion: the comparison did not finish.');
     if (action === 'compare') return report('compared', `Compared from ${REMOTE_BY}: ${fmtCount(state.stats.filesToProcess, true)} item${state.stats.filesToProcess === 1 ? '' : 's'} to process.`);
-    const stop = remoteGuard(state.stats);
-    if (stop) return report('refused', `Not synchronized from ${REMOTE_BY}. ${stop}`);
     if (!state.stats.filesToProcess) return report('nothing', `Started from ${REMOTE_BY}: both sides already match.`);
-    await API.remoteStarted(name, REMOTE_BY);
+    uiToJob();
+    const stop = await API.remoteCheck(state.job);
+    if (stop) return report('refused', `Not synchronized from ${REMOTE_BY}. ${stop}`);
+    await API.remoteStarted(name(), REMOTE_BY);
+    // Checked again after the last wait: a dialog opened during the
+    // comparison (Settings, the confirmation) holds values nobody applied.
+    const late = remoteWaiting();
+    if (late) return report('refused', `Not synchronized from ${REMOTE_BY}: ${late}`);
     await doSync();
   } finally {
     state.remoteRun = false;
+    if (accepted) API.remoteDone();
   }
 }
 
@@ -4460,6 +4593,8 @@ function renderRemoteUi(r) {
   $('st-remote-en').checked = r.enabled;
   $('st-remote-lan').checked = r.lan;
   $('st-remote-port').value = r.port;
+  $('st-remote-allow').value = r.allow || '';
+  $('st-remote-allow-row').style.display = r.lan ? '' : 'none';
   $('st-remote-key').textContent = r.key || '';
   const on = r.enabled && r.running;
   $('st-remote-detail').style.display = r.enabled ? '' : 'none';
@@ -4474,6 +4609,7 @@ function bindRemote() {
   $('st-remote-en').addEventListener('change', () => save({ enabled: $('st-remote-en').checked }));
   $('st-remote-lan').addEventListener('change', () => save({ lan: $('st-remote-lan').checked }));
   $('st-remote-port').addEventListener('change', () => save({ port: Number($('st-remote-port').value) }));
+  $('st-remote-allow').addEventListener('change', () => save({ allow: $('st-remote-allow').value }));
   $('st-remote-newkey').addEventListener('click', () => save({ renewKey: true }));
   $('st-remote-copy').addEventListener('click', async () => {
     const ok = await API.copyText($('st-remote-key').textContent);

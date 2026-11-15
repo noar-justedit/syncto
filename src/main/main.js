@@ -207,6 +207,8 @@ function createWindow() {
   win.loadFile(OWN_PAGE);
   win.once('ready-to-show', () => { win.show(); if (DEV) win.webContents.openDevTools({ mode: 'detach' }); });
   win.webContents.once('did-finish-load', () => { setTimeout(checkForUpdate, 1500); });
+  // A window that loads again has no remote run in progress.
+  win.webContents.on('did-start-loading', () => { remote.active = false; });
 
   // Resizing fired this on EVERY pixel, and Prefs.save serialises the whole
   // configuration and writes it synchronously — in the same process that runs
@@ -325,6 +327,10 @@ app.whenReady().then(() => {
   startRemote().catch(() => {});
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
+
+// The event streams to Companion end cleanly, so the module knows syncto is
+// gone and starts trying to reconnect.
+app.on('before-quit', () => { if (remote.srv) { const s = remote.srv; remote.srv = null; s.close().catch(() => {}); } });
 
 app.on('window-all-closed', async () => {
   if (session) { try { await session.close(); } catch (_) {} }
@@ -523,11 +529,14 @@ ipcMain.handle('after-sync', async (_, action, clean) => {
 // runs a remote job the way auto-sync does: compare, then synchronize with no
 // dialog, refused when it would delete more than half of the files. What runs
 // is said on screen. Off by default; this machine only unless asked.
-const { createRemoteServer, newKey: newRemoteKey, jobId } = require('./remote');
-const remote = { srv: null, port: 0, error: '', progress: null, last: null, job: '', by: '', pending: new Map(), seq: 0, sentAt: 0, timer: null };
+const { createRemoteServer, newKey: newRemoteKey, jobId, parseAllow } = require('./remote');
+const remote = { srv: null, port: 0, error: '', progress: null, last: null, job: '', by: '', pending: new Map(), seq: 0, sentAt: 0, timer: null, starting: Promise.resolve() };
 
+// The saved jobs, from the recent list. Not checked on disk: a share that
+// stopped answering would block the app (and a running run) at every request;
+// a job that is gone is refused when it is asked for.
 function remoteJobs() {
-  return (prefs.data.recent || []).filter(r => r && r.path && fs.existsSync(r.path))
+  return (prefs.data.recent || []).filter(r => r && r.path)
     .map(r => ({ id: jobId(r.path), name: r.name, file: r.path }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -564,6 +573,9 @@ function remoteResult(r) { remote.last = Object.assign({ at: new Date().toISOStr
 // Asks the window to run a job; it answers at once whether it accepted.
 function remoteRun(file, action) {
   if (engineJob) return Promise.resolve({ ok: false, error: `${engineJob} is running: wait for it to finish.` });
+  // One request at a time: the window takes a while to open the job, and a
+  // second press in that time would run the wrong job, or the same one twice.
+  if (remote.pending.size) return Promise.resolve({ ok: false, error: 'syncto is already starting a job.' });
   if (!win || win.isDestroyed()) return Promise.resolve({ ok: false, error: 'The syncto window is closed.' });
   const req = ++remote.seq;
   return new Promise(resolve => {
@@ -572,13 +584,33 @@ function remoteRun(file, action) {
     send('remote-run', { req, file, action });
   });
 }
+// What stops a run started from Companion once the folders are compared:
+// too many removals on one pair, or files deleted permanently where the window
+// would have asked first (no trash). Asked by the window before it starts the
+// run, and again by the run itself.
+async function remoteRefusal(job) {
+  const stop = session.unattendedRefusal();
+  if (stop) return stop;
+  try {
+    const noTrash = (await session.preflight(job, { trashItem })).filter(w => w.noTrash);
+    if (noTrash.length) return `It would delete files permanently (no trash on ${noTrash[0].path}). Run it from syncto, which asks first.`;
+  } catch (err) { return err.message || String(err); }
+  return '';
+}
+
 function remoteControl(act) {
   if (!engineJob) return Promise.resolve({ ok: false, error: 'Nothing is running.' });
   send('remote-control', { act });
   return Promise.resolve({ ok: true });
 }
 
-async function startRemote() {
+// One start at a time: turning the server on then off quickly must leave it
+// off, never with a server still listening that the settings say is off.
+function startRemote() {
+  remote.starting = remote.starting.then(startRemoteNow, startRemoteNow);
+  return remote.starting;
+}
+async function startRemoteNow() {
   if (remote.srv) { try { await remote.srv.close(); } catch (_) {} remote.srv = null; remote.port = 0; }
   remote.error = '';
   const cfg = prefs.remoteConfig();
@@ -591,7 +623,8 @@ async function startRemote() {
     stop: () => remoteControl('stop'),
     pause: () => remoteControl('pause'),
     resume: () => remoteControl('resume'),
-  }, { port: cfg.port, lan: cfg.lan });
+    allow: () => { const c = prefs.remoteConfig(); return c.lan ? parseAllow(c.allow) : []; },
+  }, { port: cfg.port, lan: cfg.lan, onError: err => { remote.error = err.message || String(err); } });
   try { remote.port = await srv.listen(); remote.srv = srv; }
   catch (err) { remote.error = err.code === 'EADDRINUSE' ? `Port ${cfg.port} is already used by another program: choose another.` : (err.message || String(err)); }
 }
@@ -612,11 +645,20 @@ ipcMain.handle('remote-save', async (_, patch) => {
   await startRemote();
   return remoteForUi();
 });
+// Answers whether the request was still waiting: one Companion already gave
+// up on (no answer in 15 s) must not run anyway.
 ipcMain.handle('remote-ack', (_, req, r) => {
   const done = remote.pending.get(Number(req));
-  if (done) { remote.pending.delete(Number(req)); done(r && typeof r === 'object' ? { ok: !!r.ok, error: r.error ? String(r.error) : '' } : { ok: false }); }
+  if (!done) return false;
+  remote.pending.delete(Number(req));
+  const ok = !!(r && typeof r === 'object' && r.ok);
+  // From here until the window says it is done, a run is a remote one.
+  if (ok) remote.active = true;
+  done(r && typeof r === 'object' ? { ok, error: r.error ? String(r.error) : '' } : { ok: false });
   return true;
 });
+ipcMain.handle('remote-done', () => { remote.active = false; return true; });
+ipcMain.handle('remote-check', (_, job) => (remote.active ? remoteRefusal(job) : ''));
 // The window took a remote job, or refused it after the comparison (too many
 // deletions, nothing to do): said to Companion as the last result.
 ipcMain.handle('remote-started', (_, job, by) => { remote.job = String(job || ''); remote.by = String(by || ''); remote.progress = null; remoteBroadcast(true); return true; });
@@ -744,6 +786,12 @@ ipcMain.handle('check-job-paths', async (_, job) => {
   catch (_) { return []; }
 });
 
+// Reads a job file without making it the open job (no recent list, no title):
+// to tell whether the job on screen still matches its file.
+ipcMain.handle('job-read', (_, p) => {
+  try { const job = loadJob(p); job.name = jobNameFromPath(p); return { job }; }
+  catch (err) { return { error: err.message || String(err) }; }
+});
 ipcMain.handle('job-new', () => { currentJobPath = ''; return defaultJob(); });
 
 // Closing a job takes it OUT of the list. It never touches the file on disk:
@@ -798,6 +846,7 @@ ipcMain.handle('job-open-path', async (_, p) => {
 });
 
 ipcMain.handle('job-save', async (_, job, saveAs) => {
+  if (!job || typeof job !== 'object') return null;
   let target = currentJobPath;
   if (saveAs || !target) {
     const res = await dialog.showSaveDialog(win, {
@@ -855,6 +904,18 @@ ipcMain.handle('compare', (_, job) => exclusive('A comparison', async () => {
   }
 }));
 
+// (1.1.5) A filter that only narrows, applied to the comparison on screen
+// without reading the folders again. { refiltered: false } asks the window to
+// compare again.
+ipcMain.handle('refilter', (_, job) => exclusive('Another operation', async () => {
+  try {
+    const res = session.refilter(job);
+    return res ? { ok: true, refiltered: true, ...res } : { ok: true, refiltered: false };
+  } catch (err) {
+    return { ok: true, refiltered: false, error: err.message || String(err) };
+  }
+}));
+
 ipcMain.handle('compare-cancel', () => { tokens.compare.cancelled = true; return true; });
 
 ipcMain.handle('get-rows', (_, offset, limit, view) => session.rows(offset, limit, view));
@@ -902,6 +963,10 @@ ipcMain.handle('sync', (_, job) => exclusive('A synchronization', async () => {
   tokens.sync.paused = false;
   holdSleep(true);
   try {
+    if (remote.active) {
+      const stop = await remoteRefusal(job);
+      if (stop) throw new Error(`Not synchronized from Companion. ${stop}`);
+    }
     const res = await session.sync(job, {
       token: tokens.sync,
       trashItem,

@@ -2,7 +2,7 @@
 
 Starts synchronizations in [syncto](https://github.com/noar-justedit/syncto) and shows their state on the buttons.
 
-**In syncto** (1.1.0 or later): Settings › Remote control, turn on **Companion**. If Companion runs on another computer, also turn on **Other machines**. Copy the address, the port and the key shown there into this connection.
+**In syncto** (1.1.0 or later): Settings › Remote control, turn on **Companion**. If Companion runs on another computer, also turn on **Other machines** (and, on a shared network, enter this computer's address under **Allowed addresses**). Copy the address, the port and the key shown there into this connection.
 
 **Actions**
 - *Synchronize a job*: compares, then synchronizes a job saved in syncto (the jobs listed on the left of syncto).
@@ -15,4 +15,4 @@ Starts synchronizations in [syncto](https://github.com/noar-justedit/syncto) and
 
 **Presets**: one button per job (green while it runs, with its progress), Stop, Status.
 
-A run started from Companion is refused when it would remove more than half of the files: check the folders in syncto first. syncto has to be open for Companion to reach it.
+A run started from Companion is refused when it would remove more than half of the files of a folder pair, or when the job open in syncto has unsaved changes: check syncto first. syncto has to be open for Companion to reach it.

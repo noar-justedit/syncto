@@ -46,6 +46,7 @@
 const posix = require('path').posix;
 const ftp = require('basic-ftp');
 const { RemoteError } = require('./errors');
+const { isSafeName } = require('../../core/relpath');
 const { enterActiveMode } = require('./active');
 const { makePassive } = require('./passive');
 
@@ -271,6 +272,9 @@ class FtpRemote {
   //    is refused from then on.
   _checkCertificate(socket) {
     const host = this.opts.host, port = this.port;
+    // Without a rule for certificates, any server would be accepted unseen.
+    // The app installs one at start; anything else must too.
+    if (!certPolicy) throw new RemoteError('No certificate check is set up: nothing was sent.', { code: 'NO_POLICY', fatal: true });
     const cert = socket && socket.getPeerCertificate ? socket.getPeerCertificate() : null;
     const fp = certFingerprint(cert);
     const known = certPolicy && certPolicy.known ? certPolicy.known(host, port) : null;
@@ -352,7 +356,9 @@ class FtpRemote {
     const d = normalize(dir);
     return this._q(async () => {
       const raw = await this.client.list(d);
-      const out = raw.filter(i => i.name && i.name !== '.' && i.name !== '..' && !/[\/\\\0]/.test(i.name)).map(i => this._map(i));
+      // The server chooses these names: one that is a path (a separator,
+      // '..', a NUL) would be written wherever it points. The rule is relpath's.
+      const out = raw.filter(i => isSafeName(i.name)).map(i => this._map(i));
       if (out.some(e => e._naive)) {
         let off = null;
         try { off = await this._tzOffset(d, out); } catch (_) {}

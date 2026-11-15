@@ -35,11 +35,20 @@
 const posix = require('path').posix;
 const { Readable, Writable, PassThrough } = require('stream');
 const { FtpRemote } = require('./ftp/client');
+const { scratchPath } = require('./longname');
 const { RemoteError } = require('./ftp/errors');
 
 const DEFAULT_PORT = { ftp: 21, ftps: 21, 'ftps-implicit': 990 };
 const SCHEME = { ftp: 'ftp', ftps: 'ftpes', 'ftps-implicit': 'ftps' };
 const MAX_TRANSFER_CONNECTIONS = 4;
+// (1.1.5) Folders listed at once, as filo does since its 0.9.9: the control
+// connection and up to this many more, opened only when listings queue up
+// (a comparison walking a tree), and closed again soon after the last one so
+// they do not hold the server's connection slots during the run.
+const LIST_EXTRA = 2;
+const LIST_IDLE_MS = 3000;
+// A server found to allow a single connection is asked again after this long.
+const CTL_ONLY_RECHECK_MS = 60000;
 const STREAM_BUFFER = 1024 * 1024;
 // (0.9.4) A connection silent this long gets a NOOP (servers drop idle ones).
 const KEEPALIVE_MS = 30000;
@@ -69,6 +78,8 @@ class FtpFs {
     this.closing = false;
     this._entered = new Map();     // folder → time it was last found enterable
     this._dirs = null;             // folders known to exist on this connection
+    this.listers = [];             // (1.1.5) extra connections for listings: { remote, busy }
+    this._ctlListing = 0;          // listings running on the control connection
   }
 
   get port() { return Number(this.opts.port) || DEFAULT_PORT[this.protocol] || 21; }
@@ -123,6 +134,8 @@ class FtpFs {
         const r = this._remote();
         try { await r.connect(); }
         catch (e) { if (e.fatal || e.hostKeyChanged) this._deadForGood = e; throw e; }
+        // Closed while it was reconnecting: the new connection goes too.
+        if (this.closing) { try { r.close(); } catch (_) {} throw new Error('The FTP connection was closed.'); }
         const old = this.ctl;
         this.ctl = r;
         try { if (old) old.close(); } catch (_) {}
@@ -162,10 +175,14 @@ class FtpFs {
 
   async close() {
     this.closing = true;
+    if (this._reopening) { try { await this._reopening; } catch (_) {} }
     if (this._kaTimer) { clearInterval(this._kaTimer); this._kaTimer = null; }
     for (const w of (this._waiters || []).splice(0)) w();
-    const all = [this.ctl].concat(this.xfers.map(x => x.remote));
+    if (this._listIdle) { clearTimeout(this._listIdle); this._listIdle = null; }
+    for (const w of (this._listWaiters || []).splice(0)) w();
+    const all = [this.ctl].concat(this.xfers.map(x => x.remote), this.listers.map(l => l.remote));
     this.xfers = [];
+    this.listers = [];
     this.ctl = null;
     this._connectPromise = null;
     for (const r of all) { if (r) { try { await r.close(); } catch (_) {} } }
@@ -173,6 +190,7 @@ class FtpFs {
 
   // ── Transfer connections ────────────────────────────────────────────────
   async _lease() {
+    let freedRetry = false;
     for (;;) {
       if (this.closing) throw new Error('The FTP connection was closed.');
       this.xfers = this.xfers.filter(x => x.busy || x.remote.alive);
@@ -180,6 +198,9 @@ class FtpFs {
       if (x) { x.busy = true; return x; }
       // (0.9.4) A server that allows no second connection for this account:
       // transfers go over the control connection, one thing at a time.
+      // Asked again now and then: the connections the server lacked may have
+      // been held by another program, or by our own listings, for a while.
+      if (this._ctlOnly && Date.now() - this._ctlOnlyAt > CTL_ONLY_RECHECK_MS && !this._ctlOnlyBusy) this._ctlOnly = false;
       if (this._ctlOnly) {
         if (!this._ctlOnlyBusy) {
           this._ctlOnlyBusy = true;
@@ -189,6 +210,9 @@ class FtpFs {
         continue;
       }
       if (this.xfers.length < MAX_TRANSFER_CONNECTIONS) {
+        // Transfers come first: the extra listing connections that are not
+        // listing give their place on a server that limits connections.
+        const freed = this._dropIdleListers();
         const remote = this._remote();
         x = { remote, busy: true };
         this.xfers.push(x);
@@ -201,7 +225,32 @@ class FtpFs {
           // connections and a server limited to six failed files, to four
           // copied nothing.
           if (this.closing || err.fatal || err.hostKeyChanged) throw err;
-          if (!this.xfers.length) { this._ctlOnly = true; continue; }
+          if (!this.xfers.length) {
+            // Places just given back by listings: the server may take a
+            // moment to see those connections gone.
+            if ((freed || this._freedAt > Date.now() - 2000) && !freedRetry) {
+              freedRetry = true;
+              await new Promise(res => setTimeout(res, 700));
+              continue;
+            }
+            // Listings still hold the places: no more of them are opened, and
+            // the transfer waits for one to end instead of giving up its own
+            // connection for the rest of the session.
+            if (this.listers.length) {
+              this._noMoreListers = true;
+              // One that went idle meanwhile gives its place now; a busy one
+              // gives it when its listing ends (_unlister).
+              if (!this._dropIdleListers()) {
+                this._slotWanted = true;
+                await new Promise(res => (this._waiters = this._waiters || []).push(res));
+                this._slotWanted = false;
+              }
+              continue;
+            }
+            this._ctlOnly = true;
+            this._ctlOnlyAt = Date.now();
+            continue;
+          }
         }
       }
       await new Promise(res => (this._waiters = this._waiters || []).push(res));
@@ -277,8 +326,93 @@ class FtpFs {
 
   async exists(p) { return (await this.stat(p)) !== null; }
 
+  // ── Listings, several at once (1.1.5) ──────────────────────────────────
+  // The control connection takes one listing at a time; when more are asked
+  // for at once (the comparison reads folders ahead), up to LIST_EXTRA more
+  // connections are opened for them. A server that refuses one leaves the
+  // listings on the connections it has; a connection that falls has its
+  // listing taken over by the control connection.
+  async _lister() {
+    for (;;) {
+      if (this.closing) throw new Error('The FTP connection was closed.');
+      if (!this._ctlListing) {
+        // The connection first, then the count: a reconnection that fails
+        // must not leave the control connection marked as listing for good.
+        const remote = await this._c();
+        if (!this._ctlListing) { this._ctlListing++; return { ctl: true, remote }; }
+        continue;
+      }
+      this.listers = this.listers.filter(l => l.busy || l.remote.alive);
+      const free = this.listers.find(l => !l.busy);
+      if (free) { free.busy = true; return free; }
+      if (this.listers.length < LIST_EXTRA && !this._noMoreListers && this.ctl && this.ctl.alive) {
+        const l = { remote: this._remote(), busy: true };
+        this.listers.push(l);
+        try { await l.remote.connect(); return l; }
+        catch (err) {
+          this.listers = this.listers.filter(x => x !== l);
+          if (this.closing || err.fatal || err.hostKeyChanged) throw err;
+          this._noMoreListers = true;        // the server allows no more: one at a time
+        }
+      }
+      await new Promise(res => (this._listWaiters = this._listWaiters || []).push(res));
+    }
+  }
+
+  _unlister(l) {
+    if (l.ctl) this._ctlListing--;
+    else {
+      l.busy = false;
+      // A transfer is waiting for a place on the server: this one gives it.
+      if (!l.remote.alive || this._slotWanted) {
+        this.listers = this.listers.filter(x => x !== l);
+        if (l.remote.alive) { try { l.remote.close(); } catch (_) {} }
+        this._freedAt = Date.now();
+        const t = this._waiters && this._waiters.shift();
+        if (t) t();
+      }
+    }
+    const w = this._listWaiters && this._listWaiters.shift();
+    if (w) w();
+    // The extra connections close once no listing has been asked for
+    // LIST_IDLE_MS: the timer starts again at each listing that ends.
+    if (this._listIdle) { clearTimeout(this._listIdle); this._listIdle = null; }
+    if (this.listers.length) {
+      this._listIdle = setTimeout(() => { this._listIdle = null; this._dropIdleListers(); }, LIST_IDLE_MS);
+      if (this._listIdle.unref) this._listIdle.unref();
+    }
+  }
+
+  // Closes the extra listing connections that are not listing.
+  // Closes the extra listing connections that are not listing; says how many.
+  _dropIdleListers() {
+    const idle = this.listers.filter(x => !x.busy);
+    if (!idle.length) return 0;
+    this.listers = this.listers.filter(x => x.busy);
+    for (const x of idle) { try { x.remote.close(); } catch (_) {} }
+    this._freedAt = Date.now();
+    return idle.length;
+  }
+
   async readdir(p) {
-    const list = await (await this._c()).list(normalize(p));
+    const l = await this._lister();
+    let released = false;
+    const release = () => { if (!released) { released = true; this._unlister(l); } };
+    try {
+      return this._entries(await l.remote.list(normalize(p)));
+    } catch (err) {
+      // An extra connection that fell: the listing is asked again on the
+      // control connection, which reopens itself (its commands are queued, so
+      // this one waits its turn behind any listing already on it).
+      if (l.ctl || l.remote.alive || this.closing) throw err;
+      release();
+      return this._entries(await (await this._c()).list(normalize(p)));
+    } finally {
+      release();
+    }
+  }
+
+  _entries(list) {
     return list.map(e => {
       const m = this._map(e);
       const out = { name: e.name, type: m.type, size: m.size, mtime: m.mtime, id: null };
@@ -353,7 +487,7 @@ class FtpFs {
     } catch (e) {
       if (!(await this.exists(src)) || !(await this.exists(dst))) throw e;
     }
-    const parked = dst + '.syncto_old';
+    const parked = scratchPath(this, dst, '.syncto_old');   // short when the name is long
     try { await this.unlink(parked); } catch (_) {}
     await (await this._c()).rename(dst, parked);
     try {

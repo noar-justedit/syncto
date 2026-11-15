@@ -271,4 +271,30 @@ function resolveTime(unit, value, now) {
   return 0;
 }
 
-module.exports = { PathFilter, SoftFilter, normRel };
+// (1.1.5) Whether the compare settings `next` keep only part of what `prev`
+// let through, so a tree scanned with `prev` already holds everything `next`
+// keeps and can be filtered again without reading the folders: more exclude
+// patterns, fewer include patterns (any, after "*"), Finder files or Office
+// temp files turned on. Any other change, or Windows-safe names (an item is
+// then matched under several spellings), needs a new scan.
+const FILTER_KEYS = ['includeFilter', 'excludeFilter', 'skipFinderFiles', 'skipOfficeTemp'];
+function narrowsFilter(prev, next) {
+  if (!prev || !next) return false;
+  const rest = o => JSON.stringify(Object.keys(o).filter(k => !FILTER_KEYS.includes(k) && o[k] !== undefined).sort().map(k => [k, o[k]]));
+  if (rest(prev) !== rest(next)) return false;
+  if ((prev.safeNames || 'off') !== 'off') return false;
+  const items = s => new Set(String(s == null ? '' : s).split(/[|\n\r]+/).map(x => x.trim()).filter(Boolean));
+  const exP = items(prev.excludeFilter), exN = items(next.excludeFilter);
+  for (const x of exP) if (!exN.has(x)) return false;
+  const inP = items(prev.includeFilter), inN = items(next.includeFilter);
+  const all = s => !s.size || s.has('*');
+  if (!all(inP)) {
+    if (all(inN)) return false;
+    for (const x of inN) if (!inP.has(x)) return false;
+  }
+  if (prev.skipFinderFiles !== false && next.skipFinderFiles === false) return false;
+  if (prev.skipOfficeTemp !== false && next.skipOfficeTemp === false) return false;
+  return true;
+}
+
+module.exports = { PathFilter, SoftFilter, normRel, narrowsFilter };

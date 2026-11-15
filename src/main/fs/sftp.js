@@ -43,6 +43,7 @@ const OP_TIMEOUT_MS = 45000;
 
 const { PipelinedReader, PipelinedWriter, XFER_CHUNK } = require('./sftp-pipe');
 const { scratchPath } = require('./longname');
+const { isSafeName } = require('../core/relpath');
 const crypto = require('crypto');
 
 // ── Who is answering on that address ──────────────────────────────────────
@@ -163,6 +164,9 @@ class SftpFs {
 
   connect() {
     if (this._connectPromise) return this._connectPromise;
+    // Without a rule for host keys, any server would be accepted unseen.
+    // The app installs one at start; anything else must too.
+    if (!hostKeyPolicy) return Promise.reject(new Error('No host key check is set up: nothing was sent.'));
     this._connectPromise = new Promise((resolve, reject) => {
       const { Client } = getSsh2();
       const conn = new Client();
@@ -325,14 +329,7 @@ class SftpFs {
       // The server chooses these strings. One containing a separator is not a
       // file name: it is a path, and it would be joined onto the destination
       // root and written wherever it points. Dropped here, at the door.
-      .filter(e => {
-        const n = String(e.filename == null ? '' : e.filename);
-        if (n === '.' || n === '..' || n === '') return false;
-        if (n.includes('/') || n.includes('\\')) {
-          return false;
-        }
-        return true;
-      })
+      .filter(e => isSafeName(e.filename))
       .map(e => {
         const st = this._mapStat(e.attrs);
         return { name: e.filename, type: st.type, size: st.size, mtime: st.mtime, id: null };

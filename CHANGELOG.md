@@ -4,6 +4,107 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [1.1.6] — 2026-11-15
+
+Fixes from the code review of 15/11/2026.
+
+### Fixed
+
+- **A filter applied after a copy from the COMPARE panels** could plan the
+  deletion of the file just copied. syncto now compares again in that case,
+  and after a synchronization.
+- **A second filter brought back Finder and Office temp files** that were
+  turned off, and MIRROR then deleted them on the other side.
+- **Companion**:
+  - the "never more than half" rule is checked on each folder pair, so a pair
+    being emptied is no longer hidden by a large one with nothing to do;
+  - one request at a time: a second press while a job opens is refused,
+    instead of running the wrong job or ending with the after-run action;
+  - the job runs as saved: a job open with unsaved changes, or untitled with
+    folders in it, refuses the request instead of being run or lost;
+  - refused with a dialog open (Settings included, even opened during the
+    comparison), during Verify, and when it would delete files permanently
+    where syncto asks first;
+  - an update notice no longer blocks it;
+  - a request Companion stopped waiting for no longer runs anyway;
+  - turning the server off right after turning it on leaves it off;
+  - a server error can no longer crash the app;
+  - the list of jobs no longer waits on a share that does not answer.
+- **The Companion module reconnects** when syncto is quit or restarted.
+- **FTP**:
+  - a comparison after a network drop no longer hangs;
+  - on a server that limits connections, a run right after a comparison
+    keeps its own transfer connections instead of falling back to a single
+    one for good;
+  - a connection is no longer left open when a comparison is cancelled while
+    it reconnects;
+  - a file with a very long name can be replaced on Windows servers.
+- **SFTP**: an upload to a server that stops answering ends with a network
+  error after a minute instead of waiting for ever.
+- **The checksum list** no longer keeps the old line of a file rewritten
+  without being read back (Read back off, SKIP CHECK): Verify no longer
+  reports a false mismatch.
+- **Right-click filters during a run**: greyed out. They were saved and
+  announced, but the run copied those files anyway.
+- **COMPARE mode**: the sidebar can be resized again.
+- **CLOSE on the open job** keeps the job settings for the blank one, as NEW
+  does.
+- **RETRYING** with several transfers: one transfer that stops waiting no
+  longer clears the wait of another, and the seconds count down.
+- **Undo** after removing a pattern keeps the filter as it was written.
+- A failed **Save & close** says so in the status bar.
+
+### Changed
+
+- **SKIP CHECK** skips the read-back of the folder pair being checked; the
+  next pairs are read back.
+- **Moves without history** are not used when the job compares by content.
+- **Read back** cannot be changed while auto-sync is armed.
+- **Remote control › Allowed addresses**: the computers running Companion,
+  when **Other machines** is on. Empty: any computer that has the key.
+- Comparisons use less memory and time: the copy kept for instant filters is
+  lighter, and none is kept when Windows-safe names are on.
+- The search field is "Filter…" and takes the room left in the toolbar.
+- A server connection refuses to open if no check of host keys or
+  certificates is set up (the app always sets one).
+
+## [1.1.5] — 2026-11-15
+
+### Changed
+
+- **A filter that only narrows the comparison is applied at once**, without
+  reading the folders again: an exclusion added (by right-click or in the
+  Filter window), Finder files or Office temp files turned on, an include
+  pattern taken out. On an FTP or SFTP server this saves the whole comparison.
+  Directions, moves and counts are decided again exactly as after a scan. A
+  filter that lets more through still compares again.
+- **Settings, reorganized** (Noar): two tabs, **This job** (saved in the
+  `.syncto` file) and **syncto** (every job: notifications, Companion), and in
+  the job's tab one card per category with its title and icon: Moves, Copy,
+  Errors, Deletion, Servers and shared folders.
+- **Settings: Save & close** writes the job's file (it was **Close**, which
+  applied the settings without saving them). An untitled job reads **Apply &
+  close**; Escape applies without writing.
+- **FTP and FTPS: comparisons up to about three times faster.** Folders are
+  listed three at once (two more connections while the tree is read, closed a
+  few seconds later), as in filo. Measured with 40 ms of latency: 201 folders
+  in 6.0 s instead of 16.9 s. A server that allows a single connection is
+  listed on that one.
+- **Read back is a switch in the toolbar**, beside Filter and Auto-sync, to
+  turn it on or off from one run to the next. It left Settings. On narrow
+  windows the view switches read "identical" and "excluded".
+- **Toolbar: every switch on one line.** The labels (Compare by, Filter, Read
+  back, Auto-sync) share one line and every control, the view switches and the
+  search field included, is centred on the next.
+- **Settings: more room above each category title.**
+- **Auto-sync: the minutes field holds its unit** ("30 min" in one box).
+
+### Fixed
+
+- **The glow of the run strip and of the big buttons was cut flat at the
+  bottom** (auto-sync armed, comparing, synchronizing), and on the left in
+  COMPARE mode. It is drawn in full; nothing moves.
+
 ## [1.1.4] — 2026-11-09
 
 ### Fixed

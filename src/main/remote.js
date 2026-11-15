@@ -56,6 +56,17 @@ function sameKey(a, b) {
 //   run(file, action),     Promise<{ ok, error? }>   action: 'compare' | 'sync'
 //   stop(), pause(), resume(),
 // }
+// The addresses a list typed in Settings names (one IPv4 or IPv6 address per
+// entry, separated by spaces, commas or new lines); an empty list allows all.
+function parseAllow(text) {
+  return [...new Set(String(text || '').split(/[\s,;]+/).map(x => x.trim()).filter(Boolean))];
+}
+// "::ffff:192.168.1.20" is how an IPv4 client shows on a dual-stack socket.
+function plainAddress(a) { return String(a || '').replace(/^::ffff:/i, ''); }
+function isLoopback(a) { return a === '127.0.0.1' || a === '::1'; }
+
+// api = { ... as above, allow() }   allow(): the addresses that may connect
+// from other machines ([] for any). This machine is always allowed.
 // opts = { port, lan, onError }
 function createRemoteServer(api, opts) {
   const o = opts || {};
@@ -68,6 +79,11 @@ function createRemoteServer(api, opts) {
   };
 
   const handle = async (req, res) => {
+    const from = plainAddress(req.socket.remoteAddress);
+    const allowed = api.allow ? api.allow() : [];
+    if (!isLoopback(from) && allowed.length && !allowed.includes(from)) {
+      return reply(res, 403, { ok: false, error: `This computer (${from}) is not in the list of addresses allowed in syncto (Settings › Remote control).` });
+    }
     if (!req.url || req.url.length > MAX_URL) return reply(res, 414, { ok: false, error: 'Request too long.' });
     const given = (req.headers['x-syncto-key'] || String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')).trim();
     if (!sameKey(given, api.key())) return reply(res, 401, { ok: false, error: 'Wrong or missing key (Settings › Remote control in syncto).' });
@@ -119,7 +135,9 @@ function createRemoteServer(api, opts) {
         server.once('error', reject);
         server.listen(Number.isInteger(o.port) ? o.port : DEFAULT_PORT, o.lan ? '0.0.0.0' : '127.0.0.1', () => {
           server.removeListener('error', reject);
-          if (o.onError) server.on('error', o.onError);
+          // An error after listening (too many open files during a big run,
+          // a flood of connections) is reported, never left to crash the app.
+          server.on('error', err => { if (o.onError) o.onError(err); });
           resolve(server.address().port);
         });
       });
@@ -137,4 +155,4 @@ function createRemoteServer(api, opts) {
   };
 }
 
-module.exports = { createRemoteServer, newKey, jobId, DEFAULT_PORT };
+module.exports = { createRemoteServer, newKey, jobId, parseAllow, DEFAULT_PORT };

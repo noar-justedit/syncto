@@ -189,6 +189,10 @@ class SyncRunner {
 
     this.applied   = new Map();
     this.toVerify  = [];     // filled by the copy pass, drained by the verify pass
+    // Every file this run wrote, per side and in that side's own spelling,
+    // read back or not: their old lines in the checksum list are out of date.
+    this.written   = { left: new Set(), right: new Set() };
+    this.retries   = new Set();  // retry waits in progress, one per lane at most
     this.errors    = [];
     this.notes     = [];
     this.checksums = { left: [], right: [] };
@@ -466,7 +470,7 @@ class SyncRunner {
       // this payload could tell you which way the last file went.
       way  : this.way || '',
       current: current || this.current || '',
-      retry: this.retrying || null,
+      retry: this.retrying,
       inFlight: this.inFlight || 0,
       // Whether this run will read anything back. With the read-back off for a
       // server there is no second pass, and the window must not draw a step
@@ -532,6 +536,13 @@ class SyncRunner {
     return r;
   }
 
+  // The retry wait shown on screen: the latest one still running, if any.
+  get retrying() {
+    let last = null;
+    for (const w of this.retries) last = w;
+    return last;
+  }
+
   // Runs `fn`, retrying transient failures the configured number of times.
   async withRetry(label, fn) {
     const max = Math.max(0, Number(this.cfg.retryCount) || 0);
@@ -545,11 +556,13 @@ class SyncRunner {
         if (/cancelled/i.test(err.message || '') || err.noRetry) throw err;
         if (attempt < max) {
           this.notes.push(`Retrying ${label} (${attempt + 1}/${max}): ${err.message}`);
-          // (1.1.4) Said on screen while it waits: a run retrying file after
-          // file looked frozen (Manuel López).
-          this.retrying = { label, attempt: attempt + 1, max, seconds: Math.round(delay / 1000) };
+          // Said on screen while it waits, or a run retrying file after file
+          // looks frozen. Each lane has its own wait: the strip shows the
+          // latest one still waiting, and one lane's end leaves the others.
+          const wait = { label, attempt: attempt + 1, max, seconds: Math.round(delay / 1000), until: Date.now() + delay };
+          this.retries.add(wait);
           this.emit(true, `Retrying ${label}…`);
-          try { await new Promise(r => setTimeout(r, delay)); } finally { this.retrying = null; }
+          try { await new Promise(r => setTimeout(r, delay)); } finally { this.retries.delete(wait); }
         }
       }
     }
@@ -1093,6 +1106,7 @@ class SyncRunner {
     // From here on the file at the target is ours (see assertTargetAsCompared).
     if (!this._wrote) this._wrote = new Set();
     this._wrote.add(to + '\u0000' + n.rel);
+    this.written[to].add(this.relOn(n, to));
 
     let mtimeKept = false;
     if (this.cfg.preserveTimes !== false) {
@@ -1298,6 +1312,7 @@ class SyncRunner {
       errors   : this.errors,
       notes    : this.notes,
       checksums: this.checksums,
+      written  : this.written,
       verified : this.toVerify.filter(v => v.ok).length,
       notReadBack: this.notReadBack || 0,
       checkSkipped: !!this.checkSkipped,

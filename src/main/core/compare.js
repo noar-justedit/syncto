@@ -111,6 +111,14 @@ const FINDER_FILES = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini']);
 function isOfficeTemp(name) {
   return name.startsWith('~$') || /^~WR[LD]\d+\.tmp$/i.test(name) || /^\.~lock\..+#$/.test(name);
 }
+// Whether the job's own choices (Finder files, Office temp files) leave this
+// entry out. The one place the rule lives: the scan and a refilter both ask it.
+function skippedByChoice(name, type, cfg) {
+  const c = cfg || {};
+  if (c.skipFinderFiles !== false && FINDER_FILES.has(name)) return true;
+  if (c.skipOfficeTemp !== false && type === 'file' && isOfficeTemp(name)) return true;
+  return false;
+}
 // Everything that may be swept out of a folder being removed.
 const ALWAYS_SKIP = new Set([...SYSTEM_SKIP, ...FINDER_FILES]);
 
@@ -233,8 +241,6 @@ class Comparer {
     this.locks = [];          // lock files a run that never finished left behind
     this.stats  = { scanned: 0, comparedBytes: 0 };
     this.symlinks = this.cfg.symlinks || 'exclude';   // exclude | asLink
-    this.skipFinder = this.cfg.skipFinderFiles !== false;
-    this.skipOffice = this.cfg.skipOfficeTemp !== false;
     // (0.8.9) Windows-safe names: off | destination (right side) | both.
     this.safe = safeNamesMode(this.cfg);
     // How many items these two folders held at the end of the last run, read
@@ -369,8 +375,7 @@ class Comparer {
         // rewrites — treated as a user file, an outer MIRROR deleted it at
         // every other run (tried and reverted during the 0.8.8 review).
         if (SYSTEM_SKIP.has(e.name) || isSyncToInternal(e.name)) continue;
-        if (this.skipFinder && FINDER_FILES.has(e.name)) continue;
-        if (this.skipOffice && e.type === 'file' && isOfficeTemp(e.name)) continue;
+        if (skippedByChoice(e.name, e.type, this.cfg)) continue;
         // (0.8.9) A Mac's custom-icon file ("Icon" + carriage return): with
         // Windows-safe names on, it is neither copied, renamed nor deleted.
         if (this.safe !== 'off' && isMacIconFile(e.name)) continue;
@@ -759,7 +764,7 @@ class Comparer {
 
 module.exports = {
   Comparer, CAT, OP, compareTime, sameTime, equalContent,
-  TEMP_EXT, OLD_EXT, DB_NAME, LOCK_NAME, CHECKSUM_FILE, OLD_CHECKSUM_FILE, ALWAYS_SKIP, SYSTEM_SKIP, FINDER_FILES, isOfficeTemp, OS_LITTER_FOLDERS,
+  TEMP_EXT, OLD_EXT, DB_NAME, LOCK_NAME, CHECKSUM_FILE, OLD_CHECKSUM_FILE, ALWAYS_SKIP, SYSTEM_SKIP, FINDER_FILES, isOfficeTemp, skippedByChoice, OS_LITTER_FOLDERS,
   isSyncToInternal,
   DEFAULT_TOLERANCE_SEC,
 };

@@ -21,8 +21,8 @@
 // sends back edits by index. That keeps a 200 000-file comparison responsive.
 
 const fs = require('fs');
-const { Comparer, CAT, OP, CHECKSUM_FILE, OLD_CHECKSUM_FILE, DEFAULT_TOLERANCE_SEC, sameTime, compareTime } = require('./compare');
-const { PathFilter } = require('./filter');
+const { Comparer, CAT, OP, CHECKSUM_FILE, OLD_CHECKSUM_FILE, DEFAULT_TOLERANCE_SEC, skippedByChoice, sameTime, compareTime } = require('./compare');
+const { PathFilter, narrowsFilter } = require('./filter');
 const { applyDirections, computeStats, operationFor, applyFolderRules,
         detectMoves, detectMovesByName, dissolveMove, usesDatabase, plannedRenames } = require('./direction');
 const { SyncDb, loadPairDb, savePairDb, buildSession, pairIdFor, readSideSession } = require('./db');
@@ -108,6 +108,18 @@ function overviewSorter(sort) {
     if (d === 0) return OV_COLLATOR.compare(a.name, b.name);
     return d * sign;
   };
+}
+
+// The filter part of compare settings (what refilter may change).
+function filterPart(c) {
+  const o = c || {};
+  return { includeFilter: o.includeFilter, excludeFilter: o.excludeFilter, skipFinderFiles: o.skipFinderFiles, skipOfficeTemp: o.skipOfficeTemp };
+}
+
+// The compare settings of a job as the window set them (the Windows-safe
+// names, a sync setting, included: the comparison depends on it).
+function askedCompare(job) {
+  return Object.assign({}, job.compare, { safeNames: (job.sync && job.sync.safeNames) || 'off' });
 }
 
 class Session {
@@ -216,6 +228,14 @@ class Session {
       knownRels: (this.db && this.db.items) ? Object.keys(this.db.items) : null,
     });
     const res = await comparer.run();
+    // The tree as scanned, before any direction is decided: a filter that
+    // only narrows is applied to it (refilter) without reading the folders
+    // again. A shallow copy of each row is enough: deciding directions sets a
+    // row's own fields and replaces its side objects, never edits them in
+    // place. Not kept when a refilter is impossible anyway (Windows-safe
+    // names), and dropped by anything that changes the folders (a copy, a run).
+    const asked = askedCompare(job);
+    this._scan = (res.cancelled || asked.safeNames !== 'off') ? null : { nodes: res.nodes.map(n => Object.assign({}, n)), cmp, asked };
     this.nodes  = res.nodes;
     this._touched();
     this.errors = res.errors;
@@ -227,20 +247,75 @@ class Session {
     // two look identical from here. Ask the surviving side what it remembers.
     await this._inspectMissingRoots();
 
-    const applied = applyDirections(this.nodes, job.sync, cmp, this.db);
-    this.byChange = applied.byChange;
-    this.movesFound = this.wantMoves ? detectMoves(this.nodes, this.db) : 0;
-    // Moves found by name, size and date, without history (MIRROR, opt-in).
-    if (cmp.detectMovesByName === true && (job.sync.variant || 'mirror') === 'mirror') {
-      this.movesFound += detectMovesByName(this.nodes, (a, b) => sameTime(a, b, cmp.timeTolerance, cmp.timeShifts));
-    }
-    this.stats = computeStats(this.nodes);
+    this._decide(job, cmp);
     // A cancelled comparison stopped somewhere in the middle of the tree.
     // Stamping it as compared let the interface re-enable SYNCHRONIZE on a
     // partial plan — only the scanned fraction would have been copied, and the
     // summary would have said "completed successfully".
     this.comparedAt = this.cancelled ? 0 : Date.now();
+    return this._compareResult();
+  }
 
+  // What happens to each row once the tree is known: directions, moves,
+  // counts. Shared by compare() and refilter().
+  _decide(job, cmp) {
+    const applied = applyDirections(this.nodes, job.sync, cmp, this.db);
+    this.byChange = applied.byChange;
+    this.movesFound = this.wantMoves ? detectMoves(this.nodes, this.db) : 0;
+    // Moves found by name, size and date, without history (MIRROR, opt-in).
+    // Not when the job compares by content: a name, a size and a date are
+    // weaker proof than the one the user chose.
+    if (cmp.detectMovesByName === true && (job.sync.variant || 'mirror') === 'mirror' && cmp.compareVariant !== 'content') {
+      this.movesFound += detectMovesByName(this.nodes, (a, b) => sameTime(a, b, cmp.timeTolerance, cmp.timeShifts));
+    }
+    this.stats = computeStats(this.nodes);
+  }
+
+  // (1.1.5) Whether `job`'s filter only narrows the one this pair was scanned
+  // with, so the scanned tree holds everything it keeps.
+  canRefilter(job) {
+    // Errors (a folder that could not be read, two names clashing) belong to
+    // the scan's filter: a new comparison says which ones still apply.
+    if (!this._scan || !this.comparedAt || this.cancelled || (this.errors || []).length) return false;
+    return narrowsFilter(this._scan.asked, askedCompare(job));
+  }
+
+  // Applies a narrower filter to the tree already scanned: the rows it now
+  // leaves out go (a folder with everything under it), and directions, moves
+  // and counts are decided again from scratch, exactly as after a scan. The
+  // folders are not read again, so on a server it takes no time.
+  refilter(job) {
+    const prev = this._scan.cmp;
+    const asked = askedCompare(job);
+    // The settings the scan really used (a widened date tolerance on an FTP
+    // server, say), with the new filter.
+    const cmp = Object.assign({}, prev, {
+      includeFilter: asked.includeFilter, excludeFilter: asked.excludeFilter,
+      skipFinderFiles: asked.skipFinderFiles, skipOfficeTemp: asked.skipOfficeTemp,
+    });
+    const filter = new PathFilter(cmp.includeFilter, cmp.excludeFilter);
+    const kept = [], newIdx = new Map();
+    for (const n of this._scan.nodes) {
+      if (n.parent >= 0 && !newIdx.has(n.parent)) continue;           // its folder went
+      const folder = n.type === 'folder';
+      if (folder ? !filter.passFolderAny([n.rel]) : !filter.passFileAny([n.rel])) continue;
+      if (skippedByChoice(n.name, n.type, cmp)) continue;
+      const c = Object.assign({}, n);
+      newIdx.set(n.idx, kept.length);
+      c.idx = kept.length;
+      c.parent = n.parent >= 0 ? newIdx.get(n.parent) : n.parent;
+      kept.push(c);
+    }
+    this._scan.cmp = cmp;
+    this._scan.asked = asked;
+    this.nodes = kept;
+    this._touched();
+    this._decide(job, cmp);
+    this.comparedAt = Date.now();
+    return this._compareResult();
+  }
+
+  _compareResult() {
     return {
       count : this.nodes.length,
       stats : this.stats,
@@ -801,6 +876,9 @@ class Session {
   // the same on both sides without comparing everything again (a NAS of
   // 400 000 files takes minutes). Every other row gets its operation back.
   _copyEnd(saved, plan, applied, renamed) {
+    // The folders changed: the tree scanned before the copy no longer
+    // describes them, so a later filter compares again.
+    this._scan = null;
     const nodes = this.nodes;
     const done = new Set();
     if (plan && applied) {
@@ -881,6 +959,9 @@ class Session {
     // run copied happily into it and reported success.
     await this.checkRootsStillThere();
 
+    // From here the folders change: the tree scanned before no longer
+    // describes them, so a later filter compares again.
+    this._scan = null;
     const startedAt = Date.now();
 
     const lanes = await this._openLanes(job);
@@ -927,13 +1008,16 @@ class Session {
         // made Verify Folder report an intact file as missing.
         const renamedHere = run.renamedIdx ? run.renamedIdx[side] : null;
         const anyRenamed = !!(renamedHere && renamedHere.size);
-        if (!list.length && !anyDeleted && !anyRenamed) continue;
+        // Files rewritten here without a read-back (turned off, skipped,
+        // failed): their old line names the content they had before.
+        const writtenHere = (run.written && run.written[side]) || new Set();
+        if (!list.length && !anyDeleted && !anyRenamed && !writtenHere.size) continue;
         const algo = 'xxh64';
         const target = this[side];
         const p = target.fs.join(target.path, CHECKSUM_FILE);
         try {
           const byRel = new Map();
-          let foreign = null;
+          let foreign = null, hadList = false;
           try {
             // (1.1.3) The first list under the new name takes over the lines
             // of the old .txt, which is left where it is.
@@ -944,6 +1028,7 @@ class Session {
                 `(xxhsum -c). The ${OLD_CHECKSUM_FILE} on the ${side} side was left as is: delete it when you no longer need it.`);
             }
             if (prevText != null) {
+              hadList = true;
               const prev = parseChecksumList(prevText);
               if (!prev.algo || prev.algo === algo) {
                 for (const e of prev.entries) byRel.set(e.rel, e);
@@ -976,6 +1061,7 @@ class Session {
             const own = spelt.get(rel);
             if (own) byRel.delete(own);
           }
+          for (const rel of writtenHere) byRel.delete(rel);
           if (anyRenamed) {
             // The path each row had on disk before this run's renames, and
             // the one it has now; lines move from the first to the second
@@ -999,6 +1085,8 @@ class Session {
           }
           for (const e of list) byRel.set(e.rel, e);
           const merged = [...byRel.values()].sort((a, b) => a.rel < b.rel ? -1 : 1);
+          // Nothing to vouch for and no list before: no empty file is left behind.
+          if (!merged.length && !hadList) continue;
           await writeText(target.fs, p, formatChecksumList(merged));
           sidecars.push(p);
         } catch (err) {
@@ -1226,6 +1314,9 @@ function pairLabel(p) {
   return `${base(p.left)} → ${base(p.right)}`;
 }
 
+// Below this many removals, an unattended run that keeps half the files goes ahead.
+const UNATTENDED_MIN_REMOVALS = 10;
+
 class MultiSession {
   constructor() {
     this.sessions = [];       // one Session per pair
@@ -1271,9 +1362,7 @@ class MultiSession {
     const multi = this.pairs.length > 1;
 
     const perPair = [];
-    const errors = [];
-    let movesFound = 0, dbNote = null, cancelled = false;
-    const lockSeen = new Map();
+    let cancelled = false;
     let scannedBefore = 0, bytesBefore = 0;
     const startedAt = Date.now();
     for (let i = 0; i < this.pairs.length; i++) {
@@ -1314,12 +1403,7 @@ class MultiSession {
       scannedBefore += lastScanned;
       bytesBefore   += lastBytes;
       perPair.push(res);
-      movesFound += res.movesFound || 0;
       if (res.cancelled) cancelled = true;
-      if (res.dbNote && !dbNote) dbNote = res.dbNote;
-      errors.push(...res.errors.map(e => Object.assign({}, e, { pair: i + 1 })));
-      // Two pairs can share a base folder; its lock must be listed once.
-      for (const l of res.staleLocks || []) if (!lockSeen.has(l.path)) lockSeen.set(l.path, l);
     }
 
     this.stats = mergeStats(this.sessions.map(s => s.stats));
@@ -1327,6 +1411,22 @@ class MultiSession {
     // middle of a pair or between two of them — is not a comparison. Stamping
     // it here undid the deliberate reset at the top of this method.
     this.comparedAt = cancelled ? 0 : Date.now();
+    this.planJob = cancelled ? null : JSON.parse(JSON.stringify(job));
+    return this._result(perPair, cancelled);
+  }
+
+  // What compare() and refilter() give the window, from each pair's result.
+  _result(perPair, cancelled) {
+    const errors = [], lockSeen = new Map();
+    let movesFound = 0, dbNote = null;
+    perPair.forEach((res, i) => {
+      if (!res) return;
+      movesFound += res.movesFound || 0;
+      if (res.dbNote && !dbNote) dbNote = res.dbNote;
+      errors.push(...res.errors.map(e => Object.assign({}, e, { pair: i + 1 })));
+      // Two pairs can share a base folder; its lock must be listed once.
+      for (const l of res.staleLocks || []) if (!lockSeen.has(l.path)) lockSeen.set(l.path, l);
+    });
     return {
       count: this.sessions.reduce((n, s) => n + s.nodes.length, 0),
       stats: this.stats,
@@ -1339,6 +1439,31 @@ class MultiSession {
       left : this.pairs[0].left,
       right: this.pairs[0].right,
     };
+  }
+
+  // (1.1.5) A filter that only narrows, applied to the comparison on screen
+  // without reading the folders again (an FTP server took minutes for an
+  // "exclude *.tmp"). Null when a new comparison is needed: another change
+  // than the filter, other folders, or a filter that lets more through, on
+  // any pair. The row numbers change, so this is a new comparison for the
+  // window (gen) and the plan key follows the job.
+  refilter(job) {
+    if (!this.comparedAt || !this.sessions || !this.sessions.length || !this.planJob) return null;
+    const keep = Object.assign({}, job, { compare: Object.assign({}, job.compare, filterPart(this.planJob.compare)) });
+    if (planKeyOf(keep) !== this.planKey) return null;
+    if (JSON.stringify(this._pairsOf(job)) !== JSON.stringify(this.pairs)) return null;
+    if (!this.sessions.every(s => s.canRefilter(job))) return null;
+    const multi = this.pairs.length > 1;
+    const perPair = this.sessions.map((s, i) => s.refilter(Object.assign({}, job, {
+      left: this.pairs[i].left, right: this.pairs[i].right, pairId: multi ? null : job.pairId,
+    })));
+    this.gen = (this.gen || 0) + 1;
+    this._tree = null;
+    this.planKey = planKeyOf(job);
+    this.planJob = JSON.parse(JSON.stringify(job));
+    this.stats = mergeStats(this.sessions.map(s => s.stats));
+    this.comparedAt = Date.now();
+    return this._result(perPair, false);
   }
 
   // One header pseudo-row per pair (only when there are several), followed by
@@ -1736,6 +1861,32 @@ class MultiSession {
     return out;
   }
 
+  // Whether the plan in memory may run with nobody watching (a run started
+  // from Companion). Refused when, on one side of one pair, it removes more
+  // than half of the files the filters keep there, and at least ten. Judged
+  // per pair: a pair being emptied is not hidden by a large one
+  // that has nothing to do. Returns why, or ''.
+  unattendedRefusal() {
+    if (!this.comparedAt) return 'The comparison did not finish.';
+    for (let p = 0; p < this.sessions.length; p++) {
+      const pairName = this.sessions.length > 1 ? ` in ${pairLabel(this.pairs[p])}` : '';
+      for (const side of ['left', 'right']) {
+        const del = side === 'left' ? OP.DELETE_LEFT : OP.DELETE_RIGHT;
+        let files = 0, removed = 0;
+        for (const n of this.sessions[p].nodes) {
+          if (n.type === 'folder' || n.active === false || !n[side].exists) continue;
+          files++;
+          if (n.op === del) removed++;
+        }
+        if (removed >= UNATTENDED_MIN_REMOVALS && removed > files / 2) {
+          return `It would remove ${removed} of the ${files} files on the ${side === 'left' ? 'source' : 'destination'} side${pairName}. ` +
+            'Check the folders in syncto: a run started from Companion never removes more than half.';
+        }
+      }
+    }
+    return '';
+  }
+
   // (0.9.5) "Copy to destination / source" from the COMPARE panels, on the
   // rows picked there (global indices, one pair). With `dryRun`, only says
   // what it would do, for the window to ask before replacing anything. The
@@ -1935,6 +2086,9 @@ class MultiSession {
       if (only && p !== only.p) continue;
       if (token && token.cancelled) { cancelled = true; break; }
       if (stopped && job.sync.ignoreErrors === false) break;
+      // SKIP CHECK skips the read-back of the pair being checked, not the
+      // read-back of the pairs still to come.
+      if (token) token.skipCheck = false;
       const pr = this.pairs[p];
       const pairJob = Object.assign({}, job, {
         left: pr.left, right: pr.right,

@@ -195,6 +195,15 @@ published here.
   the decided action in the middle.
 - **Bottom strip**: how many items will be created, updated or removed.
 
+### Settings
+
+Two tabs. **This job**: what is saved in the job's `.syncto` file, by category
+(Moves, Copy, Errors, Deletion, Servers and shared folders, and the custom
+directions in CUSTOM mode). **syncto**: what applies to every job (phone
+notifications, Companion). **Save & close** writes the job's file; an untitled
+job has none yet, so the button reads **Apply & close**. Escape applies without
+writing the file.
+
 ### Typical run
 
 1. Set the two folders
@@ -232,7 +241,7 @@ closes everything. The overview on the left opens any folder in the tree.
   identical, or every kind of difference.
 - The chips under the panels count, over the whole comparison, what is only in
   the source, only in the destination, newer on either side, different, or
-  identical. A click shows that category alone. "Filter the view" searches the
+  identical. A click shows that category alone. "Filter…" searches the
   names and opens the folders on the way to what it finds.
 - Click selects, double-click opens or closes a folder. Cmd-click (Ctrl-click on
   Windows and Linux) adds a row to the selection, Shift-click or Shift+arrows
@@ -275,7 +284,7 @@ file ids). When in doubt — the file changed as well as moved, ids are ambiguou
 because of hard links — syncto falls back to a plain copy, which is always
 safe. Switchable off in the settings.
 
-**Moves without history** (Settings › Main, off by default, MIRROR only). For
+**Moves without history** (Settings › This job › Moves, off by default, MIRROR only). For
 a destination reorganized by hand or by another tool, or a first run: a file
 only in the source and a file only in the destination with the same name, the
 same size and the same date are taken as one file that was moved, provided
@@ -285,19 +294,23 @@ servers alike. Twins (generic camera names such as `C0001.MP4` of the same
 size and date in several folders), another date or another size: copied as
 usual. Before renaming, syncto checks that the file is still the one it
 compared. The one case it cannot tell apart: two different files with the same
-name, size and date, each alone of its kind; that is why it is a choice.
+name, size and date, each alone of its kind; that is why it is a choice. A job
+that compares by content does not use it: a name, a size and a date are weaker
+proof than the one it asks for.
 
 ### How a copy is verified
 
 **syncto has one copy mode, and it reads every copy back.** The reason to run a
 folder synchroniser over rushes is to know the second copy is the same as the
 first. If you check the copies yourself (on the NAS, with another tool), a job
-can do without it: **Settings › Read files back**, on by default. Off, nothing
+can do without it: the **Read back** switch in the toolbar, on by default. Off, nothing
 is read back, no checksum list is written, and the summary and the phone
 notification say *copied, not read back*.
 
 During the read-back of a run, **SKIP CHECK** (under PAUSE and STOP) ends the
 read-back and lets the run finish: folders a MIRROR removes are still removed.
+With several folder pairs, it skips the read-back of the pair being checked;
+the next pairs are read back as usual.
 The files read back so far are verified; the others are copied but unproven,
 the summary gives both numbers, and the next comparison looks at them again.
 STOP ends the whole run.
@@ -348,7 +361,7 @@ says how many before the run, and the notes after. If the recycle bin refuses
 any other file, syncto leaves it in place, reports it once and goes on, without
 retrying: the recycle bin would give the same answer.
 
-While a run waits to try a file again (**Settings › Retry on error**), the
+While a run waits to try a file again (**Settings › This job › Errors**), the
 strip turns orange and reads **RETRYING**, with the attempt and the wait.
 
 ### Several machines, same folders
@@ -384,6 +397,13 @@ filter*: one click takes one out. After a right-click change, the status bar
 offers **Undo** and **Edit filter**. Space
 excludes the selection temporarily.
 
+A filter that only **narrows** the comparison on screen (an exclusion added,
+**Finder files** or **Office temp files** turned on, an include pattern
+taken out) is applied at once, without reading the folders again: on a server
+that saves the whole comparison. A filter that lets more through (an exclusion
+removed, a pattern added to the include list) compares again, since those
+items were never read.
+
 ### Servers (SFTP, FTP, FTPS)
 
 Click the **server button** next to *Browse* in either folder field. Enter the
@@ -396,6 +416,11 @@ you can still type by hand if you prefer. The other forms are
 
 Servers you use again are listed at the top of that window: one click fills
 everything in.
+
+Comparing a folder on an FTP or FTPS server lists up to three folders at once:
+syncto opens two more connections for that while it walks the tree, and closes
+them a few seconds after, so the run has the server's connections. A server
+that allows a single connection is listed on that one.
 
 **Passwords are never written to a readable file.** They go to the macOS
 Keychain or the Windows credential manager, through Electron's `safeStorage`.
@@ -426,7 +451,7 @@ is remembered as such: a home-made certificate in its place is refused.
 
 ### Windows-safe names
 
-**Settings › Main › Windows-safe names** renames, during the synchronization,
+**Settings › This job › Copy › Windows-safe names** renames, during the synchronization,
 the names a Mac accepts and Windows refuses: `< > : " | ? *`, a trailing space
 or dot, and device names such as CON or NUL. Each refused character becomes
 `_`. Parentheses, commas, `&` and accents are legal on Windows and kept.
@@ -456,7 +481,7 @@ or by hand: the machine stays up for the next cycle.
 There is no hibernate entry on purpose: macOS has no such command, and on
 Windows it only works when hibernation is enabled, which it usually is not.
 
-**Settings › Notifications** sends a message through
+**Settings › syncto › Phone notifications** sends a message through
 [ntfy](https://ntfy.sh) when a run ends — the job name, what was copied, how
 long it took, and the first error if there was one. Set a server (the public
 one or your own), a topic, and scan the QR code to install the app. A problem
@@ -511,7 +536,7 @@ syncto can be driven from a Stream Deck through
 pause, resume, and see on the button whether syncto is comparing,
 synchronizing, done or in error. Off by default.
 
-1. In syncto, **Settings › Remote control**: turn on **Companion**. If Companion
+1. In syncto, **Settings › syncto › Remote control**: turn on **Companion**. If Companion
    runs on another computer, also turn on **Other machines** (the system may
    ask to let syncto accept connections: allow it).
 2. In Companion (3.5 or later), **Modules › Import module package**: choose
@@ -524,13 +549,22 @@ What it can and cannot do:
 - It runs **jobs saved in syncto** (the recent jobs on the left), never paths it
   is sent. syncto has to be open.
 - A run started from Companion is **refused when it would remove more than half
-  of the files** (and at least 10): check the folders in syncto first.
-- It is refused while a dialog is open in syncto or a run is going on.
+  of the files** (and at least 10) on one side of one folder pair: check the
+  folders in syncto first. It is refused as well when it would delete files
+  permanently where syncto asks first (no trash on that disk).
+- It runs the job **as saved**. It is refused when the job open in syncto has
+  changes that are not saved, or is untitled with folders in it: nothing
+  typed in syncto is lost or run by surprise.
+- It is refused while a dialog is open in syncto, a folder is being verified,
+  or a run is going on, and while it is starting another job.
 - Every request carries the key (`Authorization: Bearer <key>` or
   `X-Syncto-Key`). **New key** in Settings cuts off every connection made with
   the old one. Without **Other machines**, only this computer can connect.
-- The traffic is plain HTTP: on the local network only, never open the port to
-  the internet.
+  With it, **Allowed addresses** can name the computers running Companion
+  (empty: any computer that has the key).
+- The traffic is plain HTTP, the key included: anyone listening on the network
+  can read it. On a shared network, fill in **Allowed addresses**; never open
+  the port to the internet.
 
 The HTTP interface, for other tools: `GET /api/status`, `GET /api/jobs`,
 `GET /api/events` (server-sent events), `POST /api/jobs/<id>/sync`,

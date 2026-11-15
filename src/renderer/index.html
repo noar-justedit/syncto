@@ -90,6 +90,10 @@ font-size:12.5px;font-weight:700;letter-spacing:.03em;cursor:pointer;transition:
 
 /* ── Main split: sidebar (zones 1+2) | content (zones 3+4) ───────── */
 #main{flex:1;display:flex;min-height:0;overflow:hidden;}
+/* (1.1.5) Still clipped, but the glows of the run strip and of the big
+   buttons (up to 26 px) are drawn past the edge instead of cut flat
+   (Noar: auto-sync, comparing). */
+#main{overflow:clip;overflow-clip-margin:28px;}
 #sidebar{width:264px;flex-shrink:0;display:flex;flex-direction:column;min-height:0;background:var(--bg2);}
 #content{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0;}
 .sb-panel{display:flex;flex-direction:column;min-height:0;}
@@ -973,6 +977,7 @@ border:1px solid var(--border2);border-radius:4px;padding:1px 6px;}
 background:var(--bg4);border:1px solid var(--border2);border-radius:9px;padding:5px;
 box-shadow:0 14px 44px rgba(0,0,0,.55);}
 .ctx-it:hover > .ctx-sub{display:block;}
+.ctx-it.off:hover > .ctx-sub{display:none;}
 .ctx-sub .ctx-it{font-family:var(--mono);font-size:11.5px;}
 /* A filter entry is three lines: what it does, how far it reaches, and the
    pattern itself. The pattern alone was ambiguous — "KADAZ/" and
@@ -1446,6 +1451,12 @@ body.cmpmode #auto-switch + .slider,body.cmpmode .autorow{opacity:.35;pointer-ev
 /* (0.9.7) A short window left the COMPARE panels 0 px high: they keep room
    for a dozen rows, and the column scrolls instead. */
 body.cmpmode #content{overflow-y:auto;}
+/* (1.1.5) That scroll box clips too: room for the glows below the last row
+   and in the 12 px gap on the left, without moving anything. */
+body.cmpmode #content{padding:0 0 26px 12px;margin:0 0 -26px -12px;}
+/* That room overlaps the sidebar's splitter and the footer: both stay on
+   top, so they can still be dragged and clicked. */
+#split-sb,#footer{position:relative;z-index:2;}
 body.cmpmode #gridwrap{min-height:330px;flex-shrink:0;flex-basis:auto;}
 @media (min-height:900px){ body.cmpmode #gridwrap{flex:1;min-height:330px;} }
 #btn-verify .mico{color:var(--text2);background:rgba(255,255,255,.06);border-radius:var(--r-field);}
@@ -1558,6 +1569,38 @@ body.lassoing .tooltip-float{display:none !important;}
 .pb-fill{background:linear-gradient(90deg,var(--pb-color,var(--green)),var(--pb-color2,var(--green)));}
 /* (1.1.4) RETRYING: the strip in orange while it waits to try a file again. */
 #bottombar.retrying .pb-title{color:var(--orange);}
+/* (1.1.5) Settings: a card per category, its title on a bar of its own with
+   an icon; two tabs, the job's settings and syncto's. */
+/* A light tint, not --ins: the fields inside use --ins and must stand out. */
+#ov-settings .set-section{background:rgba(255,255,255,.035);border-radius:12px;padding:0 16px 8px;margin:0 0 12px;}
+#ov-settings .set-sec-title{display:flex;align-items:center;gap:9px;margin:0 -16px 12px;padding:17px 16px 12px;
+  font-size:12.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--text);
+  border-bottom:1px solid var(--border);}
+#ov-settings .set-sec-title svg{width:15px;height:15px;flex-shrink:0;color:var(--text2);}
+.st-tabs{display:flex;gap:6px;margin:4px 0 16px;}
+.st-tab{padding:8px 14px;border:none;border-radius:9px;background:transparent;color:var(--text2);
+  font:700 12.5px/1.2 var(--font);text-align:left;cursor:pointer;}
+.st-tab:hover{color:var(--text);}
+.st-tab.on{background:var(--ins);color:var(--text);}
+.st-tab small{display:block;margin-top:2px;font-weight:500;font-size:11px;color:var(--text3);}
+/* (1.1.5) The toolbar on two lines: every label on the first, every control
+   centred on the second (30 px), the view switches and the search included. */
+#toolbar{align-items:flex-end;}
+#toolbar .tgroup > label{line-height:12px;}
+#toolbar .tgroup > .seg{margin:2px 0;}
+#toolbar #btn-filter{margin:1px 0;}
+#toolbar .autorow{height:30px;padding-top:0;}
+#toolbar > .viewopt{height:30px;}
+#toolbar > #search{height:30px;box-sizing:border-box;}
+/* (1.1.5) The minutes field: the number and "min" in one box. */
+.autorow .min-field{display:inline-flex;align-items:center;height:30px;padding:0 10px 0 0;
+  background:var(--ins);border-radius:var(--r-field);cursor:text;}
+.autorow .min-field:focus-within{box-shadow:var(--focus);}
+.autorow .min-field input[type=number]{width:44px;height:30px;padding:0 2px 0 10px;background:transparent;border:none;box-shadow:none;outline:none;}
+/* The arrows would sit between the number and "min": the keyboard arrows and typing still work. */
+.autorow .min-field input[type=number]::-webkit-inner-spin-button,
+.autorow .min-field input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0;}
+.autorow .min-field .autolbl{font-size:11px;color:var(--text3);}
 /* "Reduce motion": the spinning ring and STOP's glow stop too. */
 @media (prefers-reduced-motion:reduce){
   .ring-fill.spin{animation:none;}
@@ -1576,7 +1619,13 @@ body.lassoing .tooltip-float{display:none !important;}
    the list away). */
 @media (max-width:1200px){
   #toolbar{gap:10px;padding-left:12px;padding-right:12px;}
-  #search{width:120px;}
+  /* The search field takes what is left (90 px at least). In the narrowest
+     windows it goes to a line of its own, on the right. */
+  #search{width:auto;flex:1 1 90px;min-width:90px;max-width:180px;margin-left:auto;}
+  #toolbar .tool-spacer{flex:0 1 0;min-width:0;}
+  #toolbar .seg button{padding-left:8px;padding-right:8px;}
+  /* (1.1.5) Room for the Read back switch: "identical", "excluded". */
+  #toolbar .vo-show{display:none;}
   #toolbar .viewopt{font-size:11.5px;gap:6px;}
 }
 /* Short windows: the strip loses its decoration before the list loses rows. */
@@ -1778,18 +1827,25 @@ body.lassoing .tooltip-float{display:none !important;}
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 20a1 1 0 0 0 .553.895l2 1A1 1 0 0 0 14 21v-7a2 2 0 0 1 .517-1.341L21.74 4.67A1 1 0 0 0 21 3H3a1 1 0 0 0-.742 1.67l7.225 7.989A2 2 0 0 1 10 14z"/></svg>
     </button>
   </div>
+  <!-- (1.1.5) In the toolbar, not in Settings: turned on and off from one run
+       to the next (Noar). -->
+  <div class="tgroup"><label>Read back</label>
+    <div class="autorow" data-tip="Every copy is read again and compared with the fingerprint taken while writing (xxHash64). Off: faster, and no proof that the copies are intact.">
+      <label class="switch"><input type="checkbox" id="readback-switch" checked><span class="slider"></span></label>
+    </div>
+  </div>
   <div class="tgroup"><label>Auto-sync</label>
     <div class="autorow" data-tip="Compare then synchronize automatically with the current settings, at the chosen interval. No confirmation dialogs while it runs: the summary only pops up on errors.">
       <label class="switch"><input type="checkbox" id="auto-switch"><span class="slider"></span></label>
       <span id="auto-count"></span>
-      <input id="auto-min" type="number" min="1" max="1440" value="30">
-      <span class="autolbl">min</span>
+      <!-- (1.1.5) The unit inside the field (Noar). -->
+      <label class="min-field"><input id="auto-min" type="number" min="1" max="1440" value="30"><span class="autolbl">min</span></label>
     </div>
   </div>
   <div class="tool-spacer"></div>
-  <span class="viewopt eq"><label class="switch"><input type="checkbox" id="chk-equal"><span class="slider"></span></label>Show identical</span>
-  <span class="viewopt"><label class="switch"><input type="checkbox" id="chk-excluded"><span class="slider"></span></label>Show excluded</span>
-  <input id="search" placeholder="Filter the view…" spellcheck="false">
+  <span class="viewopt eq"><label class="switch"><input type="checkbox" id="chk-equal"><span class="slider"></span></label><span><span class="vo-show">Show </span>identical</span></span>
+  <span class="viewopt"><label class="switch"><input type="checkbox" id="chk-excluded"><span class="slider"></span></label><span><span class="vo-show">Show </span>excluded</span></span>
+  <input id="search" placeholder="Filter…" data-tip="Show only the rows whose name contains this" spellcheck="false">
 </div>
 
 <!-- ── Grid ─────────────────────────────────────────────────────── -->
@@ -1985,18 +2041,38 @@ body.lassoing .tooltip-float{display:none !important;}
 <div class="ov" id="ov-settings">
   <div class="mcard">
     <div class="m-h1">Settings</div>
+    <!-- (1.1.5) Two kinds of settings, said: the job's (saved in its .syncto
+         file, they change with the job) and syncto's (every job). -->
+    <div class="st-tabs" role="tablist">
+      <button class="st-tab on" data-tab="job" role="tab" aria-selected="true">This job<small>saved in the .syncto file</small></button>
+      <button class="st-tab" data-tab="app" role="tab" aria-selected="false">syncto<small>every job</small></button>
+    </div>
+    <div class="st-pane" data-pane="job">
+
+    <div class="set-section" id="custom-section" style="display:none">
+      <div class="set-sec-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M21 3l-7 7"/><path d="M3 3l7 7"/><path d="M12 22v-8"/></svg><span>Custom directions</span></div>
+      <div class="set-row"><label>Only in source</label>
+        <select class="cust" data-k="leftOnly"><option value="right">copy to destination</option><option value="left">delete from source</option><option value="none">do nothing</option></select></div>
+      <div class="set-row"><label>Only in destination</label>
+        <select class="cust" data-k="rightOnly"><option value="left">copy back to source</option><option value="right">delete from destination</option><option value="none">do nothing</option></select></div>
+      <div class="set-row"><label>Source newer</label>
+        <select class="cust" data-k="leftNewer"><option value="right">overwrite destination</option><option value="left">overwrite source</option><option value="none">do nothing</option></select></div>
+      <div class="set-row"><label>Destination newer</label>
+        <select class="cust" data-k="rightNewer"><option value="left">overwrite source</option><option value="right">overwrite destination</option><option value="none">do nothing</option></select></div>
+    </div>
 
     <div class="set-section">
-      <div class="set-sec-title">Main</div>
+      <div class="set-sec-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l-3 3 3 3"/><path d="M19 9l3 3-3 3"/><path d="M2 12h20"/></svg><span>Moves</span></div>
       <div class="set-row"><label>Detect moved files</label>
         <label class="switch"><input type="checkbox" id="st-moves" checked><span class="slider"></span></label>
         <span class="set-desc">rename instead of copying again</span></div>
       <div class="set-row"><label>Moves without history</label>
         <label class="switch"><input type="checkbox" id="st-moves-name"><span class="slider"></span></label>
-        <span class="set-desc" data-tip="For a folder reorganized by hand or by another tool, from the very first run: a file only in the source and a file only in the destination with the same name, size and date are taken as one file moved, when neither has another such twin. The destination copy is renamed instead of copied again. Anything ambiguous is copied as usual.">MIRROR: same name, size and date</span></div>
-      <div class="set-row"><label>Lock folders</label>
-        <label class="switch"><input type="checkbox" id="st-lock" checked><span class="slider"></span></label>
-        <span class="set-desc">one machine at a time on the same folders</span></div>
+        <span class="set-desc" data-tip="For a folder reorganized by hand or by another tool, from the very first run: a file only in the source and a file only in the destination with the same name, size and date are taken as one file moved, when neither has another such twin. The destination copy is renamed instead of copied again. Anything ambiguous is copied as usual. Not used when the job compares by content.">MIRROR: same name, size and date</span></div>
+    </div>
+
+    <div class="set-section">
+      <div class="set-sec-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><span>Copy</span></div>
       <div class="set-row"><label>Fail-safe copy</label>
         <label class="switch"><input type="checkbox" id="st-failsafe" checked><span class="slider"></span></label>
         <span class="set-desc">write to a temporary file, then rename it</span></div>
@@ -2016,6 +2092,13 @@ body.lassoing .tooltip-float{display:none !important;}
           <option value="both">Both sides</option>
         </select>
         <span class="set-desc">&lt; &gt; : &quot; | ? * become _</span></div>
+      <div class="set-row"><label>Write checksum</label>
+        <label class="switch"><input type="checkbox" id="st-cksum"><span class="slider"></span></label>
+        <span class="set-desc">syncto-checksums.xxh64 in each destination</span></div>
+    </div>
+
+    <div class="set-section">
+      <div class="set-sec-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg><span>Errors</span></div>
       <div class="set-row"><label>Retry on error</label>
         <input type="number" id="st-retry" min="0" max="20"><span class="set-unit">times, every</span>
         <input type="number" id="st-retry-delay" min="1" max="600"><span class="set-unit">s</span>
@@ -2023,16 +2106,20 @@ body.lassoing .tooltip-float{display:none !important;}
       <div class="set-row"><label>Continue on error</label>
         <label class="switch"><input type="checkbox" id="st-ignore"><span class="slider"></span></label>
         <span class="set-desc">skip a failed file and carry on</span></div>
-      <div class="set-row"><label>Read files back</label>
-        <label class="switch"><input type="checkbox" id="st-readback" checked><span class="slider"></span></label>
-        <span class="set-desc">every copy read again and compared (xxHash)</span></div>
-      <div class="set-row"><label>Write checksum</label>
-        <label class="switch"><input type="checkbox" id="st-cksum"><span class="slider"></span></label>
-        <span class="set-desc">syncto-checksums.xxh64 in each destination</span></div>
     </div>
 
     <div class="set-section">
-      <div class="set-sec-title">Servers</div>
+      <div class="set-sec-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg><span>Deletion</span></div>
+      <div class="set-row"><label>Default action</label>
+        <select id="st-deletion">
+          <option value="recycler">Move to trash</option>
+          <option value="permanent">Delete permanently</option>
+        </select>
+        <span class="set-desc">warned if no trash</span></div>
+    </div>
+
+    <div class="set-section">
+      <div class="set-sec-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 6h.01"/><path d="M6 18h.01"/></svg><span>Servers and shared folders</span></div>
       <div class="set-row"><label>Maximum simultaneous transfers</label>
         <select id="st-lanes">
           <option value="1">1</option>
@@ -2047,20 +2134,15 @@ body.lassoing .tooltip-float{display:none !important;}
           <option value="10">10</option>
         </select>
         <span class="set-desc">one connection each</span></div>
+      <div class="set-row"><label>Lock folders</label>
+        <label class="switch"><input type="checkbox" id="st-lock" checked><span class="slider"></span></label>
+        <span class="set-desc">one machine at a time on the same folders</span></div>
     </div>
+    </div>
+    <div class="st-pane" data-pane="app" style="display:none">
 
     <div class="set-section">
-      <div class="set-sec-title">Deletion</div>
-      <div class="set-row"><label>Default action</label>
-        <select id="st-deletion">
-          <option value="recycler">Move to trash</option>
-          <option value="permanent">Delete permanently</option>
-        </select>
-        <span class="set-desc">warned if no trash</span></div>
-    </div>
-
-    <div class="set-section">
-      <div class="set-sec-title">Notifications</div>
+      <div class="set-sec-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg><span>Phone notifications</span></div>
       <div class="set-row"><label>Phone notification</label>
         <label class="switch"><input type="checkbox" id="st-ntfy-en"><span class="slider"></span></label>
         <span class="set-desc">after every run, on your phone</span></div>
@@ -2081,14 +2163,17 @@ body.lassoing .tooltip-float{display:none !important;}
     </div>
 
     <div class="set-section">
-      <div class="set-sec-title">Remote control</div>
+      <div class="set-sec-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg><span>Remote control (Companion)</span></div>
       <div class="set-row"><label>Companion</label>
         <label class="switch"><input type="checkbox" id="st-remote-en"><span class="slider"></span></label>
         <span class="set-desc">start saved jobs from Bitfocus Companion</span></div>
       <div id="st-remote-detail" style="display:none">
         <div class="set-row"><label>Other machines</label>
           <label class="switch"><input type="checkbox" id="st-remote-lan"><span class="slider"></span></label>
-          <span class="set-desc">allow Companion on another computer</span></div>
+          <span class="set-desc" data-tip="The key travels unencrypted on the network: anyone listening on it can read it. On a shared network, name the Companion computers below.">allow Companion on another computer</span></div>
+        <div class="set-row" id="st-remote-allow-row"><label>Allowed addresses</label>
+          <input type="text" id="st-remote-allow" placeholder="192.168.1.20" spellcheck="false" style="max-width:200px">
+          <span class="set-desc" data-tip="The IP addresses of the computers running Companion, separated by spaces or commas. Empty: any computer on the network that has the key. This computer is always allowed.">empty: any computer</span></div>
         <div class="set-row"><label>Port</label>
           <input type="number" id="st-remote-port" min="1024" max="65535" style="max-width:110px"></div>
         <div class="set-row" style="flex-wrap:wrap;gap:6px 8px"><label style="margin-right:4px">Key</label>
@@ -2099,21 +2184,10 @@ body.lassoing .tooltip-float{display:none !important;}
           <span class="set-test-res" id="st-remote-res"></span></div>
       </div>
     </div>
-
-    <div class="set-section" id="custom-section" style="display:none">
-      <div class="set-sec-title">Custom directions</div>
-      <div class="set-row"><label>Only in source</label>
-        <select class="cust" data-k="leftOnly"><option value="right">copy to destination</option><option value="left">delete from source</option><option value="none">do nothing</option></select></div>
-      <div class="set-row"><label>Only in destination</label>
-        <select class="cust" data-k="rightOnly"><option value="left">copy back to source</option><option value="right">delete from destination</option><option value="none">do nothing</option></select></div>
-      <div class="set-row"><label>Source newer</label>
-        <select class="cust" data-k="leftNewer"><option value="right">overwrite destination</option><option value="left">overwrite source</option><option value="none">do nothing</option></select></div>
-      <div class="set-row"><label>Destination newer</label>
-        <select class="cust" data-k="rightNewer"><option value="left">overwrite source</option><option value="right">overwrite destination</option><option value="none">do nothing</option></select></div>
     </div>
 
     <div class="m-btns">
-      <button class="m-btn" id="set-close">Close</button>
+      <button class="m-btn" id="set-close">Save &amp; close</button>
     </div>
   </div>
 </div>

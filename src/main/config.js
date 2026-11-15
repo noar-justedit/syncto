@@ -579,6 +579,8 @@ class Prefs {
       port   : Number.isInteger(port) && port >= 1024 && port <= 65535 ? port : 7531,
       lan    : !!r.lan,
       key    : typeof r.key === 'string' ? r.key : '',
+      // The other machines allowed to connect (Companion's address), as typed.
+      allow  : typeof r.allow === 'string' ? r.allow.slice(0, 1000) : '',
     };
   }
 
@@ -586,6 +588,7 @@ class Prefs {
     const r = Object.assign({}, this.remoteConfig());
     if (patch.enabled !== undefined) r.enabled = !!patch.enabled;
     if (patch.lan !== undefined) r.lan = !!patch.lan;
+    if (patch.allow !== undefined) r.allow = String(patch.allow).slice(0, 1000);
     if (patch.port !== undefined) {
       const p = Number(patch.port);
       if (Number.isInteger(p) && p >= 1024 && p <= 65535) r.port = p;

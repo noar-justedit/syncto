@@ -52,7 +52,7 @@ const XFER_CONCURRENCY = 64;
 // or 128 × 254 KB), enough for ~200 MB/s at 150 ms on one connection.
 const MAX_READ_BYTES = 32 * 1024 * 1024;
 const MAX_READ_DEPTH = MAX_READ_BYTES / XFER_CHUNK;
-const READ_STALL_MS = 60000;
+const STALL_MS = 60000;
 
 const { Readable, Writable } = require('stream');
 const { performance } = require('perf_hooks');
@@ -94,8 +94,32 @@ class PipelinedWriter extends Writable {
     sftp.open(this.remotePath, this.start > 0 || this.noTruncate ? 'r+' : 'w', (err, handle) => {
       if (err) return cb(err);
       this.handle = handle;
+      this._watch();
       cb();
     });
+  }
+
+  // Same rule as the reader: writes out and no reply for a minute (while the
+  // connection's keepalives still answer) end the upload as a network error,
+  // instead of waiting for ever.
+  _watch() {
+    this.lastReply = Date.now();
+    if (this._watchTimer) return;
+    this._watchTimer = setInterval(() => {
+      if (this.inflight > 0 && Date.now() - this.lastReply > STALL_MS) {
+        this._unwatch();
+        this._fail(Object.assign(new Error('The server stopped answering.'), { network: true }));
+      }
+    }, 5000);
+    if (this._watchTimer.unref) this._watchTimer.unref();
+  }
+  _unwatch() { if (this._watchTimer) { clearInterval(this._watchTimer); this._watchTimer = null; } }
+
+  // Records the failure and wakes whoever waits for room or for the end.
+  _fail(err) {
+    if (!this.failure) this.failure = err;
+    if (this._resume) { const go = this._resume; this._resume = null; go(this.failure); }
+    if (this._drained) { const d = this._drained; this._drained = null; d(); }
   }
 
   _issue(buf) {
@@ -104,6 +128,7 @@ class PipelinedWriter extends Writable {
     this.pos += buf.length;
     this.owner.sftp.write(this.handle, buf, 0, buf.length, at, err => {
       this.inflight--;
+      this.lastReply = Date.now();
       if (err && !this.failure) this.failure = err;
       // Whoever is waiting for room, or for the last write to land.
       if (this._resume && (this.inflight < this.limit || this.failure)) {
@@ -135,6 +160,7 @@ class PipelinedWriter extends Writable {
 
   _final(cb) {
     const done = () => {
+      this._unwatch();
       if (this.failure) return cb(this.failure);
       // A file with no bytes never reached _write, so it was never opened —
       // and an empty source produced NO FILE AT ALL on the target, silently.
@@ -149,6 +175,7 @@ class PipelinedWriter extends Writable {
   }
 
   _destroy(err, cb) {
+    this._unwatch();
     this._resume = null; this._drained = null;
     if (this.handle && this.owner.sftp) {
       try { this.owner.sftp.close(this.handle, () => {}); } catch (_) {}
@@ -251,7 +278,7 @@ class PipelinedReader extends Readable {
     this.lastReply = Date.now();
     if (this._watchTimer) return;
     this._watchTimer = setInterval(() => {
-      if (this.inflight > 0 && Date.now() - this.lastReply > READ_STALL_MS) {
+      if (this.inflight > 0 && Date.now() - this.lastReply > STALL_MS) {
         this._unwatch();
         this.destroy(Object.assign(new Error('The server stopped answering.'), { network: true }));
       }
