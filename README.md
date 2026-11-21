@@ -467,6 +467,15 @@ strange symbol) is left out while the option is on.
 
 ### When it finishes
 
+**Export report**, on the card that closes a run, saves a PDF of that run
+only: the job, its mode, the source and the destination, when it started and
+ended, how long it took, the result, then every file copied with its size,
+how it was checked (verified, verified by the server, not read back, failed)
+and its XXH64 fingerprint, and what was removed or moved. What the destination
+already held is not in it: on a shoot, one report per day of transfers. It is
+kept light (one font, no image, about 80 bytes a file). The report can be
+exported until the next run; closing the card or quitting syncto drops it.
+
 The power icon in the title bar offers *Do nothing*, *Quit syncto*, *Sleep* and
 *Shut down*. It can be changed while the files are being copied — the choice is
 read when the run ends — and it is saved with the job.

@@ -4,6 +4,16 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [1.1.7] — 2026-11-21
+
+### Added
+
+- **Export report** on the card that closes a run: a PDF of that run only.
+  It lists the job, mode, source, destination, start, end, duration and
+  result, then every file copied with its size, its check and its XXH64,
+  and what was removed or moved. Light: one font, no image. Asked by Manuel
+  López, for a record of each day's transfers on a shoot.
+
 ## [1.1.6] — 2026-11-15
 
 Fixes from the code review of 15/11/2026.

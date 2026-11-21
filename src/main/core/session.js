@@ -1158,6 +1158,7 @@ class Session {
       durationMs: endedAt - startedAt,
       checksumFiles: sidecars,
       dbStamp,
+      report   : run.report,
     };
   }
 
@@ -2077,6 +2078,7 @@ class MultiSession {
     let verified = 0, serverChecked = 0, notReadBack = 0, checkSkipped = false;
     const allErrors = [], allNotes = [], checksumFiles = [];
     const dbSaved = [];
+    const reportPairs = [];   // what each pair did, file by file (the exportable report)
 
     // (0.9.0) A pair that stopped was reported as "Completed with 1 error":
     // the flag never left the pair. With "Continue on error" off the next
@@ -2171,6 +2173,7 @@ class MultiSession {
       })));
       allNotes.push(...res.notes.map(n => multi ? `[${pairLabel(pr)}] ${n}` : n));
       checksumFiles.push(...(res.checksumFiles || []));
+      if (res.report) reportPairs.push(Object.assign({ left: redactLocation(pr.left), right: redactLocation(pr.right) }, res.report));
       cancelled = cancelled || res.cancelled;
       if (res.stopped && !stopped) { stopped = true; stopReason = res.stopReason || 'error'; }
     }
@@ -2226,6 +2229,7 @@ class MultiSession {
       locked: locks ? locks.count : 0,
       pairsDone: perPair.length, pairsTotal: this.pairs.length,
       dbSaved,
+      report: { pairs: reportPairs },
     };
     } finally {
       // The last thing a run does, and it talks to the server. Announced, so a

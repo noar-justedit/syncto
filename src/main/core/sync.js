@@ -193,6 +193,10 @@ class SyncRunner {
     // read back or not: their old lines in the checksum list are out of date.
     this.written   = { left: new Set(), right: new Set() };
     this.retries   = new Set();  // retry waits in progress, one per lane at most
+    // What this run did, file by file, for the report a person can export
+    // afterwards: what was copied (and how it was checked), deleted, moved.
+    // Paths in each side's own spelling.
+    this.report    = { copied: [], deleted: [], moved: [] };
     this.errors    = [];
     this.notes     = [];
     this.checksums = { left: [], right: [] };
@@ -1107,6 +1111,8 @@ class SyncRunner {
     if (!this._wrote) this._wrote = new Set();
     this._wrote.add(to + '\u0000' + n.rel);
     this.written[to].add(this.relOn(n, to));
+    const entry = { rel: this.relOn(n, to), side: to, size: srcStat.size, hash: copied.digest || null, replaced: !!existed, check: '' };
+    this.report.copied.push(entry);
 
     let mtimeKept = false;
     if (this.cfg.preserveTimes !== false) {
@@ -1123,7 +1129,7 @@ class SyncRunner {
     // verification pass, which happens once every file has been copied.
     if (algo) {
       this.toVerify.push({
-        rel: n.rel, side: to, path: dst,
+        rel: n.rel, side: to, path: dst, entry,
         // What the checksum list must name: the spelling the file really has
         // on THAT side. Writing the canonical NFC form made Verify Folder
         // report an intact accented file as missing on a byte-exact
@@ -1313,6 +1319,7 @@ class SyncRunner {
       notes    : this.notes,
       checksums: this.checksums,
       written  : this.written,
+      report   : this.report,
       verified : this.toVerify.filter(v => v.ok).length,
       notReadBack: this.notReadBack || 0,
       checkSkipped: !!this.checkSkipped,
@@ -1504,6 +1511,7 @@ class SyncRunner {
         // The side that didn't rename already had the file at the new path,
         // so its id comes straight from the comparison.
         this.record(item.n, true, { side: item.side, moved: true, from: item.fromRel });
+        this.report.moved.push({ side: item.side, from: item.fromNode ? this.relOn(item.fromNode, item.side) : item.fromRel, rel: this.relOn(item.n, item.side) });
         this.applied.set(item.n.rel, {
           ok: true, mtime: res.mtime, size: res.size,
           idL: item.side === 'left'  ? res.newId : (item.n.left.id  || null),
@@ -1535,6 +1543,7 @@ class SyncRunner {
         });
         this.done.deleted++;
         this.record(n, true, { side, how, deleted: true });
+        if (how !== 'gone') this.report.deleted.push({ rel: this.relOn(n, side), side, size: (n[side] && n[side].size) || 0, how, folder: false });
         this.applied.set(n.rel, { ok: true, deleted: true });
       } catch (err) {
         this.record(n, false, { side, error: err.message || String(err) });
@@ -1681,6 +1690,7 @@ class SyncRunner {
             if (back !== item.digest) throw new Error(`Checksum mismatch (${item.algo}).`);
           }
           item.ok = true;
+          item.entry.check = viaServer ? 'server' : 'read';
           await this.keepDate(fsx, item);
           if (this.cfg.writeChecksumList) {
             this.checksums[item.side].push({ rel: item.listRel || item.rel, hash: item.digest, size: item.size });
@@ -1690,6 +1700,7 @@ class SyncRunner {
           // inFlight negative in the progress payload.
           if (/cancelled/i.test(err.message || '')) return;
           item.ok = false;
+          item.entry.check = 'failed';
           this.done.errors++;
           this.errors.push({ rel: item.rel, message: err.message || String(err) });
           // The file already carries its final name, so the database must NOT
@@ -1731,9 +1742,10 @@ class SyncRunner {
       if (this.token.cancelled) break;
       this.current = n.rel;
       try {
-        await this.dispose(side, n, true);
+        const how = await this.dispose(side, n, true);
         this.done.deleted++;
         this.record(n, true, { side, deleted: true });
+        this.report.deleted.push({ rel: this.relOn(n, side), side, size: 0, how, folder: true });
         this.applied.set(n.rel, { ok: true, deleted: true });
       } catch (err) {
         this.record(n, false, { side, error: err.message || String(err) });

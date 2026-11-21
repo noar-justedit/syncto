@@ -2262,7 +2262,25 @@ function showSummary(res) {
   $('sum-files').innerHTML = files
     .map(f => `<span class="file-link" data-path="${esc(f)}">${esc(f)}</span>`).join('');
 
+  $('sum-report').style.display = res.reportReady ? '' : 'none';
+  $('sum-report').disabled = false;
   $('ov-summary').classList.add('open');
+}
+
+// The report of this run, as a PDF where the person chooses. Once saved, its
+// path joins the files listed on the card (a click shows it).
+async function exportReport() {
+  const btn = $('sum-report');
+  btn.disabled = true;
+  const res = await API.reportExport().catch(err => ({ ok: false, error: err.message || String(err) }));
+  btn.disabled = false;
+  if (res && res.ok) {
+    $('sum-files').insertAdjacentHTML('beforeend', `<span class="file-link" data-path="${esc(res.path)}">${esc(res.path)}</span>`);
+  } else if (res && !res.canceled) {
+    // Said on the card, which is in front of the status bar.
+    $('sum-notes').style.display = '';
+    $('sum-notes-body').insertAdjacentHTML('afterbegin', `<div class="err-item">The report could not be saved: ${esc(res.error)}</div>`);
+  }
 }
 
 $('sum-files').addEventListener('click', e => {
@@ -2334,6 +2352,7 @@ function showError(title, msg) {
   setCopyBlock('sum-errors-body', [msg], copyHeader(title));
   $('sum-notes').style.display = 'none';
   $('sum-files').innerHTML = '';
+  $('sum-report').style.display = 'none';
   $('ov-summary').classList.add('open');
 }
 
@@ -2477,6 +2496,7 @@ function bind() {
   });
   $('cf-ok').addEventListener('click', doSync);
   $('sum-close').addEventListener('click', () => $('ov-summary').classList.remove('open'));
+  $('sum-report').addEventListener('click', exportReport);
   $('vf-close').addEventListener('click', () => { API.verifyCancel(); $('ov-verify').classList.remove('open'); });
 
   $('btn-skipcheck').addEventListener('click', async () => {
@@ -5077,7 +5097,9 @@ function installOverlayFocus() {
         setTimeout(() => {
           if (!ov.classList.contains('open') || ov.contains(document.activeElement)) return;
           const f = focusables(ov);
-          const first = f.find(x => x.classList.contains('m-btn')) || f[0];
+          // A button marked data-default takes it (Close on the summary card,
+          // not Export report beside it); otherwise the first button.
+          const first = f.find(x => x.dataset.default != null) || f.find(x => x.classList.contains('m-btn')) || f[0];
           if (first) first.focus();
         }, 0);
       } else if (!open && before.has(ov)) {

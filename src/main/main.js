@@ -959,6 +959,7 @@ ipcMain.handle('invert-all',    () => editPlan(() => session.invertAll()));
 ipcMain.handle('sync', (_, job) => exclusive('A synchronization', async () => {
   tokens.sync.cancelled = false;
   tokens.sync.skipCheck = false;
+  lastReport = null;
   remote.job = (job && job.name) || '';
   tokens.sync.paused = false;
   holdSleep(true);
@@ -972,6 +973,7 @@ ipcMain.handle('sync', (_, job) => exclusive('A synchronization', async () => {
       trashItem,
       onProgress: p => send('sync-progress', p),
     });
+    keepReport(job, res);
     remoteResult({
       result: res.cancelled ? 'cancelled' : res.errors.length || res.stopped || res.lockLost ? 'error' : 'done',
       job: job && job.name, files: res.counters.files, bytes: res.counters.bytes, deleted: res.counters.deleted,
@@ -999,6 +1001,7 @@ ipcMain.handle('compare-copy', (_, job, sel, to, dryRun) => exclusive(dryRun ? '
   tokens.sync.cancelled = false;
   tokens.sync.skipCheck = false;
   tokens.sync.paused = false;
+  lastReport = null;
   holdSleep(true);
   try {
     const res = await session.copyItems(job, sel, to, {
@@ -1006,6 +1009,7 @@ ipcMain.handle('compare-copy', (_, job, sel, to, dryRun) => exclusive(dryRun ? '
       trashItem,
       onProgress: p => send('sync-progress', p),
     });
+    keepReport(job, res);
     return { ok: true, ...res, stats: session.stats };
   } catch (err) {
     return { ok: false, error: err.message || String(err), cancelled: /cancelled/i.test(err.message || ''), stats: session.stats };
@@ -1013,6 +1017,34 @@ ipcMain.handle('compare-copy', (_, job, sel, to, dryRun) => exclusive(dryRun ? '
     holdSleep(false);
   }
 }));
+
+// ── The report of the last run (PDF, exported from the summary card) ──────
+// Kept here, file by file, until the next run: the window only gets the
+// totals, and asks for the PDF when the button is pressed.
+const { reportData, reportHtml, reportFileName, writeReportPdf } = require('./report');
+let lastReport = null;
+let reportDir = '';   // where the last report was saved, offered again
+function keepReport(job, res) {
+  lastReport = res && res.report ? reportData(job, res, appVersion()) : null;
+  if (res) { delete res.report; res.reportReady = !!lastReport; }
+}
+ipcMain.handle('report-export', async () => {
+  if (!lastReport) return { ok: false, error: 'No run to report on.' };
+  const pick = await dialog.showSaveDialog(win, {
+    title: 'Export the report',
+    defaultPath: path.join(reportDir || app.getPath('documents'), reportFileName(lastReport)),
+    filters: [{ name: 'PDF', extensions: ['pdf'] }],
+  });
+  if (pick.canceled || !pick.filePath) return { ok: false, canceled: true };
+  const file = /\.pdf$/i.test(pick.filePath) ? pick.filePath : pick.filePath + '.pdf';
+  try {
+    await writeReportPdf(reportHtml(lastReport), file, BrowserWindow, appVersion());
+    reportDir = path.dirname(file);
+    return { ok: true, path: file };
+  } catch (err) {
+    return { ok: false, error: err.message || String(err) };
+  }
+});
 
 ipcMain.handle('sync-cancel', () => { tokens.sync.cancelled = true; tokens.sync.paused = false; return true; });
 ipcMain.handle('sync-pause',  () => { tokens.sync.paused = true;  return true; });

@@ -92,6 +92,7 @@ const api = {
   syncCancel  : ()      => ipcRenderer.invoke('sync-cancel'),
   syncPause   : ()      => ipcRenderer.invoke('sync-pause'),
   syncSkipCheck: ()     => ipcRenderer.invoke('sync-skip-check'),
+  reportExport : ()     => ipcRenderer.invoke('report-export'),
   syncResume  : ()      => ipcRenderer.invoke('sync-resume'),
 
   verifyFolder: (p)     => ipcRenderer.invoke('verify-folder', p),
