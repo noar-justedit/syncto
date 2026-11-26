@@ -4,6 +4,31 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [1.1.8] — 2026-11-26
+
+### Fixed
+
+- **Windows: Mac drives read through MacDrive (APFS, HFS+) looked empty.**
+  Windows lists files that carry a reparse point as links, and such drivers
+  put one on ordinary files and folders; syncto leaves links out. The type of
+  each item now comes from the file itself, as Explorer sees it. Reported by
+  Manuel López.
+
+### Changed
+
+- **The progress ring covers the whole synchronization.** The big figure and
+  the thick ring no longer go back to 0 at each folder pair: they follow the
+  whole run, every pair, copy and read-back together. The thin outer ring and
+  the line under the figure follow the step going on (COPY, READ BACK).
+
+### Added
+
+- **A folder pair's heading takes the gestures of a folder**, in the grid and
+  in the overview: its box includes or excludes the whole pair, a click
+  selects it for Space or the right-click menu (Exclude temporarily, show its
+  folders), and a double-click in the overview shows that pair alone in the
+  grid.
+
 ## [1.1.7] — 2026-11-21
 
 ### Added

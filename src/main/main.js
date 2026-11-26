@@ -954,6 +954,7 @@ ipcMain.handle('set-direction', (_, indices, dir) => editPlan(() => session.setD
 ipcMain.handle('set-active',    (_, indices, act) => editPlan(() => session.setActive(indices, act)));
 ipcMain.handle('toggle-active', (_, indices) => editPlan(() => session.toggleActive(indices)));
 ipcMain.handle('invert-all',    () => editPlan(() => session.invertAll()));
+ipcMain.handle('pair-items',    (_, p) => session.pairItems(Number(p)));
 
 // ── IPC: synchronization ───────────────────────────────────────────────────
 ipcMain.handle('sync', (_, job) => exclusive('A synchronization', async () => {

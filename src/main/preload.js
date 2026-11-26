@@ -85,6 +85,7 @@ const api = {
   setDirection : (i,d)  => ipcRenderer.invoke('set-direction', i, d),
   setActive    : (i,a)  => ipcRenderer.invoke('set-active', i, a),
   toggleActive : (i)    => ipcRenderer.invoke('toggle-active', i),
+  pairItems  : (p)       => ipcRenderer.invoke('pair-items', p),
   invertAll    : ()     => ipcRenderer.invoke('invert-all'),
   visibleIndices:(v)    => ipcRenderer.invoke('visible-indices', v),
 

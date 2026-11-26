@@ -194,6 +194,16 @@ published here.
 - **Grid**: one row per item, left side on the left, right side on the right,
   the decided action in the middle.
 - **Bottom strip**: how many items will be created, updated or removed.
+- **During a run**, the big figure and the thick ring follow the whole
+  synchronization, every folder pair, copy and read-back together; the thin
+  outer ring and the line under the figure follow the step going on (COPY,
+  READ BACK) in the pair going on.
+- **Several folder pairs**: each pair has a heading, in the grid and in the
+  overview. It takes the gestures of a folder: its box (grid) includes or
+  excludes the whole pair, a click selects it for **Space** or the right-click
+  menu, and a double-click in the overview shows that pair alone in the grid.
+  The Keep / Skip filter patterns are not offered there: they belong to the
+  whole job and name items inside the pairs, never a pair itself.
 
 ### Settings
 

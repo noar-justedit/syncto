@@ -1513,6 +1513,8 @@ class MultiSession {
           return {
             hdr: true, idx: -1,
             pair: e.p + 1, pairs: this.pairs.length,
+            // Ticked while anything at the top of the pair is still included.
+            active: s.nodes.some(n => n.parent < 0 && n.active !== false),
             left: pr.left, right: pr.right, label: pairLabel(pr),
             // During a run the count follows the list as it empties.
             todo: s.nodes.some(n => n.doneInRun)
@@ -1571,6 +1573,15 @@ class MultiSession {
 
   setDirection(indices, dir) { return this._apply(indices, (s, l) => s.setDirection(l, dir)); }
   setActive(indices, act)    { return this._apply(indices, (s, l) => s.setActive(l, act)); }
+
+  // Everything at the top of pair `p` (global indices): what its heading in
+  // the grid or the overview stands for. Excluding these excludes the pair.
+  pairItems(p) {
+    const s = this.sessions && this.sessions[p];
+    if (!s) return { idx: [], active: false };
+    const top = s.nodes.filter(n => n.parent < 0);
+    return { idx: top.map(n => p * PAIR_BASE + n.idx), active: top.some(n => n.active !== false) };
+  }
   toggleActive(indices)      { return this._apply(indices, (s, l) => s.toggleActive(l)); }
 
   invertAll() {

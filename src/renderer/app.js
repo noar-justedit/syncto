@@ -41,6 +41,7 @@ const state = {
   missingPaths: [],
   auto   : { nextAt: 0, tick: null },   // auto-sync scheduler
   selIdx : null,                        // selected grid row (node idx)
+  selPair: null,                        // pair whose heading is selected in the grid
   // Folders unfolded in the overview, as `${pairIndex}:${rel}`. Kept in the
   // window, not in the job: it is a way of looking at one comparison, and a
   // new comparison starts folded.
@@ -612,7 +613,10 @@ const GH_ARROW = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" str
 
 function rowHtml(r, absIndex) {
   if (r.hdr) {
-    return `<div class="grow grow-hdr" data-tip="Pair ${r.pair}/${r.pairs}: ${esc(bidiLabel(r.left + ' → ' + r.right))}">
+    // A pair's heading takes the gestures of a row: its box, a click to select
+    // it (then Space), a right-click; they act on everything in the pair.
+    return `<div class="grow grow-hdr${r.active === false ? ' off' : ''}${state.selPair === r.pair - 1 ? ' sel' : ''}" data-pair="${r.pair - 1}" data-tip="Pair ${r.pair}/${r.pairs}: ${esc(bidiLabel(r.left + ' → ' + r.right))}. Click to select the pair, then Space or right-click.">
+      <div class="c-chk"><input type="checkbox" ${r.active === false ? '' : 'checked'} data-act="toggle"></div>
       <span class="gh-num">PAIR ${r.pair}</span>
       <span class="gh-path">${esc(r.left)}</span>
       <span class="gh-arrow">${GH_ARROW}</span>
@@ -649,12 +653,40 @@ function rowHtml(r, absIndex) {
   </div>`;
 }
 
+// A pair's heading in the grid: its box includes or excludes the whole pair,
+// a click selects it (Space then acts on it), as for any row.
+async function clickPairHead(e, p) {
+  if (state.busy) return;
+  if (state.ovSel.size) { clearOvSel(); refreshOverview(); }
+  if (e.target.closest('[data-act="toggle"]')) {
+    const items = await API.pairItems(p);
+    if (!items.idx.length) return;
+    state.stats = await API.setActive(items.idx, !items.active);
+    afterEdit();
+    await refreshOverview();
+    return;
+  }
+  state.selPair = state.selPair === p ? null : p;
+  state.selIdx = null;
+  await renderWindow();
+}
+
+// Right-click on a pair's heading (grid or overview): the menu for the pair.
+async function openPairCtx(x, y, p, batch) {
+  const items = await API.pairItems(p);
+  const pair = completePairs()[p] || {};
+  openCtx(x, y, { pairHead: true, left: pair.left, right: pair.right, active: items.active, batch: batch || items.idx });
+}
+
 // Clicking the action cell walks through the three sensible directions.
 const DIR_CYCLE = { right: 'left', left: 'none', none: 'right', conflict: 'right' };
 
 $('gridbody').addEventListener('click', async e => {
+  const head = e.target.closest('.grow-hdr[data-pair]');
+  if (head) { await clickPairHead(e, Number(head.dataset.pair)); return; }
   const row = e.target.closest('.grow');
-  if (!row || row.dataset.idx == null) return;   // pair headers are inert
+  if (!row || row.dataset.idx == null) return;
+  state.selPair = null;
   // Working in the grid ends the batch: a highlighted selection in zone 2 that
   // Space would still act on, while you are looking elsewhere, is a trap.
   if (state.ovSel.size) { clearOvSel(); refreshOverview(); }
@@ -839,9 +871,12 @@ function removeMenu() {
     (inc ? `<div class="ctx-it${off}">${CTX_SQ}<span class="lbl">Remove from the include filter</span><span class="sub-arrow">▶</span><div class="ctx-sub"><div class="ctx-head">Stop keeping only…</div>${inc}</div></div>` : '');
 }
 
+// `r.pairHead`: the heading of a folder pair in the overview. Its menu acts on
+// the whole pair; it has no Keep / Skip entries, since a filter pattern names
+// items inside the pairs, never a pair itself.
 function openCtx(x, y, r) {
   closeCtx();
-  const variants = filterVariants(r);
+  const variants = r.pairHead ? [] : filterVariants(r);
   // The pattern is still shown — it is what lands in the filter, and people
   // check it — but underneath the sentence, not instead of it.
   const sub = kind => variants.map(v =>
@@ -855,6 +890,8 @@ function openCtx(x, y, r) {
   // visible and inert. `undefined` means "we were not told" (the overview
   // builds a lighter row) — offer it and let the main process answer.
   const off = v => v === null ? ' off' : '';
+  // A pair's two folders: a server folder cannot be shown in the file manager.
+  if (r.pairHead) { r.l = r.left && !isServerAddress(r.left) ? r.left : null; r.r = r.right && !isServerAddress(r.right) ? r.right : null; }
   const reveal =
     `<div class="ctx-it${off(r.l)}" data-k="rv-left">${CTX_REVEAL}<span class="lbl">${REVEAL_VERB}: source</span></div>` +
     `<div class="ctx-it${off(r.r)}" data-k="rv-right">${CTX_REVEAL}<span class="lbl">${REVEAL_VERB}: destination</span></div>` +
@@ -867,9 +904,10 @@ function openCtx(x, y, r) {
   const busy = state.busy ? ' off' : '';
   m.innerHTML = reveal +
     `<div class="ctx-it${busy}" data-k="temp">${r.active ? CTX_SQ : CTX_SQ_CHK}<span class="lbl">Exclude temporarily</span><span class="key">Space</span></div>` +
+    (r.pairHead ? '' :
     `<div class="ctx-sep"></div>` +
     `<div class="ctx-it${busy}">${CTX_OK}<span class="lbl">Keep: add to the include filter</span><span class="sub-arrow">▶</span><div class="ctx-sub"><div class="ctx-head">Keep, from now on…</div>${sub('include')}</div></div>` +
-    `<div class="ctx-it${busy}">${CTX_KO}<span class="lbl">Skip: add to the exclude filter</span><span class="sub-arrow">▶</span><div class="ctx-sub"><div class="ctx-head">Skip, from now on…</div>${sub('exclude')}</div></div>` +
+    `<div class="ctx-it${busy}">${CTX_KO}<span class="lbl">Skip: add to the exclude filter</span><span class="sub-arrow">▶</span><div class="ctx-sub"><div class="ctx-head">Skip, from now on…</div>${sub('exclude')}</div></div>`) +
     removeMenu();
   document.body.appendChild(m);
 
@@ -887,9 +925,10 @@ function openCtx(x, y, r) {
     e.stopPropagation();
     closeCtx();
     if (it.classList.contains('off') || (it.closest('.ctx-it.off'))) return;
-    if (it.dataset.k === 'rv-left')       await revealNode(r.idx, 'left');
+    if (r.pairHead && /^rv-/.test(it.dataset.k)) await API.revealPath(it.dataset.k === 'rv-left' ? r.l : r.r);
+    else if (it.dataset.k === 'rv-left')  await revealNode(r.idx, 'left');
     else if (it.dataset.k === 'rv-right') await revealNode(r.idx, 'right');
-    else if (it.dataset.k === 'temp')     await toggleExcludeTemp(r.batch && r.batch.length > 1 ? r.batch : r.idx);
+    else if (it.dataset.k === 'temp')     await toggleExcludeTemp(r.batch && (r.batch.length > 1 || r.idx == null) ? r.batch : r.idx);
     else if (it.dataset.k === 'unexclude') await removeFilterPattern('exclude', it.dataset.p);
     else if (it.dataset.k === 'uninclude') await removeFilterPattern('include', it.dataset.p);
     else await addFilterPattern(it.dataset.k, it.dataset.p);
@@ -898,8 +937,17 @@ function openCtx(x, y, r) {
 
 $('gridbody').addEventListener('contextmenu', async e => {
   e.preventDefault();
+  const head = e.target.closest('.grow-hdr[data-pair]');
+  if (head) {
+    const p = Number(head.dataset.pair);
+    state.selPair = p; state.selIdx = null;
+    await renderWindow();
+    await openPairCtx(e.clientX, e.clientY, p);
+    return;
+  }
   const row = e.target.closest('.grow');
   if (!row || row.dataset.idx == null) return;
+  state.selPair = null;
   const idx = Number(row.dataset.idx);
   state.selIdx = idx;
   await renderWindow();
@@ -949,11 +997,17 @@ document.addEventListener('keydown', async e => {
   if (state.busy) return;   // (0.8.8) the run follows the plan it started with
   const picked = state.ovSel.size ? [...state.ovSel].map(k => state.ovByKey.get(k))
                                       .filter(g => g && g.idx >= 0).map(g => g.idx) : [];
-  if (!picked.length && state.selIdx == null) return;
+  if (!picked.length && state.selIdx == null && state.selPair == null) return;
   const a = document.activeElement;
   if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT')) return;
   if (document.querySelector('.ov.open')) return;
   e.preventDefault();
+  // A pair selected in the grid: everything in it, at once.
+  if (!picked.length && state.selPair != null) {
+    const items = await API.pairItems(state.selPair);
+    if (items.idx.length) { state.stats = await API.setActive(items.idx, !items.active); afterEdit(); await refreshOverview(); }
+    return;
+  }
   await toggleExcludeTemp(picked.length ? picked : state.selIdx);
 });
 
@@ -1169,6 +1223,7 @@ async function doCompare() {
   if (!completePairs().length) { alert('Set both folders of at least one pair first.'); return; }
 
   state.selIdx = null;      // the old selection indexes a tree about to vanish
+  state.selPair = null;
   state.view.scope = null;  // and so does the scope
   state.ovOpen.clear();     // and so do the folders unfolded in the overview
   clearOvSel();             // and the selection made inside it
@@ -1785,7 +1840,7 @@ function setBusyUi(on, title, steps) {
     $('pb-pct').textContent = '0%';
     $('pb-ring').setAttribute('stroke-dashoffset', RING_LEN);
     $('pb-ring-all').setAttribute('stroke-dashoffset', RING_ALL_LEN);
-    $('pb-pct-all').textContent = steps ? 'TOTAL 0%' : '';
+    $('pb-pct-all').textContent = steps ? 'COPY 0%' : '';
     $('pb-fill').style.width = '0%';
     $('s-files').textContent = '—'; $('s-size').textContent = '—';
     $('s-spd').textContent = '—'; $('s-eta').textContent = '—';
@@ -1985,15 +2040,19 @@ API.onSyncProgress(p => {
   const pct = p.bytesTotal > 0 ? Math.min(100, (p.bytesDone / p.bytesTotal) * 100)
             : p.itemsTotal > 0 ? (p.itemsDone / p.itemsTotal) * 100
             : p.filesTotal > 0 ? (p.filesDone / p.filesTotal) * 100 : 0;
-  // (0.8.7) The pass going on, from 0 to 100 %: inner ring and big figure.
-  // A pass with no bytes to move (deletions only) follows the whole run.
-  const passPct = p.pass === 'cleanup' ? 100          // (0.8.8) nothing left to move
+  // The big figure and the main (inner) ring: the whole synchronization, every
+  // pair, copy and read-back together, so it never goes back to 0 between
+  // pairs. The thin outer ring and the line under the figure: the pass going
+  // on (copy, then read-back) in the pair going on. A pass with no bytes to
+  // move (deletions only) follows the whole run.
+  const passPct = p.pass === 'cleanup' ? 100          // nothing left to move
     : p.passBytesTotal > 0
     ? Math.min(100, Math.max(0, (p.passBytesDone || 0) / p.passBytesTotal) * 100) : pct;
-  $('pb-pct').textContent = Math.round(passPct) + '%';
-  $('pb-ring').setAttribute('stroke-dashoffset', RING_LEN * (1 - passPct / 100));
-  $('pb-pct-all').textContent = 'TOTAL ' + Math.round(pct) + '%';
-  $('pb-ring-all').setAttribute('stroke-dashoffset', RING_ALL_LEN * (1 - pct / 100));
+  $('pb-pct').textContent = Math.round(pct) + '%';
+  $('pb-ring').setAttribute('stroke-dashoffset', RING_LEN * (1 - pct / 100));
+  $('pb-pct-all').textContent = p.pass === 'cleanup' ? 'FINISHING'
+    : (p.pass === 'verify' ? 'READ BACK ' : 'COPY ') + Math.round(passPct) + '%';
+  $('pb-ring-all').setAttribute('stroke-dashoffset', RING_ALL_LEN * (1 - passPct / 100));
   $('pb-fill').style.width = pct + '%';
   // With several files in flight, naming one of them and nothing else would
   // read as a single slow file. Say how many are going at once.
@@ -3039,9 +3098,15 @@ async function refreshOverview() {
     ? '<div class="ov-reset">Click the empty space below to <b>show everything</b> again.</div>'
     : '';
   box.classList.toggle('can-reset', viewIsNarrowed());
+  // A pair's heading is selected when all its top-level rows are.
+  const pairDone = new Map();
+  for (const g of ov.rows) if (g.depth === 0) {
+    const k = g.pairIdx + ':' + g.rel;
+    pairDone.set(g.pairIdx, (pairDone.get(g.pairIdx) !== false) && state.ovSel.has(k));
+  }
   const items = ov.rows.map(g => {
     const head = (multi && g.first)
-      ? `<div class="ov-pairhead"><span class="n">${g.pair}</span>${esc(bidiLabel(g.pairLabel))}</div>`
+      ? `<div class="ov-pairhead${pairDone.get(g.pairIdx) ? ' picked' : ''}${state.view.scope && state.view.scope.p === g.pairIdx && !state.view.scope.rel ? ' scoped' : ''}" data-pair="${g.pairIdx}" data-label="${esc(g.pairLabel)}" data-tip="Click: select the whole pair (then Space, or right-click) · double-click: show this pair alone"><span class="n">${g.pair}</span>${esc(bidiLabel(g.pairLabel))}</div>`
       : '';
     const scoped = state.view.scope && state.view.scope.p === g.pairIdx &&
                    state.view.scope.rel === g.rel;
@@ -3151,6 +3216,14 @@ function ovIndicesFor(key) {
              .map(g => g.idx);
 }
 
+// The keys of a pair's top-level rows: what its heading stands for.
+function ovPairKeys(pairIdx) {
+  return state.ovOrder.filter(k => {
+    const g = state.ovByKey.get(k);
+    return g && g.pairIdx === pairIdx && g.depth === 0;
+  });
+}
+
 function clearOvSel() {
   state.ovSel.clear();
   state.ovAnchor = null;
@@ -3185,7 +3258,8 @@ $('ov-head').addEventListener('click', async e => {
 function renderScopeBar() {
   const bar = $('scope-bar');
   const sc = state.view.scope;
-  if (!sc || !sc.rel) { bar.style.display = 'none'; return; }
+  // A whole pair (double-click on its heading) shows by its name alone.
+  if (!sc || (!sc.rel && !sc.label)) { bar.style.display = 'none'; return; }
   bar.style.display = '';
   $('scope-name').textContent = sc.rel;
   $('scope-pair').textContent = bidiLabel(sc.label || '');
@@ -3224,6 +3298,19 @@ async function setScope(pairIdx, rel, label) {
 }
 $('ov-list').addEventListener('click', async e => {
   if (lassoJustEnded) { lassoJustEnded = false; return; }   // the release of a lasso
+  // A pair's heading selects everything in that pair (Cmd/Ctrl adds it to
+  // the selection), for Space and the right-click menu to act on.
+  const head = e.target.closest('.ov-pairhead[data-pair]');
+  if (head) {
+    // Double-click: this pair alone, as a double-click on a folder shows that folder.
+    if (e.detail >= 2) { await openOvPair(Number(head.dataset.pair), head.dataset.label || ''); return; }
+    const keys = ovPairKeys(Number(head.dataset.pair));
+    if (!keys.length) return;
+    state.ovSel = new Set((e.metaKey || e.ctrlKey ? [...state.ovSel] : []).concat(keys));
+    state.ovAnchor = keys[keys.length - 1];
+    await refreshOverview();
+    return;
+  }
   const it = e.target.closest('.ov-row');
   // Nothing under the pointer: the empty part of the panel is the way back to
   // the whole run.
@@ -3285,6 +3372,14 @@ $('ov-list').addEventListener('click', async e => {
   state.ovAnchor = key;
   await refreshOverview();
 });
+
+// Double-click on a pair's heading: the grid shows that pair alone (again:
+// everything); in COMPARE mode, the panels show that pair.
+async function openOvPair(pairIdx, label) {
+  if (isCompareOnly()) { cmp.p = pairIdx; await cmpLoad(false); return; }
+  await setScope(pairIdx, '', label);
+  await renderWindow();
+}
 
 // Double-click: open the folder in the panel and show it in the grid. Read
 // from the click's own count rather than a 'dblclick' listener: the first
@@ -3387,6 +3482,23 @@ $('ov-list').addEventListener('mousedown', e => {
 });
 
 $('ov-list').addEventListener('contextmenu', async e => {
+  const head = e.target.closest('.ov-pairhead[data-pair]');
+  if (head) {
+    e.preventDefault();
+    const p = Number(head.dataset.pair);
+    const keys = ovPairKeys(p);
+    if (!keys.length) return;
+    if (!keys.every(k => state.ovSel.has(k))) { state.ovSel = new Set(keys); state.ovAnchor = keys[keys.length - 1]; }
+    await refreshOverview();
+    const rows = keys.map(k => state.ovByKey.get(k)).filter(g => g && g.idx >= 0);
+    const pair = completePairs()[p] || {};
+    openCtx(e.clientX, e.clientY, {
+      pairHead: true, left: pair.left, right: pair.right,
+      active: rows.some(g => g.active),
+      batch: ovIndicesFor(keys[0]),
+    });
+    return;
+  }
   const it = e.target.closest('.ov-row');
   if (!it) return;
   e.preventDefault();

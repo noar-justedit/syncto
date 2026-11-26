@@ -40,10 +40,15 @@ function fitBlock(size) {
 // serializes badly under load.
 const SCAN_LANES = 32;
 
-function typeOf(dirent) {
-  if (dirent.isSymbolicLink()) return 'symlink';
-  if (dirent.isDirectory())    return 'folder';
-  if (dirent.isFile())         return 'file';
+// The type of an entry, from lstat (or a directory entry when lstat failed).
+// lstat is the authority: on Windows, a directory listing calls anything with
+// a reparse point a link, and drivers for other file systems (MacDrive for
+// APFS and HFS+) put one on ordinary files and folders. Read from the listing,
+// a whole Mac drive looked like links, which syncto leaves out: empty folders.
+function typeOf(x) {
+  if (x.isSymbolicLink()) return 'symlink';
+  if (x.isDirectory())    return 'folder';
+  if (x.isFile())         return 'file';
   return 'other';
 }
 
@@ -180,7 +185,7 @@ class NativeFs {
         if (!st) continue;
         out[i] = {
           name : e.name,
-          type : typeOf(e),
+          type : typeOf(st),
           size : st.size,
           mtime: st.mtimeMs,
           id   : (st.dev != null && st.ino != null) ? `${st.dev}:${st.ino}` : null,

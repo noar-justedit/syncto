@@ -199,6 +199,12 @@ text-align:center;}
 font-size:10px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;
 color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .ov-pairhead:first-child{margin-top:2px;}
+/* The heading stands for the whole pair: a click selects it all, a
+   double-click shows the pair alone in the grid. */
+.ov-pairhead[data-pair]{cursor:pointer;border-radius:var(--r-field);}
+.ov-pairhead[data-pair]:hover{color:var(--text2);}
+.ov-pairhead.picked{color:var(--text);box-shadow:var(--focus);}
+.ov-pairhead.scoped{color:var(--text);background:var(--ins);}
 .ov-pairhead .n{flex-shrink:0;min-width:15px;height:15px;padding:0 4px;border-radius:4px;
 background:var(--accent-d);border:1px solid var(--accent-g);color:#c9b8ff;
 display:flex;align-items:center;justify-content:center;font-size:9.5px;letter-spacing:0;}
@@ -373,6 +379,10 @@ font-size:11px;font-weight:700;letter-spacing:.04em;cursor:pointer;transition:al
 .grow.grow-hdr{display:flex;align-items:center;gap:10px;background:var(--bg2);
 border-bottom:1px solid var(--border2);cursor:default;padding:0 10px;}
 .grow.grow-hdr:hover{box-shadow:none;}
+.grow.grow-hdr{cursor:pointer;}
+.grow.grow-hdr .c-chk{flex-shrink:0;}
+.grow.grow-hdr.sel{box-shadow:var(--focus);}
+.grow.grow-hdr.off .gh-path,.grow.grow-hdr.off .gh-num{opacity:.45;}
 .grow-hdr .gh-num{font-family:var(--mono);font-size:10px;font-weight:800;color:var(--accent);
 background:var(--accent-d);border-radius:4px;padding:1px 6px;flex-shrink:0;}
 .grow-hdr .gh-path{font-family:var(--mono);font-size:11.5px;color:var(--text2);
