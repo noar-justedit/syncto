@@ -100,7 +100,10 @@ const SYSTEM_SKIP = new Set([
 // thumbnails. Harmless, but rewritten whenever a folder is opened, so every
 // comparison would list them as changed. Ignored unless the job asks for an
 // exact mirror (compare.skipFinderFiles false).
-const FINDER_FILES = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini']);
+// "Icon" + carriage return is the Finder's custom folder icon: rewritten by the
+// Finder too, and refused by some recycle bins (a NAS), which left every
+// folder holding one undeletable.
+const FINDER_FILES = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini', 'Icon\r']);
 // Office's own temporary files: the owner file Word, Excel and PowerPoint put
 // beside an open document (~$Budget.xlsx), Word's working files while it saves
 // (~WRL0001.tmp, ~WRD0002.tmp) and LibreOffice's lock (.~lock.Budget.ods#).
@@ -136,6 +139,11 @@ const ALWAYS_SKIP = new Set([...SYSTEM_SKIP, ...FINDER_FILES]);
 // ".Trashes" and "$RECYCLE.BIN" are deliberately NOT here: they hold files
 // somebody deleted and may want back. A folder containing one of those is
 // refused, with an explanation.
+// A volume's own recycle bin, as each system names it: Synology (#recycle),
+// QNAP (@Recycle), Samba's recycle module (.recycle), Windows ($RECYCLE.BIN),
+// macOS (.Trashes). Never emptied by syncto: it holds files someone deleted
+// and may want back. A folder that holds nothing else is kept, and said so.
+const RECYCLE_FOLDERS = new Set(['#recycle', '@Recycle', '.recycle', '$RECYCLE.BIN', '.Trashes']);
 const OS_LITTER_FOLDERS = new Set([
   'System Volume Information', '.Spotlight-V100', '.fseventsd',
   '.TemporaryItems', '.DocumentRevisions-V100',
@@ -764,7 +772,7 @@ class Comparer {
 
 module.exports = {
   Comparer, CAT, OP, compareTime, sameTime, equalContent,
-  TEMP_EXT, OLD_EXT, DB_NAME, LOCK_NAME, CHECKSUM_FILE, OLD_CHECKSUM_FILE, ALWAYS_SKIP, SYSTEM_SKIP, FINDER_FILES, isOfficeTemp, skippedByChoice, OS_LITTER_FOLDERS,
+  TEMP_EXT, OLD_EXT, DB_NAME, LOCK_NAME, CHECKSUM_FILE, OLD_CHECKSUM_FILE, ALWAYS_SKIP, SYSTEM_SKIP, FINDER_FILES, RECYCLE_FOLDERS, isOfficeTemp, skippedByChoice, OS_LITTER_FOLDERS,
   isSyncToInternal,
   DEFAULT_TOLERANCE_SEC,
 };

@@ -34,7 +34,7 @@
 // SECOND PASS, once every file has been copied — same order as ingesto: copy
 // everything, then read everything back.
 
-const { OP, TEMP_EXT, OLD_EXT, ALWAYS_SKIP, OS_LITTER_FOLDERS, isSyncToInternal, equalContent, CHECKSUM_FILE } = require('./compare');
+const { OP, TEMP_EXT, OLD_EXT, ALWAYS_SKIP, OS_LITTER_FOLDERS, RECYCLE_FOLDERS, isSyncToInternal, equalContent, CHECKSUM_FILE } = require('./compare');
 const { scratchPath } = require('../fs/longname');
 const { plannedRenames } = require('./direction');
 const { clearLink } = require('./safewrite');
@@ -193,6 +193,7 @@ class SyncRunner {
     // read back or not: their old lines in the checksum list are out of date.
     this.written   = { left: new Set(), right: new Set() };
     this.retries   = new Set();  // retry waits in progress, one per lane at most
+    this.keptForBin = new Set(); // folders left in place: only a recycle bin in them
     // What this run did, file by file, for the report a person can export
     // afterwards: what was copied (and how it was checked), deleted, moved.
     // Paths in each side's own spelling.
@@ -724,10 +725,12 @@ class SyncRunner {
     try { entries = await fsx.readdir(path); } catch (_) { await fsx.rmdir(path); return; }
 
     // Only sweep when litter is ALL that stands in the way.
-    const files = [], folders = [], blockers = [];
+    const files = [], folders = [], blockers = [], bins = [];
     for (const e of entries) {
       if (e.type === 'folder') {
         if (OS_LITTER_FOLDERS.has(e.name)) folders.push(e.name);
+        // The volume's recycle bin, or a sub-folder kept for the same reason.
+        else if (RECYCLE_FOLDERS.has(e.name) || this.keptForBin.has(fsx.join(path, e.name))) bins.push(e.name);
         else blockers.push(e.name);
         continue;
       }
@@ -749,6 +752,13 @@ class SyncRunner {
         `Those items are outside this synchronization (excluded by a filter, a symbolic link, ` +
         `or the volume's own recycle bin), so syncto will not delete them. Remove the folder by hand ` +
         `if you want it gone.`);
+    }
+
+    // Nothing but the recycle bin left: the folder stays, which is expected,
+    // not a failure (the run says so in one note).
+    if (bins.length) {
+      this.keptForBin.add(path);
+      throw Object.assign(new Error('Kept: it holds the recycle bin of the volume.'), { keptForBin: true });
     }
 
     for (const name of files) {
@@ -1308,6 +1318,11 @@ class SyncRunner {
       // 0.8.8 fix only covered a STOP during the read-back itself).
       this.notReadBack = this.notReadBack || this.dropUnproven();
     }
+    if (this.keptForBin.size) {
+      const k = this.keptForBin.size;
+      this.notes.push(`${k} folder${k > 1 ? 's were' : ' was'} kept: ${k > 1 ? 'they hold' : 'it holds'} nothing but the ` +
+        'recycle bin of the volume (#recycle, $RECYCLE.BIN…), which syncto never empties. Empty that bin to remove them.');
+    }
     if (this.tooLong) {
       this.notes.push(`${this.tooLong} item${this.tooLong > 1 ? 's had paths' : ' had a path'} too long for the Windows ` +
         `recycle bin (over ${TRASH_MAX_PATH} characters): deleted permanently, as Explorer does.`);
@@ -1748,6 +1763,7 @@ class SyncRunner {
         this.report.deleted.push({ rel: this.relOn(n, side), side, size: 0, how, folder: true });
         this.applied.set(n.rel, { ok: true, deleted: true });
       } catch (err) {
+        if (err.keptForBin) continue;
         this.record(n, false, { side, error: err.message || String(err) });
         if (this.halt(err)) break;
       }

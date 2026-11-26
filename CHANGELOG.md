@@ -4,6 +4,20 @@ All notable changes to syncto are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versioning follows [Semantic Versioning](https://semver.org/lang/fr/).
 
+## [1.1.9] — 2026-11-26
+
+### Fixed
+
+- **A MIRROR to a NAS no longer ends in errors for folders it cannot remove
+  because of the Finder or of the NAS recycle bin.**
+  - The hidden `Icon` file of a folder with a custom icon is now a Finder
+    file, like `.DS_Store`: ignored by default, and removed with its folder.
+    A NAS recycle bin refused it, and the folder stayed with an error.
+  - A folder that holds nothing but the volume's recycle bin (`#recycle` on
+    Synology, `@Recycle` on QNAP, `$RECYCLE.BIN`, `.Trashes`) is kept, as
+    before, but said in one note instead of one error per folder. syncto
+    still never empties a recycle bin.
+
 ## [1.1.8] — 2026-11-26
 
 ### Fixed

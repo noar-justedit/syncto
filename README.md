@@ -614,8 +614,14 @@ volume's own folders (`.Spotlight-V100`, `.fseventsd`, `.TemporaryItems`,
 to each disk: copied elsewhere they mean nothing, they are often locked, and a
 MIRROR would delete the destination's own.
 
-**Finder files** (`.DS_Store`, `Thumbs.db`, `desktop.ini`: icon positions,
-folder views, thumbnails) are ignored too by default, because the Finder and
+A NAS keeps its own recycle bin in folders too (`#recycle` on Synology,
+`@Recycle` on QNAP). syncto never empties one. When a MIRROR removes a folder
+that holds nothing else, the folder stays where it is, and the run says so in
+one note rather than as an error.
+
+**Finder files** (`.DS_Store`, `Thumbs.db`, `desktop.ini`, and the hidden
+`Icon` file of a folder with a custom icon: icon positions, folder views,
+thumbnails) are ignored too by default, because the Finder and
 the Explorer rewrite them whenever a folder is opened and every comparison
 would list them as changed. Turn off **Filter › Finder files** for an exact
 mirror, for example when the result is checked with another tool.
